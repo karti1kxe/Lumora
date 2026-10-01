@@ -66,6 +66,12 @@ object UniversalSubtitleEngine {
                 // or inline \fn asks for a font that is genuinely unavailable, replace only
                 // that font name with the bundled universal fallback.
                 var sanitized = SubtitleFontManager.sanitizeAssForFallback(context, rawText)
+                // "Override ASS/SSA Styles" ON: the selected font becomes the font of EVERY style
+                // and inline \\fn (libass' force-style alone leaves inline \\fn and some styles alone).
+                val forcedFont = SubtitleFontManager.selectedFontRenderName
+                if (SubtitleFontManager.forceSelectedFontOnAss && !forcedFont.isNullOrBlank()) {
+                    sanitized = SubtitleFontManager.forceSelectedFontEverywhere(sanitized, forcedFont)
+                }
                 // Characters the selected font has no glyph for (music notes, symbols, other
                 // scripts) are drawn from the bundled Go Noto font instead of "tofu" boxes.
                 sanitized = SubtitleFontManager.applyGlyphFallback(context, sanitized)

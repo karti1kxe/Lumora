@@ -483,6 +483,81 @@ object SubtitleFontManager {
     }
 
     /**
+     * "Override ASS/SSA Styles" is ON (and Advanced ASS/SSA is not in charge): the user's selected
+     * font must be THE font of every style and every inline \\fn of a native ASS/SSA script.
+     * libass' own force-style only replaces the style fonts, so the subtitle text is rewritten
+     * here instead (see [forceSelectedFontEverywhere]).
+     */
+    @Volatile var forceSelectedFontOnAss: Boolean = false
+
+    /**
+     * Removes the inline font overrides that [applyGlyphFallback] injected earlier
+     * (`{\\fnGo Noto Current-Regular}` ... `{\\fn}`). Without this a later font change keeps drawing
+     * those characters (e.g. Hindi) with the old fallback font, even if the new font has them.
+     */
+    fun stripGlyphFallback(context: Context, assContent: String): String {
+        if (assContent.isBlank() || !assContent.contains("\\fn")) return assContent
+        return try {
+            val fbFile = bundledFallbackFile(context)
+            val fbName = if (fbFile.exists()) bundledFallbackName(fbFile) else BUNDLED_FALLBACK_FONT_FAMILY
+            val names = linkedSetOf(fbName, BUNDLED_FALLBACK_FONT_FAMILY)
+            var out = assContent
+            for (n in names) out = out.replace("{\\fn$n}", "")
+            out.replace("{\\fn}", "")
+        } catch (_: Throwable) {
+            assContent
+        }
+    }
+
+    /**
+     * Gives every Style line and every inline `\\fn` the same [fontName], so one font drives the
+     * whole script. Layout, colours, tags and timing are untouched.
+     */
+    fun forceSelectedFontEverywhere(assContent: String, fontName: String): String {
+        if (assContent.isBlank() || fontName.isBlank()) return assContent
+        return try {
+            val lines = assContent.split("\n").toMutableList()
+            var inStyles = false
+            var format = emptyList<String>()
+            var inEvents = false
+            val fnPattern = Regex("\\\\fn[^\\\\}]*")
+            for (i in lines.indices) {
+                val original = lines[i]
+                val t = original.trim()
+                if (t.startsWith("[") && t.endsWith("]")) {
+                    val low = t.lowercase(java.util.Locale.ROOT)
+                    inStyles = low == "[v4+ styles]" || low == "[v4 styles]"
+                    inEvents = low == "[events]"
+                    continue
+                }
+                if (inStyles && t.startsWith("Format:", ignoreCase = true)) {
+                    format = t.substringAfter(":").split(",").map { it.trim().lowercase(java.util.Locale.ROOT) }
+                    continue
+                }
+                if (inStyles && t.startsWith("Style:", ignoreCase = true)) {
+                    val idx = original.indexOf("Style:", ignoreCase = true)
+                    val head = original.substring(0, idx + 6)
+                    val parts = original.substring(idx + 6).split(",", limit = -1).toMutableList()
+                    val fontIndex = format.indexOf("fontname").takeIf { it >= 0 } ?: 1
+                    if (fontIndex in parts.indices) {
+                        val lead = if (parts[fontIndex].isNotEmpty() && parts[fontIndex].first() == ' ') " " else ""
+                        val vertical = parts[fontIndex].trim().startsWith("@")
+                        parts[fontIndex] = lead + (if (vertical) "@" else "") + fontName
+                        lines[i] = head + parts.joinToString(",")
+                    }
+                    continue
+                }
+                if (inEvents && original.contains("\\fn")) {
+                    lines[i] = fnPattern.replace(original) { "" }
+                }
+            }
+            lines.joinToString("\n")
+        } catch (_: Throwable) {
+            assContent
+        }
+    }
+
+    /**
      * PER-GLYPH FALLBACK. The user's selected font stays the font of the subtitle. Every character
      * that font has NO glyph for (music notes, symbols, other scripts...) is wrapped in a tiny
      * inline `{\fn<Go Noto>}...{\fn}` override so that it is drawn from the bundled Go Noto font

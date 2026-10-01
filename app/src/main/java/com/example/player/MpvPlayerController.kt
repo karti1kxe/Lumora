@@ -186,9 +186,11 @@ class MpvPlayerController {
      * fallback for characters it lacks) shows up right away, without touching playback.
      */
     private fun onSelectedSubtitleFontChanged(fontFamily: String?) {
-        val key = fontFamily?.trim().orEmpty()
+        val forceFont = subtitleOverrideAssSsaUserPref && !advancedAssGoverning
+        val key = fontFamily?.trim().orEmpty() + "|force=" + forceFont
         if (key == lastSelectedFontKey) return
         lastSelectedFontKey = key
+        SubtitleFontManager.forceSelectedFontOnAss = forceFont
         SubtitleFontManager.setSelectedFont(fontFamily)
         val ctx = mpvView?.context ?: return
         // Embedded ASS/SSA tracks are not rewritten by us; libass caches the font it resolved for
@@ -2598,12 +2600,17 @@ class MpvPlayerController {
             // Make sure any font named in the (edited) script, including an uploaded font, is
             // registered, then swap only genuinely missing fonts for the fallback font.
             try { SubtitleFontManager.syncFonts(context, currentFilePath, styled) } catch (_: Throwable) {}
+            val cleaned = SubtitleFontManager.stripGlyphFallback(context, renderText)
             val fixed = try {
-                SubtitleFontManager.replaceMissingFontsKeepingLayout(context, styled)
+                SubtitleFontManager.replaceMissingFontsKeepingLayout(context, cleaned)
             } catch (_: Throwable) {
                 null
             }
-            if (fixed != null) renderText = fixed
+            renderText = try {
+                SubtitleFontManager.applyGlyphFallback(context, fixed ?: cleaned)
+            } catch (_: Throwable) {
+                fixed ?: cleaned
+            }
         }
         val signature = "${binding.isAss}:${renderText.length}:${renderText.hashCode()}"
 
@@ -3120,12 +3127,22 @@ class MpvPlayerController {
             try { SubtitleFontManager.syncFonts(context, currentFilePath, text) } catch (_: Throwable) {}
             binding.fontsPrepared = true
         }
-        val base = if (overrides.isEmpty) text else AdvancedAssStyleEngine.apply(text, overrides)
+        // The loaded file is the prepared copy, which may already carry Go Noto glyph-fallback
+        // tags computed for the OLD font (e.g. every Hindi character wrapped in {\fnGo Noto...}).
+        // Those tags would keep overriding the font the user now picks in Advanced ASS/SSA, so
+        // they are removed first and recomputed below against the NEW fonts.
+        val cleanText = SubtitleFontManager.stripGlyphFallback(context, text)
+        val base = if (overrides.isEmpty) cleanText else AdvancedAssStyleEngine.apply(cleanText, overrides)
         val fontFixed = try {
             SubtitleFontManager.replaceMissingFontsKeepingLayout(context, base)
         } catch (_: Throwable) { null }
-        val renderText = fontFixed ?: base
-        val needsDerived = !overrides.isEmpty || fontFixed != null
+        val fontsReady = fontFixed ?: base
+        // Only characters the (new) style font really lacks get the Go Noto fallback.
+        val withFallback = try {
+            SubtitleFontManager.applyGlyphFallback(context, fontsReady)
+        } catch (_: Throwable) { fontsReady }
+        val renderText = withFallback
+        val needsDerived = !overrides.isEmpty || fontFixed != null || withFallback != text
         if (needsDerived) {
             val built = renderText
             signature = "${built.length}:${built.hashCode()}"
