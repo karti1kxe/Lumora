@@ -1,0 +1,290 @@
+name: Build APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build & Package APKs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      # ---------- 1. SOURCE & ASSETS ----------
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Fetch bundled subtitle font
+        run: |
+          set -e
+          mkdir -p app/src/main/assets/fonts
+          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+            -o app/src/main/assets/fonts/GoNotoCurrent-Regular.ttf \
+            "https://github.com/satbyy/go-noto-universal/releases/download/v7.0/GoNotoCurrent-Regular.ttf"
+          ls -lh app/src/main/assets/fonts/GoNotoCurrent-Regular.ttf
+
+      # ---------- 2. TOOLCHAIN SETUP ----------
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Verify Java environment
+        run: |
+          echo "=== Java Environment Verification ==="
+          java -version
+          javac -version
+          echo "JAVA_HOME=$JAVA_HOME"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          # Google ne purana "tools" package hata diya hai — action by-default
+          # "tools platform-tools" install karne ki koshish karta hai, jisse
+          # "Failed to find package 'tools'" error aakar poori job cancel ho jaati thi.
+          packages: 'platform-tools'
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      - name: Verify Android resources and SDK before Gradle
+        run: |
+          set -e
+          echo "=== Duplicate Android resource check ==="
+          DUPLICATES=$(find app/src/main/res -type f | sed 's#.*/##' | sort | uniq -d)
+          if [ -n "$DUPLICATES" ]; then
+            echo "::error::Duplicate resource filenames detected:"
+            echo "$DUPLICATES"
+            exit 1
+          fi
+          if find . -type d \( -iname "*icon-res*" -o -iname "res2" \) -not -path "*/build/*" | grep -q .; then
+            echo "::error::Unsupported parallel Android resource directory detected."
+            find . -type d \( -iname "*icon-res*" -o -iname "res2" \) -not -path "*/build/*"
+            exit 1
+          fi
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Setup Gradle (with caching)
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: Choose build command (project wrapper if present)
+        run: |
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
+            echo "Project ka apna gradlew mil gaya — usi version se build karenge (zyada stable)."
+          else
+            echo "GRADLE_CMD=gradle" >> "$GITHUB_ENV"
+            echo "gradlew nahi mila — system Gradle 9.3.1 se build hoga."
+          fi
+
+      - name: Increase Gradle memory headroom (avoid OOM kills)
+        run: |
+          mkdir -p ~/.gradle
+          {
+            echo "org.gradle.jvmargs=-Xmx4096m -XX:+HeapDumpOnOutOfMemoryError"
+            echo "org.gradle.parallel=true"
+            echo "org.gradle.caching=true"
+          } >> ~/.gradle/gradle.properties
+
+      - name: Create temporary debug keystore if missing
+        run: |
+          if [ ! -f "debug.keystore" ]; then
+            echo "debug.keystore not found, generating temporary debug keystore..."
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -alias androiddebugkey \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass android \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "Temporary debug keystore created successfully."
+          else
+            echo "Existing debug.keystore found."
+          fi
+
+      # ---------- 3. BUILD ----------
+      - name: Build Release APKs
+        run: |
+          $GRADLE_CMD :app:assembleRelease --stacktrace --no-daemon --console=plain --build-cache
+
+      # ---------- 4. VERIFY OUTPUT ----------
+      - name: Report APK DEX/smali file count (informational only)
+        run: |
+          APK_DIR="app/build/outputs/apk/release"
+          echo "### 🧩 DEX / smali File Count" >> "$GITHUB_STEP_SUMMARY"
+          echo "| APK | DEX files |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+          for APK in $(find "$APK_DIR" -type f -name "*.apk"); do
+            COUNT=$(unzip -l "$APK" | grep -oE 'classes[0-9]*\.dex' | sort -u | wc -l)
+            NAME=$(basename "$APK")
+            echo "-> $NAME: $COUNT dex file(s)"
+            echo "| \`$NAME\` | $COUNT |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          # Note: yeh sirf report karta hai, build ko FAIL nahi karta.
+          # 1 dex file bilkul normal hai (R8 minification poore app ko efficiently
+          # ek hi dex mein fit kar deta hai) — isko "exactly 3" par force karne ke
+          # liye app/build.gradle.kts mein custom multidex keep-list chahiye hogi,
+          # jo APK size badha sakti hai (aapka doosra goal, "size kam ho", ispar hi
+          # depend karta hai). Isliye build ko is number par cancel nahi karte.
+
+      - name: Locate and Verify Generated APKs across output folders
+        id: find_apks
+        run: |
+          BASE_APK_DIR="app/build/outputs/apk"
+          echo "=== Searching for generated APKs in $BASE_APK_DIR ==="
+
+          if [ ! -d "$BASE_APK_DIR" ]; then
+            echo "::error::Output directory $BASE_APK_DIR does not exist!"
+            exit 1
+          fi
+
+          echo "All generated APK files found:"
+          find "$BASE_APK_DIR" -type f -name "*.apk" -exec ls -lh {} +
+
+          TOTAL_APKS=$(find "$BASE_APK_DIR" -type f -name "*.apk" | wc -l)
+          if [ "$TOTAL_APKS" -eq 0 ]; then
+            echo "::error::No APK files found under $BASE_APK_DIR! Build failed."
+            exit 1
+          fi
+
+          ARM64=$(find "$BASE_APK_DIR" -type f -name "*arm64-v8a*.apk" | head -n 1)
+          ARMEABI=$(find "$BASE_APK_DIR" -type f -name "*armeabi-v7a*.apk" | head -n 1)
+          X86_64=$(find "$BASE_APK_DIR" -type f -name "*x86_64*.apk" | head -n 1)
+          X86=$(find "$BASE_APK_DIR" -type f -name "*x86*.apk" ! -name "*x86_64*" | head -n 1)
+          UNIVERSAL=$(find "$BASE_APK_DIR" -type f -name "*universal*.apk" | head -n 1)
+          if [ -z "$UNIVERSAL" ]; then
+            UNIVERSAL=$(find "$BASE_APK_DIR" -type f -name "*.apk" | head -n 1)
+          fi
+
+          FOUND_COUNT=0
+
+          if [ -n "$ARM64" ] && [ -f "$ARM64" ]; then
+            echo "arm64_path=$ARM64" >> $GITHUB_OUTPUT
+            echo "arm64_found=true" >> $GITHUB_OUTPUT
+            echo "✓ Found arm64-v8a: $ARM64 ($(du -h "$ARM64" | cut -f1))"
+            FOUND_COUNT=$((FOUND_COUNT + 1))
+          else
+            echo "::warning::arm64-v8a APK not found in $BASE_APK_DIR"
+            echo "arm64_found=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ -n "$ARMEABI" ] && [ -f "$ARMEABI" ]; then
+            echo "armeabi_path=$ARMEABI" >> $GITHUB_OUTPUT
+            echo "armeabi_found=true" >> $GITHUB_OUTPUT
+            echo "✓ Found armeabi-v7a: $ARMEABI ($(du -h "$ARMEABI" | cut -f1))"
+            FOUND_COUNT=$((FOUND_COUNT + 1))
+          else
+            echo "::warning::armeabi-v7a APK not found in $BASE_APK_DIR"
+            echo "armeabi_found=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ -n "$X86" ] && [ -f "$X86" ]; then
+            echo "x86_path=$X86" >> $GITHUB_OUTPUT
+            echo "x86_found=true" >> $GITHUB_OUTPUT
+            echo "✓ Found x86: $X86 ($(du -h "$X86" | cut -f1))"
+            FOUND_COUNT=$((FOUND_COUNT + 1))
+          else
+            echo "::warning::x86 APK not found in $BASE_APK_DIR"
+            echo "x86_found=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ -n "$X86_64" ] && [ -f "$X86_64" ]; then
+            echo "x86_64_path=$X86_64" >> $GITHUB_OUTPUT
+            echo "x86_64_found=true" >> $GITHUB_OUTPUT
+            echo "✓ Found x86_64: $X86_64 ($(du -h "$X86_64" | cut -f1))"
+            FOUND_COUNT=$((FOUND_COUNT + 1))
+          else
+            echo "::warning::x86_64 APK not found in $BASE_APK_DIR"
+            echo "x86_64_found=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ -n "$UNIVERSAL" ] && [ -f "$UNIVERSAL" ]; then
+            echo "universal_path=$UNIVERSAL" >> $GITHUB_OUTPUT
+            echo "universal_found=true" >> $GITHUB_OUTPUT
+            echo "✓ Found universal: $UNIVERSAL ($(du -h "$UNIVERSAL" | cut -f1))"
+            FOUND_COUNT=$((FOUND_COUNT + 1))
+          else
+            echo "::warning::universal APK not found in $BASE_APK_DIR"
+            echo "universal_found=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "=== Total matched ABI APKs: $FOUND_COUNT ==="
+
+          if [ "$FOUND_COUNT" -eq 0 ]; then
+            echo "::error::All target ABI APKs are missing! Check build outputs."
+            exit 1
+          fi
+
+          echo "### 📦 Build APK Artifacts Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Artifact Name | ABI / Variant | File Path | Size | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- | :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          [ -n "$ARM64" ] && echo "| \`app-arm64-v8a\` | arm64-v8a | \`$ARM64\` | $(du -h "$ARM64" | cut -f1) | ✅ Available |" >> $GITHUB_STEP_SUMMARY || echo "| \`app-arm64-v8a\` | arm64-v8a | - | - | ⚠️ Missing |" >> $GITHUB_STEP_SUMMARY
+          [ -n "$ARMEABI" ] && echo "| \`app-armeabi-v7a\` | armeabi-v7a | \`$ARMEABI\` | $(du -h "$ARMEABI" | cut -f1) | ✅ Available |" >> $GITHUB_STEP_SUMMARY || echo "| \`app-armeabi-v7a\` | armeabi-v7a | - | - | ⚠️ Missing |" >> $GITHUB_STEP_SUMMARY
+          [ -n "$X86" ] && echo "| \`app-x86\` | x86 | \`$X86\` | $(du -h "$X86" | cut -f1) | ✅ Available |" >> $GITHUB_STEP_SUMMARY || echo "| \`app-x86\` | x86 | - | - | ⚠️ Missing |" >> $GITHUB_STEP_SUMMARY
+          [ -n "$X86_64" ] && echo "| \`app-x86_64\` | x86_64 | \`$X86_64\` | $(du -h "$X86_64" | cut -f1) | ✅ Available |" >> $GITHUB_STEP_SUMMARY || echo "| \`app-x86_64\` | x86_64 | - | - | ⚠️ Missing |" >> $GITHUB_STEP_SUMMARY
+          [ -n "$UNIVERSAL" ] && echo "| \`app-universal\` | Universal (All ABIs) | \`$UNIVERSAL\` | $(du -h "$UNIVERSAL" | cut -f1) | ✅ Available |" >> $GITHUB_STEP_SUMMARY || echo "| \`app-universal\` | Universal | - | - | ⚠️ Missing |" >> $GITHUB_STEP_SUMMARY
+
+      # ---------- 5. UPLOAD ----------
+      # Build already succeeded at this point. A GitHub-side artifact hiccup (HTTP 403 while
+      # finalizing, storage quota, ...) must not fail the whole run or skip the remaining
+      # uploads, so every upload is best-effort (continue-on-error) and the most useful APKs
+      # for phones (arm64-v8a, universal) go first. Short retention keeps the account's
+      # artifact storage quota from filling up.
+      - name: Upload arm64-v8a APK
+        if: steps.find_apks.outputs.arm64_found == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-arm64-v8a
+          path: ${{ steps.find_apks.outputs.arm64_path }}
+          retention-days: 3
+
+      - name: Upload Universal APK
+        if: steps.find_apks.outputs.universal_found == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-universal
+          path: ${{ steps.find_apks.outputs.universal_path }}
+          retention-days: 3
+
+      - name: Upload armeabi-v7a APK
+        if: steps.find_apks.outputs.armeabi_found == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-armeabi-v7a
+          path: ${{ steps.find_apks.outputs.armeabi_path }}
+          retention-days: 3
+
+      - name: Upload x86 APK
+        if: steps.find_apks.outputs.x86_found == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-x86
+          path: ${{ steps.find_apks.outputs.x86_path }}
+          retention-days: 3
+
+      - name: Upload x86_64 APK
+        if: steps.find_apks.outputs.x86_64_found == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-x86_64
+          path: ${{ steps.find_apks.outputs.x86_64_path }}
+          retention-days: 3

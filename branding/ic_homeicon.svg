@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgBase" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F0C29"/>
+      <stop offset="0.5" stop-color="#302B63"/>
+      <stop offset="1" stop-color="#24243E"/>
+    </linearGradient>
+    <radialGradient id="bgGlow1" cx="358.4" cy="153.6" r="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00F5FF" stop-opacity="0.498"/>
+      <stop offset="1" stop-color="#00F5FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bgGlow2" cx="102.4" cy="409.6" r="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF00E5" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#FF00E5" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="flagFill" x1="8.7" y1="3.6" x2="41.2" y2="42.4" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#45B5F3"/>
+      <stop offset="1" stop-color="#CB5FAC"/>
+    </linearGradient>
+    <linearGradient id="flagStroke1" x1="8.7" y1="3.6" x2="41.2" y2="42.4" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#45B5F3"/>
+      <stop offset="1" stop-color="#CB5FAC"/>
+    </linearGradient>
+    <linearGradient id="flagStroke2" x1="8.7" y1="3.6" x2="41.2" y2="42.4" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#45B5F3"/>
+      <stop offset="1" stop-color="#CB5FAC"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded-square background, layered gradients -->
+  <path fill="url(#bgBase)" d="M 115 0 L 397 0 A 115 115 0 0 1 512 115 L 512 397 A 115 115 0 0 1 397 512 L 115 512 A 115 115 0 0 1 0 397 L 0 115 A 115 115 0 0 1 115 0 Z"/>
+  <path fill="url(#bgGlow1)" d="M 115 0 L 397 0 A 115 115 0 0 1 512 115 L 512 397 A 115 115 0 0 1 397 512 L 115 512 A 115 115 0 0 1 0 397 L 0 115 A 115 115 0 0 1 115 0 Z"/>
+  <path fill="url(#bgGlow2)" d="M 115 0 L 397 0 A 115 115 0 0 1 512 115 L 512 397 A 115 115 0 0 1 397 512 L 115 512 A 115 115 0 0 1 0 397 L 0 115 A 115 115 0 0 1 115 0 Z"/>
+
+  <!-- foreground flag/pennant icon -->
+  <g transform="translate(112,112) scale(6,6)">
+    <path fill="url(#flagFill)" fill-opacity="0.35" stroke="url(#flagStroke1)" stroke-width="6" stroke-linejoin="round"
+      d="M 35.782818 15.690279 C 41.24226 18.949419 41.24226 27.096182 35.782818 30.355322 L 21.040543 39.15435 C 15.581101 42.41349 8.756799 38.340103 8.756799 31.821825 L 8.756799 14.223776 C 8.756799 7.7054987 15.581101 3.632116 21.040543 6.8912544 L 35.782818 15.690279 Z"/>
+    <path fill="none" stroke="url(#flagStroke2)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"
+      d="M 21.089119 39.11192 C 15.627465 42.350388 8.8004 38.302837 8.8004 31.82591 L 8.8004 14.339489 C 8.8004 7.8625593 15.627465 3.8150146 21.089119 7.05348 L 35.83736 15.79669 Z"/>
+  </g>
+</svg>

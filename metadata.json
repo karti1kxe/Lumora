@@ -1,0 +1,8 @@
+{
+  "name": "Lumora",
+  "description": "Video \u0026 Audio player with best Ui",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
