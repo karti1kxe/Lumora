@@ -187,11 +187,15 @@ class MpvPlayerController {
      */
     private fun onSelectedSubtitleFontChanged(fontFamily: String?) {
         val forceFont = subtitleOverrideAssSsaUserPref && !advancedAssGoverning
-        val key = fontFamily?.trim().orEmpty() + "|force=" + forceFont
+        val key = fontFamily?.trim().orEmpty() + "|ov=" + subtitleOverrideAssSsaUserPref + "|force=" + forceFont
         if (key == lastSelectedFontKey) return
         lastSelectedFontKey = key
         SubtitleFontManager.forceSelectedFontOnAss = forceFont
         SubtitleFontManager.setSelectedFont(fontFamily)
+        // Advanced ASS/SSA (or the raw editor) owns the rendering copy of the current subtitle:
+        // it must be rebuilt too when the font or the Override switch changes, otherwise the
+        // old copy keeps showing the previous fonts.
+        if (advancedAssEnabled || rawEditorEnabled) scheduleAdvancedAssSync()
         val ctx = mpvView?.context ?: return
         // Embedded ASS/SSA tracks are not rewritten by us; libass caches the font it resolved for
         // each style, so a live font change only shows up after the track is re-initialised.
@@ -3131,7 +3135,16 @@ class MpvPlayerController {
         // tags computed for the OLD font (e.g. every Hindi character wrapped in {\fnGo Noto...}).
         // Those tags would keep overriding the font the user now picks in Advanced ASS/SSA, so
         // they are removed first and recomputed below against the NEW fonts.
-        val cleanText = SubtitleFontManager.stripGlyphFallback(context, text)
+        val strippedText = SubtitleFontManager.stripGlyphFallback(context, text)
+        // "Override ASS/SSA Styles" is ON together with Advanced ASS/SSA: the selected font is the
+        // base font of EVERY style and inline \fn; the per-style edits made in Advanced ASS/SSA are
+        // applied on top of it and keep priority for the styles they touch.
+        val uniformFont = SubtitleFontManager.selectedFontRenderName
+        val cleanText = if (subtitleOverrideAssSsaUserPref && !uniformFont.isNullOrBlank()) {
+            SubtitleFontManager.forceSelectedFontEverywhere(strippedText, uniformFont)
+        } else {
+            strippedText
+        }
         val base = if (overrides.isEmpty) cleanText else AdvancedAssStyleEngine.apply(cleanText, overrides)
         val fontFixed = try {
             SubtitleFontManager.replaceMissingFontsKeepingLayout(context, base)
