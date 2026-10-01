@@ -12,7 +12,10 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.gestures.detectTapGestures
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.horizontalScroll
@@ -42,6 +45,7 @@ import androidx.compose.material.icons.filled.FormatBold
 import androidx.compose.material.icons.filled.FormatColorReset
 import androidx.compose.material.icons.filled.FormatItalic
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ColorLens
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
@@ -131,7 +135,9 @@ enum class SubtitleStyleAccordionSection {
     TYPOGRAPHY,
     COLORS,
     MISCELLANEOUS,
-    ADVANCED_ASS
+    ADVANCED,
+    ADVANCED_ASS,
+    RAW_TEXT
 }
 
 enum class ColorTarget {
@@ -175,8 +181,11 @@ fun SubtitleStylePanel(
     onSettingsChange: (PlayerSettings) -> Unit,
     onDismissRequest: () -> Unit,
     onBackToSubtitleTracks: () -> Unit = {},
-    onLoadAdvancedAssSource: (suspend (Int) -> com.example.player.AdvancedAssSource?)? = null
+    onLoadAdvancedAssSource: (suspend (Int) -> com.example.player.AdvancedAssSource?)? = null,
+    onLoadRawSubtitleSource: (suspend (Int) -> com.example.player.RawSubtitleSource?)? = null,
+    onRawSubtitlePreview: (String?, String?) -> Unit = { _, _ -> }
 ) {
+    val rawEditorDraft = remember { RawEditorDraft() }
     var activeSection by remember { mutableStateOf<SubtitleStyleAccordionSection?>(SubtitleStyleAccordionSection.TYPOGRAPHY) }
 
     val currentSettings by rememberUpdatedState(settings)
@@ -302,9 +311,29 @@ fun SubtitleStylePanel(
             }
 
             // =========================================================================
-            // 4. SECTION: ADVANCED ASS/SSA (only when the toggle in Miscellaneous is ON,
-            // and only for a genuinely native ASS/SSA track — per-style editing has nothing
-            // to act on for any other subtitle format)
+            // 4. SECTION: ADVANCED (holds the "Advanced ASS/SSA" and the "View Raw [Script Info]
+            // & Subtitle text" switches; each switch adds its own section below when ON)
+            // =========================================================================
+            AccordionSectionCard(
+                title = "Advanced",
+                icon = Icons.Outlined.Code,
+                expanded = activeSection == SubtitleStyleAccordionSection.ADVANCED,
+                onToggle = {
+                    activeSection = if (activeSection == SubtitleStyleAccordionSection.ADVANCED) null else SubtitleStyleAccordionSection.ADVANCED
+                }
+            ) {
+                EnhancedAdvancedContent(
+                    settings = currentSettings,
+                    isAssSsaTrack = isNativeAssSsaTrack(activeSubtitleTrack),
+                    onUpdateSettings = updateSettings,
+                    onOpenSection = { activeSection = it }
+                )
+            }
+
+            // =========================================================================
+            // 5. SECTION: ADVANCED ASS/SSA (only when its switch in "Advanced" is ON, and only
+            // for a genuinely native ASS/SSA track — per-style editing has nothing to act on
+            // for any other subtitle format)
             // =========================================================================
             if (currentSettings.advancedAssEnabled && isNativeAssSsaTrack(activeSubtitleTrack)) {
                 AccordionSectionCard(
@@ -320,6 +349,31 @@ fun SubtitleStylePanel(
                         context = context,
                         activeSubtitleTrack = activeSubtitleTrack,
                         onLoadAdvancedAssSource = onLoadAdvancedAssSource,
+                        onUpdateSettings = updateSettings
+                    )
+                }
+            }
+
+            // =========================================================================
+            // 6. SECTION: RAW [Script Info] & SUBTITLE TEXT (only when its switch is ON; works
+            // for every subtitle format and source)
+            // =========================================================================
+            if (currentSettings.rawSubtitleEditorEnabled) {
+                AccordionSectionCard(
+                    title = "Raw [Script Info] & Subtitle Text",
+                    icon = Icons.Outlined.Code,
+                    expanded = activeSection == SubtitleStyleAccordionSection.RAW_TEXT,
+                    onToggle = {
+                        activeSection = if (activeSection == SubtitleStyleAccordionSection.RAW_TEXT) null else SubtitleStyleAccordionSection.RAW_TEXT
+                    }
+                ) {
+                    RawSubtitleEditorContent(
+                        settings = currentSettings,
+                        context = context,
+                        activeSubtitleTrack = activeSubtitleTrack,
+                        draft = rawEditorDraft,
+                        onLoadRawSubtitleSource = onLoadRawSubtitleSource,
+                        onRawSubtitlePreview = onRawSubtitlePreview,
                         onUpdateSettings = updateSettings
                     )
                 }
@@ -1195,126 +1249,62 @@ internal fun ThreeArcCircularColorPickerCard(
                 modifier = Modifier
                     .fillMaxSize()
                     .pointerInput(Unit) {
-                        // Tap and drag on the color-wheel arcs are combined in a
-                        // single pointerInput block (both launched as sibling
-                        // coroutines) instead of two separate stacked
-                        // pointerInput modifiers, which used to race for the
-                        // first touch and could require a second tap/drag to
-                        // register.
-                        kotlinx.coroutines.coroutineScope {
-                        launch {
-                        detectTapGestures { offset ->
-                            val center = Offset(size.width / 2f, size.height / 2f)
-                            val dx = offset.x - center.x
-                            val dy = offset.y - center.y
-                            val dist = sqrt(dx * dx + dy * dy)
-                            val maxR = size.width / 2f
-                            val arcRadius = maxR * 0.78f
-                            val touchBand = maxR * 0.38f
+                        // Only a touch that STARTS on the thin arc "line" (± a small slop) is handled.
+                        // Touches in the empty area around the arcs / in the centre are ignored and are
+                        // not consumed, so the panel can still be scrolled when the finger starts there.
+                        // Tap and drag are one gesture: the colour is applied on touch-down and then
+                        // follows the finger.
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val centerPx = Offset(size.width / 2f, size.height / 2f)
+                            val arcRadiusPx = (size.width / 2f) * 0.78f
+                            val slopPx = 14.dp.toPx()
 
-                            if (dist in (arcRadius - touchBand)..(arcRadius + touchBand)) {
-                                var angle = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
-                                if (angle < 0) angle += 360f
-
-                                if (angle in 30f..150f) {
-                                    val progress = ((angle - 40f) / 100f).coerceIn(0f, 1f)
-                                    hue = progress * 360f
-                                    if (value < 0.15f) value = 1.0f
-                                    if (saturation < 0.15f) saturation = 1.0f
-                                    emitColor(hue, saturation, value, alpha)
-                                } else if (angle in 150f..270f) {
-                                    val progress = ((angle - 160f) / 100f).coerceIn(0f, 1f)
-                                    saturation = progress
-                                    if (value < 0.15f) value = 1.0f
-                                    emitColor(hue, saturation, value, alpha)
-                                } else if (angle >= 270f || angle <= 30f) {
-                                    val normalizedAngle = if (angle < 100f) angle + 360f else angle
-                                    val progress = ((normalizedAngle - 280f) / 100f).coerceIn(0f, 1f)
-                                    value = progress
-                                    emitColor(hue, saturation, value, alpha)
-                                }
+                            fun angleOf(p: Offset): Float {
+                                var a = Math.toDegrees(atan2((p.y - centerPx.y).toDouble(), (p.x - centerPx.x).toDouble())).toFloat()
+                                if (a < 0) a += 360f
+                                return a
                             }
-                        }
-                        }
-                        launch {
-                        detectDragGestures(
-                            onDragStart = { offset ->
-                                val center = Offset(size.width / 2f, size.height / 2f)
-                                val dx = offset.x - center.x
-                                val dy = offset.y - center.y
-                                var angle = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
-                                if (angle < 0) angle += 360f
 
-                                activeArc = when {
-                                    angle in 30f..150f -> ArcPickerType.HUE
-                                    angle in 150f..270f -> ArcPickerType.SATURATION
-                                    angle >= 270f || angle <= 30f -> ArcPickerType.VALUE
-                                    else -> null
-                                }
-
-                                when (activeArc) {
+                            fun applyAt(p: Offset, arc: ArcPickerType) {
+                                val angle = angleOf(p)
+                                when (arc) {
                                     ArcPickerType.HUE -> {
-                                        val progress = ((angle - 40f) / 100f).coerceIn(0f, 1f)
-                                        hue = progress * 360f
+                                        hue = (((angle - 40f) / 100f).coerceIn(0f, 1f)) * 360f
                                         if (value < 0.15f) value = 1.0f
                                         if (saturation < 0.15f) saturation = 1.0f
-                                        emitColor(hue, saturation, value, alpha)
                                     }
                                     ArcPickerType.SATURATION -> {
-                                        val progress = ((angle - 160f) / 100f).coerceIn(0f, 1f)
-                                        saturation = progress
+                                        saturation = ((angle - 160f) / 100f).coerceIn(0f, 1f)
                                         if (value < 0.15f) value = 1.0f
-                                        emitColor(hue, saturation, value, alpha)
                                     }
                                     ArcPickerType.VALUE -> {
                                         val normalizedAngle = if (angle < 100f) angle + 360f else angle
-                                        val progress = ((normalizedAngle - 280f) / 100f).coerceIn(0f, 1f)
-                                        value = progress
-                                        emitColor(hue, saturation, value, alpha)
+                                        value = ((normalizedAngle - 280f) / 100f).coerceIn(0f, 1f)
                                     }
-                                    null -> {}
                                 }
-                            },
-                            onDragEnd = { activeArc = null },
-                            onDragCancel = { activeArc = null }
-                        ) { change, _ ->
-                            val center = Offset(size.width / 2f, size.height / 2f)
-                            val dx = change.position.x - center.x
-                            val dy = change.position.y - center.y
-                            var angle = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
-                            if (angle < 0) angle += 360f
-
-                            val currentArc = activeArc ?: when {
-                                angle in 30f..150f -> ArcPickerType.HUE
-                                angle in 150f..270f -> ArcPickerType.SATURATION
-                                angle >= 270f || angle <= 30f -> ArcPickerType.VALUE
-                                else -> null
+                                emitColor(hue, saturation, value, alpha)
                             }
 
-                            when (currentArc) {
-                                ArcPickerType.HUE -> {
-                                    val progress = ((angle - 40f) / 100f).coerceIn(0f, 1f)
-                                    hue = progress * 360f
-                                    if (value < 0.15f) value = 1.0f
-                                    if (saturation < 0.15f) saturation = 1.0f
-                                    emitColor(hue, saturation, value, alpha)
-                                }
-                                ArcPickerType.SATURATION -> {
-                                    val progress = ((angle - 160f) / 100f).coerceIn(0f, 1f)
-                                    saturation = progress
-                                    if (value < 0.15f) value = 1.0f
-                                    emitColor(hue, saturation, value, alpha)
-                                }
-                                ArcPickerType.VALUE -> {
-                                    val normalizedAngle = if (angle < 100f) angle + 360f else angle
-                                    val progress = ((normalizedAngle - 280f) / 100f).coerceIn(0f, 1f)
-                                    value = progress
-                                    emitColor(hue, saturation, value, alpha)
-                                }
-                                null -> {}
+                            val dist = (down.position - centerPx).getDistance()
+                            if (kotlin.math.abs(dist - arcRadiusPx) > slopPx) return@awaitEachGesture
+                            val startAngle = angleOf(down.position)
+                            val arc = when {
+                                startAngle in 30f..150f -> ArcPickerType.HUE
+                                startAngle in 150f..270f -> ArcPickerType.SATURATION
+                                else -> ArcPickerType.VALUE
                             }
-                        }
-                        }
+                            activeArc = arc
+                            try {
+                                applyAt(down.position, arc)
+                                down.consume()
+                                drag(down.id) { change ->
+                                    applyAt(change.position, arc)
+                                    change.consume()
+                                }
+                            } finally {
+                                activeArc = null
+                            }
                         }
                     }
             ) {
@@ -1584,7 +1574,7 @@ private fun EnhancedMiscContent(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // These two only apply to a genuinely native ASS/SSA subtitle (they force/edit its own
+        // This only applies to a genuinely native ASS/SSA subtitle (it forces its own
         // embedded styling) — hidden for every other subtitle format, where the typography/
         // colour settings above always apply directly with no toggle needed.
         if (isAssSsaTrack) {
@@ -1595,16 +1585,6 @@ private fun EnhancedMiscContent(
                 checked = settings.overrideAssSsaSubtitles,
                 onCheckedChange = { isChecked ->
                     onUpdateSettings { it.copy(overrideAssSsaSubtitles = isChecked) }
-                }
-            )
-
-            // Detailed Switch: Advanced ASS/SSA per-style editor
-            DetailedSwitchRow(
-                title = "Advanced ASS/SSA",
-                description = "Edit every style of the current ASS/SSA subtitle individually",
-                checked = settings.advancedAssEnabled,
-                onCheckedChange = { isChecked ->
-                    onUpdateSettings { it.copy(advancedAssEnabled = isChecked) }
                 }
             )
         }
@@ -1855,6 +1835,46 @@ private fun EnhancedMiscContent(
                 )
             }
         }
+    }
+}
+
+/**
+ * "Advanced" section: the Advanced ASS/SSA per-style editor switch and the raw script/text switch.
+ * Turning a switch ON adds its own section below and opens it.
+ */
+@Composable
+private fun EnhancedAdvancedContent(
+    settings: PlayerSettings,
+    isAssSsaTrack: Boolean,
+    onUpdateSettings: ((PlayerSettings) -> PlayerSettings) -> Unit,
+    onOpenSection: (SubtitleStyleAccordionSection) -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // The per-style editor only exists for a genuinely native ASS/SSA subtitle.
+        if (isAssSsaTrack) {
+            DetailedSwitchRow(
+                title = "Advanced ASS/SSA",
+                description = "Edit every style of the current ASS/SSA subtitle individually",
+                checked = settings.advancedAssEnabled,
+                onCheckedChange = { isChecked ->
+                    onUpdateSettings { it.copy(advancedAssEnabled = isChecked) }
+                    if (isChecked) onOpenSection(SubtitleStyleAccordionSection.ADVANCED_ASS)
+                }
+            )
+        }
+
+        DetailedSwitchRow(
+            title = "View Raw [Script Info] & Subtitle Text",
+            description = "See and edit the full text of the current subtitle (any format)",
+            checked = settings.rawSubtitleEditorEnabled,
+            onCheckedChange = { isChecked ->
+                onUpdateSettings { it.copy(rawSubtitleEditorEnabled = isChecked) }
+                if (isChecked) onOpenSection(SubtitleStyleAccordionSection.RAW_TEXT)
+            }
+        )
     }
 }
 

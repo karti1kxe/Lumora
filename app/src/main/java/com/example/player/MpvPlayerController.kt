@@ -1834,9 +1834,10 @@ class MpvPlayerController {
                     // both tracks, but the generated one must never become a second user-visible
                     // subtitle entry. Keep the original track as the stable logical identity and
                     // map playback to the derived track internally.
-                    val advancedDerivedIds = advancedAssBindings.values
-                        .mapNotNull { it.derivedTrackId.takeIf { id -> id > 0 } }
-                        .toSet()
+                    val advancedDerivedIds = (
+                        advancedAssBindings.values.mapNotNull { it.derivedTrackId.takeIf { id -> id > 0 } } +
+                            rawBindings.values.mapNotNull { it.derivedTrackId.takeIf { id -> id > 0 } }
+                        ).toSet()
 
                     // Retain all genuine tracks exposed by MPV preserving unique track ID
                     // identity, except for our private Advanced ASS/SSA rendering copies.
@@ -1845,7 +1846,7 @@ class MpvPlayerController {
                         .filterNot { it.id in advancedDerivedIds }
 
                     _subtitleTracks.value = preservedSubList
-                    if (advancedAssEnabled && !advancedAssSyncing) scheduleAdvancedAssSync()
+                    if ((advancedAssEnabled || rawEditorEnabled) && !advancedAssSyncing) scheduleAdvancedAssSync()
                     val currentSid = view.mpv.getPropertyString("sid")
                     val isNoneSelected = preservedSubList.none { it.isSelected } || currentSid == null || currentSid == "no" || currentSid == "0"
                     if (isNoneSelected && !isSubtitleExplicitlyDisabled && !holdSubtitleAutoSelect) {
@@ -2390,6 +2391,342 @@ class MpvPlayerController {
     }
 
     // =============================================================================================
+    // Raw subtitle text editor (works for every subtitle format: ASS/SSA, SRT, VTT, ... whether
+    // uploaded, pasted, attached or embedded in the video).
+    //
+    // The original subtitle is never modified. The edited text is written to a cache file that is
+    // added as an extra mpv subtitle track (hidden from the UI, mapped to the original track id,
+    // exactly like the Advanced ASS/SSA rendering copy). Text coming from the live preview is NOT
+    // persisted; only text the user APPLIED is stored (AssRawTextStore + rawRevision).
+    // =============================================================================================
+    private class RawBinding(
+        val key: String,
+        val title: String,
+        val originalTrackId: Int,
+        val isAss: Boolean,
+        val extension: String,
+        val sourceText: String
+    ) {
+        @Volatile var derivedTrackId: Int = 0
+        @Volatile var derivedPath: String? = null
+        @Volatile var derivedFiles: List<File> = emptyList()
+        @Volatile var appliedSignature: String = ""
+    }
+
+    private class RawPlan(val info: AdvancedAssTrackInfo, val originalId: Int)
+
+    @Volatile private var rawEditorEnabled = false
+    @Volatile private var rawPreview: Pair<String, String>? = null
+    private val rawBindings = ConcurrentHashMap<Int, RawBinding>()
+    private var rawFileCounter = 0
+
+    private val rawTextCodecs = setOf(
+        "ass", "ssa", "subrip", "srt", "webvtt", "vtt", "mov_text", "text", "subviewer", "subviewer1",
+        "microdvd", "sami", "jacosub", "realtext", "mpl2", "ttml", "dfxp", "lrc", "sbv", "pjs",
+        "vplayer", "stl", "aqtitle"
+    )
+
+    /** Turns the raw editor pipeline on/off (the "View Raw [Script Info] & Subtitle text" toggle). */
+    fun setRawSubtitleEditorEnabled(enabled: Boolean) {
+        if (rawEditorEnabled == enabled) return
+        rawEditorEnabled = enabled
+        if (!enabled) rawPreview = null
+        scheduleAdvancedAssSync()
+    }
+
+    /**
+     * Shows [text] (not persisted) instead of the subtitle identified by [key]. Passing null
+     * removes the preview, i.e. goes back to the saved/applied state.
+     */
+    fun setRawSubtitlePreview(key: String?, text: String?) {
+        val next = if (key != null && text != null) key to text else null
+        if (rawPreview == next) return
+        rawPreview = next
+        scheduleAdvancedAssSync(RAW_PREVIEW_DEBOUNCE_MS)
+    }
+
+    /** Original text of the subtitle [trackId] for the raw editor. Null when it cannot be edited. */
+    suspend fun readRawSubtitleSource(context: Context, trackId: Int): RawSubtitleSource? =
+        withContext(Dispatchers.IO) {
+            try {
+                val appContext = context.applicationContext
+                val originalId = resolveAdvancedAssOriginalId(trackId)
+                val info = withMpvLock<AdvancedAssTrackInfo?>(null) { view ->
+                    readAdvancedAssTrackInfo(view, originalId)
+                } ?: return@withContext null
+                val b = resolveRawBinding(appContext, info) ?: return@withContext null
+                RawSubtitleSource(b.key, b.title, b.sourceText, b.extension, b.isAss)
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+    private suspend fun resolveRawBinding(context: Context, info: AdvancedAssTrackInfo): RawBinding? {
+        rawBindings[info.id]?.let { return it }
+        val listed = _subtitleTracks.value.firstOrNull { it.id == info.id }
+        val title = listed?.title?.takeIf { it.isNotBlank() }
+            ?: info.title.ifBlank { info.language.ifBlank { "Subtitle ${info.id}" } }
+        val path = info.externalPath
+        val text: String
+        val key: String
+        var sourceExtension = ""
+        if (path != null) {
+            val f = File(path)
+            if (!f.isFile) return null
+            if (f.name == "live_preview_subs.ass") return null
+            val parentName = f.parentFile?.name
+            if (parentName == ADVANCED_ASS_CACHE_DIR || parentName == RAW_SUBTITLE_CACHE_DIR) return null
+            val generatedDir = File(context.cacheDir, "sub_transcoded").absolutePath
+            val source: File = if (f.absolutePath.startsWith(generatedDir)) {
+                // SRT/VTT/... converted to ASS for playback: edit the ORIGINAL uploaded text.
+                preparedSubtitleSources[f.absolutePath]?.takeIf { it.isFile } ?: return null
+            } else {
+                if (info.codec !in rawTextCodecs) return null
+                f
+            }
+            sourceExtension = source.extension.lowercase(Locale.ROOT)
+            text = UniversalSubtitleEngine.readTextWithCharsetDetection(source)
+            key = AdvancedAssStyleEngine.contentKey(text)
+        } else {
+            if (info.isExternal) return null
+            if (info.codec !in rawTextCodecs) return null
+            val video = currentFilePath ?: return null
+            if (video.startsWith("fd://") || video.startsWith("http://") || video.startsWith("https://") || video.startsWith("rtsp://")) return null
+            val videoFile = File(video)
+            if (!videoFile.isFile) return null
+            val track = PlayerMediaTrack(info.id, "sub", info.title, info.language, info.codec, true)
+            val extracted = extractEmbeddedSubtitleToTemp(context, videoFile, track)
+            text = try {
+                extracted?.let { UniversalSubtitleEngine.readTextWithCharsetDetection(it) } ?: ""
+            } catch (_: Throwable) {
+                ""
+            } finally {
+                try { extracted?.delete() } catch (_: Throwable) {}
+            }
+            key = "emb_" + AdvancedAssStyleEngine
+                .sha1Hex("$video|${info.ffIndex}|${info.title}|${info.language}").take(16)
+        }
+        if (text.isBlank() || text.indexOf('\u0000') >= 0) return null
+        val isAss = AdvancedAssStyleEngine.parse(text) != null
+        val extension = when {
+            isAss -> "ass"
+            sourceExtension.isNotBlank() && sourceExtension.length <= 5 -> sourceExtension
+            text.trimStart().startsWith("WEBVTT", ignoreCase = true) -> "vtt"
+            else -> "srt"
+        }
+        val binding = RawBinding(key, title, info.id, isAss, extension, text)
+        rawBindings[info.id] = binding
+        return binding
+    }
+
+    private fun removeRawDerived(view: VideoPlayerMpvView, b: RawBinding, reselectOriginal: Boolean) {
+        val id = b.derivedTrackId
+        if (reselectOriginal && readAdvancedAssTrackInfo(view, b.originalTrackId) != null) {
+            try { view.mpv.setPropertyInt("sid", b.originalTrackId) } catch (_: Throwable) {}
+            lastActiveSubtitleTrackId = b.originalTrackId
+        }
+        if (id > 0) {
+            try { view.mpv.command("sub-remove", id.toString()) } catch (_: Throwable) {}
+        }
+        b.derivedFiles.forEach { try { it.delete() } catch (_: Throwable) {} }
+        b.derivedTrackId = 0
+        b.derivedPath = null
+        b.derivedFiles = emptyList()
+        b.appliedSignature = ""
+    }
+
+    private suspend fun syncRawSubtitleNow(context: Context) {
+        val enabled = rawEditorEnabled
+        val preview = rawPreview
+        val json = advancedAssOverridesJson
+        val styleEditsOn = advancedAssEnabled
+
+        // Feature unused: leave every existing subtitle behaviour (and the mpv lock) untouched.
+        if (!enabled && rawBindings.values.none { it.derivedTrackId > 0 }) return
+
+        // ---- Phase A (native, locked): inspect the current subtitle track ----
+        val plan = withMpvLock<RawPlan?>(null) { view ->
+            val sid = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
+            if (!enabled || sid <= 0) {
+                var removed = false
+                for (b in rawBindings.values) {
+                    if (b.derivedTrackId > 0) {
+                        removeRawDerived(view, b, reselectOriginal = (enabled.not() && sid == b.derivedTrackId))
+                        removed = true
+                    }
+                }
+                if (removed) {
+                    if (!enabled) setAdvancedAssActive(false)
+                    refreshTracksAndChapters()
+                }
+                return@withMpvLock null
+            }
+            val originalId = resolveAdvancedAssOriginalId(sid)
+            val info = readAdvancedAssTrackInfo(view, originalId) ?: return@withMpvLock null
+            RawPlan(info, originalId)
+        } ?: return
+
+        // ---- Phase B (no native calls): resolve text and build the file ----
+        val binding = resolveRawBinding(context, plan.info) ?: return
+        val overrides = AssOverridesStore.get(json, binding.key)
+        val rawText: String? = when {
+            preview != null && preview.first == binding.key -> preview.second
+            overrides.rawRevision > 0L -> AssRawTextStore.read(context, binding.key)
+            else -> null
+        }
+        if (rawText == null) {
+            // No raw edit for this subtitle: make sure no edited copy remains.
+            withMpvLock(Unit) { view ->
+                if (binding.derivedTrackId > 0) {
+                    val sid = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
+                    removeRawDerived(view, binding, reselectOriginal = (sid == binding.derivedTrackId))
+                    refreshTracksAndChapters()
+                }
+            }
+            return
+        }
+        // A fully emptied editor must not replace the subtitle with an unloadable empty file.
+        if (rawText.isBlank()) return
+
+        val styled = if (binding.isAss && styleEditsOn && !overrides.isEmpty) {
+            AdvancedAssStyleEngine.apply(rawText, overrides.stylesOnly())
+        } else {
+            rawText
+        }
+        var renderText = styled
+        if (binding.isAss) {
+            // Make sure any font named in the (edited) script, including an uploaded font, is
+            // registered, then swap only genuinely missing fonts for the fallback font.
+            try { SubtitleFontManager.syncFonts(context, currentFilePath, styled) } catch (_: Throwable) {}
+            val fixed = try {
+                SubtitleFontManager.replaceMissingFontsKeepingLayout(context, styled)
+            } catch (_: Throwable) {
+                null
+            }
+            if (fixed != null) renderText = fixed
+        }
+        val signature = "${binding.isAss}:${renderText.length}:${renderText.hashCode()}"
+
+        val alreadyApplied = withMpvLock(false) { view ->
+            binding.derivedTrackId > 0 &&
+                binding.appliedSignature == signature &&
+                readAdvancedAssTrackInfo(view, binding.derivedTrackId) != null
+        }
+
+        var pathToAdd: String? = null
+        var writtenFiles: List<File> = emptyList()
+        if (!alreadyApplied) {
+            val dir = File(context.cacheDir, RAW_SUBTITLE_CACHE_DIR).apply { mkdirs() }
+            val revision = synchronized(this@MpvPlayerController) {
+                rawFileCounter += 1
+                rawFileCounter
+            }
+            val rawFile = File(dir, "rawedit_${binding.key}_$revision.${binding.extension}")
+            rawFile.writeText(renderText, Charsets.UTF_8)
+            if (binding.isAss) {
+                pathToAdd = rawFile.absolutePath
+                writtenFiles = listOf(rawFile)
+            } else {
+                // Same conversion every uploaded SRT/VTT/... goes through, so all global subtitle
+                // style settings keep working on the edited text.
+                val prepared = UniversalSubtitleEngine.prepareSubtitleForPlayback(
+                    context = context,
+                    file = rawFile,
+                    videoFps = _estimatedFps.value.takeIf { it > 0.0 } ?: 24.0,
+                    videoPath = currentFilePath
+                )
+                pathToAdd = prepared
+                preparedSubtitleSources[File(prepared).absolutePath] = rawFile
+                writtenFiles = if (File(prepared).absolutePath == rawFile.absolutePath) {
+                    listOf(rawFile)
+                } else {
+                    listOf(rawFile, File(prepared))
+                }
+            }
+        }
+
+        // ---- Phase C (native, locked): swap the subtitle track ----
+        val addPath: String? = pathToAdd
+        val addedFiles: List<File> = writtenFiles
+        withMpvLock(Unit) { view ->
+            val sid = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
+            if (alreadyApplied || addPath == null) {
+                if (binding.derivedTrackId > 0 && sid != binding.derivedTrackId) {
+                    try { view.mpv.setPropertyInt("sid", binding.derivedTrackId) } catch (_: Throwable) {}
+                    lastActiveSubtitleTrackId = binding.originalTrackId
+                    refreshTracksAndChapters()
+                }
+                return@withMpvLock
+            }
+            val newPath: String = addPath
+
+            val fontsDir = SubtitleFontManager.syncFonts(context, currentFilePath)
+            setMpvStringIfChanged(view, "sub-fonts-dir", fontsDir.absolutePath)
+            if ((try { view.mpv.getPropertyBoolean("embeddedfonts") } catch (_: Throwable) { null }) != true) {
+                view.mpv.setPropertyBoolean("embeddedfonts", true)
+            }
+            setMpvStringIfChanged(view, "sub-ass", "yes")
+            if (binding.isAss && styleEditsOn) {
+                // Advanced ASS/SSA is governing this ASS/SSA subtitle: libass must use the
+                // script's own styles (the per-style edits are already inside the text).
+                setMpvStringIfChanged(view, "sub-ass-override", "no")
+                setMpvStringIfChanged(view, "sub-ass-force-style", "")
+            }
+
+            externalSubtitlesMap[File(newPath).absolutePath] = binding.title
+            externalSubtitlesMap[File(newPath).name] = binding.title
+            externalSubtitlesMap[File(newPath).nameWithoutExtension] = binding.title
+            isSubtitleExplicitlyDisabled = false
+
+            val oldId = binding.derivedTrackId
+            val oldFiles = binding.derivedFiles
+            try {
+                // Attach the new revision first and remove the old one afterwards, so the
+                // subtitle never disappears for a frame while typing.
+                view.mpv.command("sub-add", newPath, "select", binding.title)
+            } catch (_: Throwable) {
+                addedFiles.forEach { try { it.delete() } catch (_: Throwable) {} }
+                if (oldId > 0) {
+                    try { view.mpv.setPropertyInt("sid", oldId) } catch (_: Throwable) {}
+                }
+                return@withMpvLock
+            }
+            val newId = findAdvancedAssTrackIdByPath(view, File(newPath).absolutePath)
+                ?: findAdvancedAssTrackIdByPath(view, newPath)
+                ?: (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null })
+                ?: 0
+            if (newId <= 0 || newId == binding.originalTrackId) {
+                addedFiles.forEach { try { it.delete() } catch (_: Throwable) {} }
+                if (oldId > 0) {
+                    try { view.mpv.setPropertyInt("sid", oldId) } catch (_: Throwable) {}
+                }
+                return@withMpvLock
+            }
+            if (oldId > 0 && oldId != newId) {
+                try { view.mpv.command("sub-remove", oldId.toString()) } catch (_: Throwable) {}
+            }
+            oldFiles.forEach { f ->
+                if (addedFiles.none { it.absolutePath == f.absolutePath }) {
+                    try { f.delete() } catch (_: Throwable) {}
+                }
+            }
+            // The Advanced ASS/SSA rendering copy of the same subtitle is superseded by this one.
+            advancedAssBindings[binding.originalTrackId]?.let { adv ->
+                if (adv.derivedTrackId > 0) removeAdvancedAssDerived(view, adv, reselectOriginal = false)
+            }
+
+            binding.derivedTrackId = newId
+            binding.derivedPath = File(newPath).absolutePath
+            binding.derivedFiles = addedFiles
+            binding.appliedSignature = signature
+            lastActiveSubtitleTrackId = binding.originalTrackId
+            try { view.mpv.setPropertyBoolean("sub-visibility", true) } catch (_: Throwable) {}
+            setAdvancedAssActive(binding.isAss && styleEditsOn)
+            refreshTracksAndChapters()
+        }
+    }
+
+    // =============================================================================================
     // Advanced ASS/SSA per-style editor (data rules live in player/AdvancedAssStyleEngine.kt)
     //
     // The original subtitle track is never modified. When the user customises styles, the ORIGINAL
@@ -2517,20 +2854,29 @@ class MpvPlayerController {
             b.derivedPath?.let { try { File(it).delete() } catch (_: Throwable) {} }
         }
         advancedAssBindings.clear()
+        for (b in rawBindings.values) {
+            b.derivedFiles.forEach { try { it.delete() } catch (_: Throwable) {} }
+        }
+        rawBindings.clear()
+        rawPreview = null
         advancedAssActive = false
         if (ctx != null) {
             try { File(ctx.cacheDir, ADVANCED_ASS_CACHE_DIR).listFiles()?.forEach { it.delete() } } catch (_: Throwable) {}
+            try { File(ctx.cacheDir, RAW_SUBTITLE_CACHE_DIR).listFiles()?.forEach { it.delete() } } catch (_: Throwable) {}
         }
     }
 
     private fun resolveAdvancedAssOriginalId(trackId: Int): Int {
         if (trackId <= 0) return trackId
+        rawBindings.values.firstOrNull { it.derivedTrackId == trackId }?.let { return it.originalTrackId }
         return advancedAssBindings.values.firstOrNull { it.derivedTrackId == trackId }?.originalTrackId ?: trackId
     }
 
     /** Maps a logical subtitle ID exposed to the UI to the private Advanced ASS playback ID. */
     private fun resolveAdvancedAssPlaybackId(trackId: Int): Int {
         if (trackId <= 0) return trackId
+        rawBindings.values.firstOrNull { it.originalTrackId == trackId && it.derivedTrackId > 0 }
+            ?.let { return it.derivedTrackId }
         return advancedAssBindings.values.firstOrNull {
             it.originalTrackId == trackId && it.derivedTrackId > 0
         }?.derivedTrackId ?: trackId
@@ -2688,6 +3034,12 @@ class MpvPlayerController {
     }
 
     private suspend fun syncAdvancedAssNow(context: Context) {
+        // The raw text editor runs first; when it owns the current track this pipeline skips it.
+        try {
+            syncRawSubtitleNow(context)
+        } catch (t: Throwable) {
+            Log.w("MpvPlayerController", "Raw subtitle sync failed", t)
+        }
         val enabled = advancedAssEnabled
         val json = advancedAssOverridesJson
 
@@ -2719,6 +3071,11 @@ class MpvPlayerController {
                 }
                 setAdvancedAssActive(false)
                 if (removed) refreshTracksAndChapters()
+                return@withMpvLock null
+            }
+            // A raw-edited copy owns this track: the raw pipeline already baked any per-style
+            // edits into it, so there is nothing for this pipeline to swap.
+            if (rawBindings.values.any { it.derivedTrackId > 0 && it.derivedTrackId == sid }) {
                 return@withMpvLock null
             }
             val originalId = resolveAdvancedAssOriginalId(sid)
@@ -2966,7 +3323,7 @@ class MpvPlayerController {
                     scheduleNativeAssSelectionRecovery(trackId, selectionGeneration)
                 }
             }
-            if (advancedAssEnabled || advancedAssBindings.isNotEmpty()) scheduleAdvancedAssSync()
+            if (advancedAssEnabled || rawEditorEnabled || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
             nudgeRedrawIfPaused()
         } catch (_: Throwable) {}
     }
@@ -3128,7 +3485,7 @@ class MpvPlayerController {
 
             }
 
-            if (advancedAssEnabled || advancedAssBindings.isNotEmpty()) scheduleAdvancedAssSync()
+            if (advancedAssEnabled || rawEditorEnabled || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
 
             _subtitleTracks.value = _subtitleTracks.value.map { track ->
                 track.copy(
@@ -4186,3 +4543,5 @@ fun MpvPlayerPreviewSection(
 // Coalesces rapid edits (typing digits, dragging the colour wheel) into ONE script reload.
 private const val ADVANCED_ASS_DEBOUNCE_MS = 280L
 private const val ADVANCED_ASS_CACHE_DIR = "lumora_adv_ass"
+private const val RAW_SUBTITLE_CACHE_DIR = "lumora_raw_sub_edit"
+private const val RAW_PREVIEW_DEBOUNCE_MS = 120L

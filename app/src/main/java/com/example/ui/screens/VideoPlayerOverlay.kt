@@ -670,6 +670,8 @@ fun VideoPlayerOverlay(
     subtitleSettings: com.example.ui.state.PlayerSettings = playerSettings,
     onSubtitleSettingsChange: (com.example.ui.state.PlayerSettings) -> Unit = {},
     onLoadAdvancedAssSource: (suspend (Int) -> com.example.player.AdvancedAssSource?)? = null,
+    onLoadRawSubtitleSource: (suspend (Int) -> com.example.player.RawSubtitleSource?)? = null,
+    onRawSubtitlePreview: (String?, String?) -> Unit = { _, _ -> },
     externalNotification: String? = null,
     externalNotificationKey: Long = 0L,
     modifier: Modifier = Modifier
@@ -2815,7 +2817,9 @@ fun VideoPlayerOverlay(
                     onSettingsChange = onSubtitleSettingsChange,
                     onDismissRequest = { dismissCurrentPanel() },
                     onBackToSubtitleTracks = { dismissCurrentPanel() },
-                    onLoadAdvancedAssSource = onLoadAdvancedAssSource
+                    onLoadAdvancedAssSource = onLoadAdvancedAssSource,
+                    onLoadRawSubtitleSource = onLoadRawSubtitleSource,
+                    onRawSubtitlePreview = onRawSubtitlePreview
                 )
             }
             PlayerPanelType.AUDIO_TRACK -> {

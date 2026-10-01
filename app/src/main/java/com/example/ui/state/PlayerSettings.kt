@@ -175,6 +175,10 @@ data class PlayerSettings(
     // subtitle behaviour is unchanged. [assStyleOverridesJson] holds the per-subtitle style
     // overrides (see AssOverridesStore in player/AdvancedAssStyleEngine.kt), keyed by subtitle identity.
     val advancedAssEnabled: Boolean = false,
+    // "View Raw [Script Info] & Subtitle text": shows the full text of the active subtitle (any
+    // format) in an editor section. Only the toggle is persisted here; applied text edits are kept
+    // per subtitle (see AssRawTextStore + AssSubtitleOverrides.rawRevision).
+    val rawSubtitleEditorEnabled: Boolean = false,
     val assStyleOverridesJson: String = ""
 ) {
     companion object {
@@ -328,6 +332,7 @@ data class PlayerSettings(
                     subtitlePositionDirection = o.optString("subtitlePositionDirection", "BOTTOM_TO_TOP"),
                     subtitleBlendWithVideo = o.optBoolean("subtitleBlendWithVideo", false),
                     advancedAssEnabled = o.optBoolean("advancedAssEnabled", false),
+                    rawSubtitleEditorEnabled = o.optBoolean("rawSubtitleEditorEnabled", false),
                     assStyleOverridesJson = o.optString("assStyleOverridesJson", "")
                 )
             } catch (_: Throwable) { PlayerSettings() }
@@ -477,6 +482,7 @@ data class PlayerSettings(
             o.put("subtitlePositionDirection", value.subtitlePositionDirection)
             o.put("subtitleBlendWithVideo", value.subtitleBlendWithVideo)
             o.put("advancedAssEnabled", value.advancedAssEnabled)
+            o.put("rawSubtitleEditorEnabled", value.rawSubtitleEditorEnabled)
             o.put("assStyleOverridesJson", value.assStyleOverridesJson)
             context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(JSON, o.toString()).apply()
         }

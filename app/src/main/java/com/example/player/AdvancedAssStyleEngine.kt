@@ -248,9 +248,22 @@ class AssStylesDocument internal constructor(
 data class AssSubtitleOverrides(
     val styles: Map<String, Map<String, String>> = emptyMap(),
     val deleted: Set<String> = emptySet(),
-    val touchedAt: Long = 0L
+    val touchedAt: Long = 0L,
+    /**
+     * > 0 when the user APPLIED an edited raw script/subtitle text for this subtitle. The text
+     * itself lives in [AssRawTextStore] (it can be hundreds of KB, too big for the settings json);
+     * the revision only marks that it exists and makes the settings json change so playback syncs.
+     */
+    val rawRevision: Long = 0L
 ) {
+    /** True when there are no per-style edits (a raw text edit is tracked separately). */
     val isEmpty: Boolean get() = deleted.isEmpty() && styles.values.all { it.isEmpty() }
+
+    /** True when nothing at all is stored (no style edits and no applied raw text). */
+    val isCompletelyEmpty: Boolean get() = isEmpty && rawRevision <= 0L
+
+    /** Same overrides without the raw text marker. */
+    fun stylesOnly(): AssSubtitleOverrides = if (rawRevision == 0L) this else copy(rawRevision = 0L)
 
     fun fieldOf(style: String, field: String): String? = styles[style]?.get(field)
 
@@ -275,6 +288,18 @@ data class AssSubtitleOverrides(
 
 /** Original ASS/SSA text of a subtitle track plus its persistence identity. */
 class AdvancedAssSource(val key: String, val title: String, val text: String)
+
+/**
+ * Original, unedited text of the active subtitle (any format) for the raw text editor.
+ * [extension] is the real text format ("ass", "srt", "vtt", ...), [isAss] is true for ASS/SSA scripts.
+ */
+class RawSubtitleSource(
+    val key: String,
+    val title: String,
+    val text: String,
+    val extension: String,
+    val isAss: Boolean
+)
 
 /**
  * Persistence helper: all per-subtitle overrides are stored as ONE json string inside
@@ -318,7 +343,7 @@ object AssOverridesStore {
                         if (n.isNotEmpty()) deleted.add(n)
                     }
                 }
-                out[key] = AssSubtitleOverrides(styles, deleted, entry.optLong("t", 0L))
+                out[key] = AssSubtitleOverrides(styles, deleted, entry.optLong("t", 0L), entry.optLong("r", 0L))
             }
             out
         } catch (_: Throwable) {
@@ -328,13 +353,14 @@ object AssOverridesStore {
 
     fun encode(all: Map<String, AssSubtitleOverrides>): String {
         val root = JSONObject()
-        val kept = all.filterValues { !it.isEmpty }
+        val kept = all.filterValues { !it.isCompletelyEmpty }
             .entries
             .sortedByDescending { it.value.touchedAt }
             .take(MAX_SUBTITLES)
         for ((key, value) in kept) {
             val entry = JSONObject()
             entry.put("t", value.touchedAt)
+            if (value.rawRevision > 0L) entry.put("r", value.rawRevision)
             val stylesObj = JSONObject()
             for ((styleName, fields) in value.styles) {
                 if (fields.isEmpty()) continue
@@ -354,12 +380,51 @@ object AssOverridesStore {
     fun get(json: String, key: String): AssSubtitleOverrides = decode(json)[key] ?: AssSubtitleOverrides()
 
     /** True when at least one subtitle has stored overrides. */
-    fun hasAny(json: String): Boolean = decode(json).values.any { !it.isEmpty }
+    fun hasAny(json: String): Boolean = decode(json).values.any { !it.isCompletelyEmpty }
 
     fun put(json: String, key: String, value: AssSubtitleOverrides): String {
         val all = LinkedHashMap(decode(json))
         all[key] = value.copy(touchedAt = System.currentTimeMillis())
         return encode(all)
+    }
+}
+
+/**
+ * Disk store for raw (full text) subtitle edits applied by the user, one UTF-8 file per subtitle
+ * identity ([AdvancedAssStyleEngine.contentKey] / embedded key). Files live in the app's private
+ * storage; they are only written when the user presses Apply in the raw editor.
+ */
+object AssRawTextStore {
+    private const val DIR = "subtitle_raw_edits"
+
+    private fun fileFor(context: android.content.Context, key: String): java.io.File {
+        val safe = key.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        return java.io.File(java.io.File(context.applicationContext.filesDir, DIR).apply { mkdirs() }, "$safe.txt")
+    }
+
+    fun read(context: android.content.Context, key: String): String? {
+        return try {
+            val f = fileFor(context, key)
+            if (f.isFile) f.readText(Charsets.UTF_8) else null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    fun write(context: android.content.Context, key: String, text: String): Boolean {
+        return try {
+            val f = fileFor(context, key)
+            val tmp = java.io.File(f.parentFile, f.name + ".tmp")
+            tmp.writeText(text, Charsets.UTF_8)
+            if (f.exists()) f.delete()
+            tmp.renameTo(f) || run { f.writeText(text, Charsets.UTF_8); tmp.delete(); true }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun delete(context: android.content.Context, key: String) {
+        try { fileFor(context, key).delete() } catch (_: Throwable) {}
     }
 }
 

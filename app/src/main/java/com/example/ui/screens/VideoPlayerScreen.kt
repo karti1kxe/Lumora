@@ -959,6 +959,39 @@ fun VideoPlayerScreen(
         )
     }
 
+    // Imports a subtitle file chosen in the in-app explorer. All file copying, font syncing and
+    // subtitle preparation run OFF the main thread (they used to run on it, which froze the UI and
+    // crashed the app for big / font-heavy subtitles). Any Throwable is reported instead of crashing.
+    // Returns true when the subtitle was attached.
+    suspend fun importSubtitleFileSafely(selectedFile: File): Boolean {
+        val targetId = withContext(Dispatchers.IO) {
+            try {
+                if (!selectedFile.exists() || !selectedFile.isFile || selectedFile.length() <= 0L) {
+                    return@withContext null
+                }
+                val persistentFile = CustomSubtitlePersistenceManager.persistSubtitleFromFile(context, selectedFile)
+                val attachedPath = attachUploadedSubtitle(
+                    filePath = persistentFile.absolutePath,
+                    originalName = selectedFile.name,
+                    sourcePath = selectedFile.absolutePath
+                ) ?: persistentFile.absolutePath
+                val addedSubId = controller.addExternalSubtitle(
+                    attachedPath, context, originalName = selectedFile.name, select = true
+                )
+                addedSubId?.takeIf { it > 0 } ?: controller.subtitleTracks.value.lastOrNull()?.id ?: 0
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                android.util.Log.w("VideoPlayerScreen", "Subtitle import failed", t)
+                null
+            }
+        } ?: return false
+        if (targetId > 0) {
+            selectSubtitleTracks(targetId, controller.secondarySubtitleTrackId.value, notify = false)
+        }
+        return true
+    }
+
     // Subtitle File Picker Launcher
     val subtitleFilePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -1159,7 +1192,8 @@ fun VideoPlayerScreen(
                 enabled = settings.advancedAssEnabled,
                 overridesJson = settings.assStyleOverridesJson
             )
-            val appearanceKey = settings.copy(assStyleOverridesJson = "")
+            controller.setRawSubtitleEditorEnabled(settings.rawSubtitleEditorEnabled)
+            val appearanceKey = settings.copy(assStyleOverridesJson = "", rawSubtitleEditorEnabled = false)
             if (lastAppliedAppearanceKey[0] == appearanceKey) return@appearance
             lastAppliedAppearanceKey[0] = appearanceKey
             val selectedFamily = settings.selectedSubtitleFont
@@ -2844,25 +2878,16 @@ fun VideoPlayerScreen(
             onSelectSubtitleFile = { selectedFile ->
                 coroutineScope.launch {
                     try {
-                        if (selectedFile.exists() && selectedFile.length() > 0) {
-                            val persistentFile = CustomSubtitlePersistenceManager.persistSubtitleFromFile(context, selectedFile)
-                            val attachedPath = attachUploadedSubtitle(
-                                filePath = persistentFile.absolutePath,
-                                originalName = selectedFile.name,
-                                sourcePath = selectedFile.absolutePath
-                            ) ?: persistentFile.absolutePath
-                            val addedSubId = controller.addExternalSubtitle(attachedPath, context, originalName = selectedFile.name, select = true)
-                            val targetId = addedSubId?.takeIf { it > 0 } ?: controller.subtitleTracks.value.lastOrNull()?.id ?: 0
-                            if (targetId > 0) {
-                                selectSubtitleTracks(targetId, controller.secondarySubtitleTrackId.value, notify = false)
-                            }
+                        if (importSubtitleFileSafely(selectedFile)) {
                             showNotification("Loaded Subtitle: ${selectedFile.name}")
                         } else {
                             showNotification("Failed to load subtitle file")
                         }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        showNotification("Error: ${e.message}")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (t: Throwable) {
+                        t.printStackTrace()
+                        showNotification("Error: ${t.message}")
                     }
                 }
             },
@@ -2996,6 +3021,8 @@ fun VideoPlayerScreen(
                 onPlayerSettingsChange(updated)
             },
             onLoadAdvancedAssSource = { trackId -> controller.readAdvancedAssSource(context, trackId) },
+            onLoadRawSubtitleSource = { trackId -> controller.readRawSubtitleSource(context, trackId) },
+            onRawSubtitlePreview = { key, text -> controller.setRawSubtitlePreview(key, text) },
             showDoubleTapSeekFeedback = uiState.playerSettings.rippleOnDoubleTap && uiState.playerSettings.showSeekTime,
             showVolumeSliderOverlay = uiState.playerSettings.volumeSliderOverlay,
             showBrightnessSliderOverlay = uiState.playerSettings.brightnessSliderOverlay,
@@ -3026,25 +3053,16 @@ fun VideoPlayerScreen(
                 onSubtitleSelected = { selectedFile ->
                     coroutineScope.launch {
                         try {
-                            if (selectedFile.exists() && selectedFile.length() > 0) {
-                                val persistentFile = CustomSubtitlePersistenceManager.persistSubtitleFromFile(context, selectedFile)
-                                val attachedPath = attachUploadedSubtitle(
-                                    filePath = persistentFile.absolutePath,
-                                    originalName = selectedFile.name,
-                                    sourcePath = selectedFile.absolutePath
-                                ) ?: persistentFile.absolutePath
-                                val addedSubId = controller.addExternalSubtitle(attachedPath, context, originalName = selectedFile.name, select = true)
-                                val targetId = addedSubId?.takeIf { it > 0 } ?: controller.subtitleTracks.value.lastOrNull()?.id ?: 0
-                                if (targetId > 0) {
-                                    selectSubtitleTracks(targetId, controller.secondarySubtitleTrackId.value, notify = false)
-                                }
+                            if (importSubtitleFileSafely(selectedFile)) {
                                 Toast.makeText(context, "Loaded Subtitle: ${selectedFile.name}", Toast.LENGTH_LONG).show()
                             } else {
                                 Toast.makeText(context, "Failed to load subtitle file", Toast.LENGTH_SHORT).show()
                             }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (t: Throwable) {
+                            t.printStackTrace()
+                            Toast.makeText(context, "Error: ${t.message}", Toast.LENGTH_SHORT).show()
                         }
                     }
                 },
