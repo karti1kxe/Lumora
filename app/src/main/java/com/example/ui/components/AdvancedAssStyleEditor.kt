@@ -79,11 +79,6 @@ private class LoadedAssDocument(
     val document: AssStylesDocument
 )
 
-private data class AssFontChoice(
-    val displayName: String,
-    val familyName: String
-)
-
 /**
  * Advanced ASS/SSA editor: one expandable card per Style found in the CURRENT ASS/SSA subtitle
  * (nothing is hard-coded). All edits are stored as per-subtitle overrides inside
@@ -150,22 +145,17 @@ internal fun AdvancedAssStyleEditorContent(
         }
     }
 
-    val fontChoices by produceState<List<AssFontChoice>>(emptyList(), settings.subtitleFontsReloadNonce, settings.showVideoEmbeddedSubtitleFonts) {
+    val fontFamilies by produceState<List<String>>(emptyList(), settings.subtitleFontsReloadNonce, settings.showVideoEmbeddedSubtitleFonts) {
         value = withContext(Dispatchers.IO) {
             try {
                 SubtitleFontManager.getInstalledFonts(
                     context,
                     includeVideoExtracted = settings.showVideoEmbeddedSubtitleFonts
                 )
-                    .map {
-                        AssFontChoice(
-                            displayName = SubtitleFontManager.getOriginalFontName(it),
-                            familyName = SubtitleFontManager.getFontFamilyName(it)
-                        )
-                    }
-                    .filter { it.displayName.isNotBlank() && it.familyName.isNotBlank() && ',' !in it.displayName && ',' !in it.familyName }
-                    .distinctBy { it.familyName.lowercase() }
-                    .sortedBy { it.displayName.lowercase() }
+                    .map { SubtitleFontManager.getOriginalFontName(it) }
+                    .filter { it.isNotBlank() && ',' !in it }
+                    .distinct()
+                    .sortedBy { it.lowercase() }
             } catch (_: Throwable) {
                 emptyList()
             }
@@ -218,7 +208,7 @@ internal fun AdvancedAssStyleEditorContent(
                             expandedStyles + style.name
                         }
                     },
-                    fontChoices = fontChoices,
+                    fontFamilies = fontFamilies,
                     otherStyleNames = otherNames,
                     onOverridesChange = updateOverrides
                 )
@@ -270,7 +260,7 @@ private fun AssStyleCard(
     overrides: AssSubtitleOverrides,
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
-    fontChoices: List<AssFontChoice>,
+    fontFamilies: List<String>,
     otherStyleNames: List<String>,
     onOverridesChange: ((AssSubtitleOverrides) -> AssSubtitleOverrides) -> Unit
 ) {
@@ -400,16 +390,11 @@ private fun AssStyleCard(
                             onCommit = { set(AssFields.FONT_SIZE, it) }
                         )
                     }
-                    val effectiveFont = eff(AssFields.FONT_NAME)
-                    val displayFont = fontChoices.firstOrNull {
-                        it.familyName.equals(effectiveFont, ignoreCase = true)
-                    }?.displayName ?: effectiveFont
                     AssFontField(
-                        currentFont = displayFont,
+                        currentFont = eff(AssFields.FONT_NAME),
                         originalFont = document.read(style, AssFields.FONT_NAME),
                         open = fontPickerOpen,
-                        choices = fontChoices,
-                        selectedFamily = effectiveFont,
+                        families = fontFamilies,
                         onToggle = { fontPickerOpen = !fontPickerOpen },
                         onSelectOriginal = {
                             onOverridesChange { it.withoutField(style.name, AssFields.FONT_NAME) }
@@ -704,8 +689,7 @@ private fun AssFontField(
     currentFont: String,
     originalFont: String,
     open: Boolean,
-    choices: List<AssFontChoice>,
-    selectedFamily: String,
+    families: List<String>,
     onToggle: () -> Unit,
     onSelectOriginal: () -> Unit,
     onSelectFamily: (String) -> Unit
@@ -758,14 +742,14 @@ private fun AssFontField(
                     selected = false,
                     onSelect = onSelectOriginal
                 )
-                choices.forEach { choice ->
+                families.forEach { family ->
                     AssFontRow(
-                        name = choice.displayName,
-                        selected = choice.familyName.equals(selectedFamily, ignoreCase = true),
-                        onSelect = { onSelectFamily(choice.familyName) }
+                        name = family,
+                        selected = family.equals(currentFont, ignoreCase = true),
+                        onSelect = { onSelectFamily(family) }
                     )
                 }
-                if (choices.isEmpty()) {
+                if (families.isEmpty()) {
                     Text(
                         text = "No imported fonts available. Import fonts from Settings → Subtitles → Fonts.",
                         fontSize = 11.sp,

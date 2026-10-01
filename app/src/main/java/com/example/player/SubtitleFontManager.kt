@@ -644,11 +644,7 @@ object SubtitleFontManager {
      * falls back to the default system font ("sans-serif" / "Arial"), while PRESERVING
      * 100% of the style's colors, sizes, borders, shadows, alignments, karaoke tags, and animations!
      */
-    fun sanitizeAssForFallback(
-        context: Context,
-        assContent: String,
-        forceSelectedFont: Boolean = false
-    ): String {
+    fun sanitizeAssForFallback(context: Context, assContent: String): String {
         if (assContent.isBlank()) return assContent
         if (!assContent.contains("[V4+ Styles]", ignoreCase = true) &&
             !assContent.contains("[V4 Styles]", ignoreCase = true)
@@ -682,11 +678,6 @@ object SubtitleFontManager {
                     isSuppliedByCurrentVideo(context, fontName)
                 }
             fun fallbackFont(fontName: String): String = when {
-                // Normal "Override ASS/SSA Styles" mode must make the selected font the
-                // actual ASS font for every style.  The old code intentionally preserved
-                // fonts supplied by the subtitle/video, which is correct for the native
-                // renderer but defeats an explicit global override.
-                forceSelectedFont && userFont != null -> userFont
                 userFont != null && !supplied(fontName) -> userFont
                 available(fontName) -> fontName
                 else -> replacementFont
@@ -1077,11 +1068,13 @@ object SubtitleFontManager {
     }
 
     /**
-     * Returns the metadata Family Name that libass/fontconfig should receive for a selected file.
-     * The UI may display the font's Full Font Name, but ASS/SSA FontName must resolve against the
-     * internal family declared by the font itself, never against the uploaded filename.
+     * Returns the exact font name that libass should receive for a selected file.
+     * libass/fontconfig supports matching ASS font references against the font's
+     * Full Font Name, which is important when several uploaded files intentionally
+     * share the same internal family name. Passing only the family collapses those
+     * files into whichever face fontconfig happens to select.
      */
-    fun getRenderFontName(file: File): String = getFontFamilyName(file)
+    fun getRenderFontName(file: File): String = getOriginalFontName(file)
 
     /**
      * Deletes a custom font from the fonts directory.
