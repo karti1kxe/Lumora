@@ -644,7 +644,11 @@ object SubtitleFontManager {
      * falls back to the default system font ("sans-serif" / "Arial"), while PRESERVING
      * 100% of the style's colors, sizes, borders, shadows, alignments, karaoke tags, and animations!
      */
-    fun sanitizeAssForFallback(context: Context, assContent: String): String {
+    fun sanitizeAssForFallback(
+        context: Context,
+        assContent: String,
+        forceSelectedFont: Boolean = false
+    ): String {
         if (assContent.isBlank()) return assContent
         if (!assContent.contains("[V4+ Styles]", ignoreCase = true) &&
             !assContent.contains("[V4 Styles]", ignoreCase = true)
@@ -678,6 +682,11 @@ object SubtitleFontManager {
                     isSuppliedByCurrentVideo(context, fontName)
                 }
             fun fallbackFont(fontName: String): String = when {
+                // Normal "Override ASS/SSA Styles" mode must make the selected font the
+                // actual ASS font for every style.  The old code intentionally preserved
+                // fonts supplied by the subtitle/video, which is correct for the native
+                // renderer but defeats an explicit global override.
+                forceSelectedFont && userFont != null -> userFont
                 userFont != null && !supplied(fontName) -> userFont
                 available(fontName) -> fontName
                 else -> replacementFont
@@ -703,7 +712,7 @@ object SubtitleFontManager {
                 if (inStylesSection && trimmed.startsWith("Style:", ignoreCase = true)) {
                     val prefixLength = original.indexOf("Style:", ignoreCase = true)
                     val prefix = if (prefixLength >= 0) original.substring(0, prefixLength) else ""
-                    val parts = trimmed.substringAfter(":").split(",").toMutableList()
+                    val parts = trimmed.substringAfter(":").split(",", limit = -1).toMutableList()
                     val fontIndex = styleFormatFields.indexOf("fontname").takeIf { it >= 0 } ?: 1
                     if (fontIndex in parts.indices) {
                         parts[fontIndex] = fallbackFont(parts[fontIndex])
@@ -787,7 +796,7 @@ object SubtitleFontManager {
             if (inStyles && t.startsWith("Style:", ignoreCase = true)) {
                 val idx = original.indexOf("Style:", ignoreCase = true)
                 val head = original.substring(0, idx + 6)
-                val parts = original.substring(idx + 6).split(",").toMutableList()
+                val parts = original.substring(idx + 6).split(",", limit = -1).toMutableList()
                 val fontIndex = format.indexOf("fontname").takeIf { it >= 0 } ?: 1
                 if (fontIndex in parts.indices) {
                     val before = parts[fontIndex]
@@ -1068,14 +1077,9 @@ object SubtitleFontManager {
     }
 
     /**
-     * Returns the font FAMILY name that libass should receive for a selected file.
-     *
-     * ASS/SSA `Fontname` and mpv's `sub-font` are family-based font selectors. The
-     * user-facing name is intentionally kept separate: [getOriginalFontName] returns
-     * NameID 4 (the full/original font name) for the picker, while this method returns
-     * NameID 1 (the family name) for rendering. This distinction matters for fonts whose
-     * filename/full name differs from their internal family name (for example, a font
-     * whose metadata says family `XE Fonts` but full name `Songs OPE`).
+     * Returns the metadata Family Name that libass/fontconfig should receive for a selected file.
+     * The UI may display the font's Full Font Name, but ASS/SSA FontName must resolve against the
+     * internal family declared by the font itself, never against the uploaded filename.
      */
     fun getRenderFontName(file: File): String = getFontFamilyName(file)
 

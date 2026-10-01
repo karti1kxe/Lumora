@@ -3022,11 +3022,16 @@ fun SettingsSheet(
                                 }
                             },
                             onDeleteFont = { fontName ->
+                                val deletedFontFile = File(SubtitleFontManager.getSubFontsDir(context), fontName)
+                                val deletedFamily = if (deletedFontFile.isFile) SubtitleFontManager.getFontFamilyName(deletedFontFile) else ""
+                                val deletedDisplayName = if (deletedFontFile.isFile) SubtitleFontManager.getOriginalFontName(deletedFontFile) else ""
                                 val deleted = SubtitleFontManager.deleteCustomFont(context, fontName)
                                 if (deleted) {
                                     fontListVersion++
                                     val newSelected = if (uiState.playerSettings.selectedSubtitleFont.equals(fontName, ignoreCase = true) ||
-                                        uiState.playerSettings.selectedSubtitleFont.equals(fontName.substringBeforeLast('.'), ignoreCase = true)) {
+                                        uiState.playerSettings.selectedSubtitleFont.equals(fontName.substringBeforeLast('.'), ignoreCase = true) ||
+                                        (deletedFamily.isNotBlank() && uiState.playerSettings.selectedSubtitleFont.equals(deletedFamily, ignoreCase = true)) ||
+                                        (deletedDisplayName.isNotBlank() && uiState.playerSettings.selectedSubtitleFont.equals(deletedDisplayName, ignoreCase = true))) {
                                         ""
                                     } else uiState.playerSettings.selectedSubtitleFont
                                     onPlayerSettingsChange(
@@ -4298,7 +4303,9 @@ fun SubtitlesTab(
                         val selected = SubtitleFontManager.getInstalledFonts(context, includeVideoExtracted = true)
                             .firstOrNull { file ->
                                 file.name.equals(settings.selectedSubtitleFont, ignoreCase = true) ||
-                                    file.nameWithoutExtension.equals(settings.selectedSubtitleFont, ignoreCase = true)
+                                    file.nameWithoutExtension.equals(settings.selectedSubtitleFont, ignoreCase = true) ||
+                                    SubtitleFontManager.getFontFamilyName(file).equals(settings.selectedSubtitleFont, ignoreCase = true) ||
+                                    SubtitleFontManager.getOriginalFontName(file).equals(settings.selectedSubtitleFont, ignoreCase = true)
                             }
                         selected?.let { SubtitleFontManager.isVideoExtractedFont(context, it) } == true
                     } else false
@@ -4518,8 +4525,11 @@ fun SubtitlesTab(
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 installedFonts.forEach { fontFile ->
                                     val isVideoFont = SubtitleFontManager.isVideoExtractedFont(context, fontFile)
+                                    val familyName = SubtitleFontManager.getFontFamilyName(fontFile)
                                     val isSelected = settings.selectedSubtitleFont.equals(fontFile.name, ignoreCase = true) ||
-                                        settings.selectedSubtitleFont.equals(fontFile.nameWithoutExtension, ignoreCase = true)
+                                        settings.selectedSubtitleFont.equals(fontFile.nameWithoutExtension, ignoreCase = true) ||
+                                        settings.selectedSubtitleFont.equals(familyName, ignoreCase = true) ||
+                                        settings.selectedSubtitleFont.equals(SubtitleFontManager.getOriginalFontName(fontFile), ignoreCase = true)
                                     val fileSizeKb = (fontFile.length() / 1024).coerceAtLeast(1)
 
                                     Surface(
@@ -4574,7 +4584,6 @@ fun SubtitlesTab(
                                                         verticalAlignment = Alignment.CenterVertically,
                                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                                     ) {
-                                                        // Only the font's real (metadata) name is shown - never the file name.
                                                         Text(
                                                             text = "${fileSizeKb} KB",
                                                             fontSize = 11.sp,
@@ -4605,7 +4614,7 @@ fun SubtitlesTab(
                                                                     modifier = if (isVideoFont) Modifier else Modifier
                                                                         .clip(RoundedCornerShape(4.dp))
                                                                         .clickable {
-                                                                            onSettingsChange(settings.copy(selectedSubtitleFont = fontFile.name))
+                                                                            onSettingsChange(settings.copy(selectedSubtitleFont = familyName))
                                                                         }
                                                                 )
                                                             }

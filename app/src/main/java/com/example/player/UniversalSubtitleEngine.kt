@@ -44,7 +44,8 @@ object UniversalSubtitleEngine {
         context: Context,
         file: File,
         videoFps: Double = 24.0,
-        videoPath: String? = null
+        videoPath: String? = null,
+        forceSelectedFont: Boolean = false
     ): String {
         if (!file.exists() || file.length() == 0L) return file.absolutePath
 
@@ -65,7 +66,11 @@ object UniversalSubtitleEngine {
                 // Keep native ASS/SSA untouched when its referenced fonts exist. If a style
                 // or inline \fn asks for a font that is genuinely unavailable, replace only
                 // that font name with the bundled universal fallback.
-                var sanitized = SubtitleFontManager.sanitizeAssForFallback(context, rawText)
+                var sanitized = SubtitleFontManager.sanitizeAssForFallback(
+                    context = context,
+                    assContent = rawText,
+                    forceSelectedFont = forceSelectedFont
+                )
                 // Characters the selected font has no glyph for (music notes, symbols, other
                 // scripts) are drawn from the bundled Go Noto font instead of "tofu" boxes.
                 sanitized = SubtitleFontManager.applyGlyphFallback(context, sanitized)

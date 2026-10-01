@@ -179,16 +179,22 @@ class MpvPlayerController {
     /** Prepared (cached) subtitle file path -> the original subtitle file it was built from. */
     private val preparedSubtitleSources = ConcurrentHashMap<String, File>()
     private var lastSelectedFontKey: String? = null
+    private var lastSelectedFontOverrideMode: Boolean? = null
 
     /**
      * The user picked (or cleared) a subtitle font. Remember it for the subtitle preparation code,
      * then rebuild the already loaded external subtitle files so that font (plus the Go Noto glyph
      * fallback for characters it lacks) shows up right away, without touching playback.
      */
-    private fun onSelectedSubtitleFontChanged(fontFamily: String?) {
+    private fun onSelectedSubtitleFontChanged(
+        fontFamily: String?,
+        forceSelectedFont: Boolean = false
+    ) {
         val key = fontFamily?.trim().orEmpty()
-        if (key == lastSelectedFontKey) return
+        val modeChanged = lastSelectedFontOverrideMode != forceSelectedFont
+        if (key == lastSelectedFontKey && !modeChanged) return
         lastSelectedFontKey = key
+        lastSelectedFontOverrideMode = forceSelectedFont
         SubtitleFontManager.setSelectedFont(fontFamily)
         val ctx = mpvView?.context ?: return
         // Embedded ASS/SSA tracks are not rewritten by us; libass caches the font it resolved for
@@ -218,7 +224,8 @@ class MpvPlayerController {
                         context = ctx,
                         file = source,
                         videoFps = _estimatedFps.value.takeIf { it > 0.0 } ?: 24.0,
-                        videoPath = currentFilePath
+                        videoPath = currentFilePath,
+                        forceSelectedFont = forceSelectedFont
                     )
                     if (newPath != prepared) continue
                     val after = try { File(prepared).readText() } catch (_: Throwable) { null }
@@ -1847,7 +1854,17 @@ class MpvPlayerController {
                     _subtitleTracks.value = preservedSubList
                     if (advancedAssEnabled && !advancedAssSyncing) scheduleAdvancedAssSync()
                     val currentSid = view.mpv.getPropertyString("sid")
-                    val isNoneSelected = preservedSubList.none { it.isSelected } || currentSid == null || currentSid == "no" || currentSid == "0"
+                    // A renderer-only transition (notably Advanced ASS/SSA creating/removing
+                    // its private derived track, or Override ASS/SSA rebuilding libass) can
+                    // briefly make MPV report no selected subtitle while the logical user
+                    // selection is still stored in [lastActiveSubtitleTrackId].  Do NOT treat
+                    // that transient state as a real "nothing selected" state, otherwise the
+                    // fallback auto-selector picks the first/top subtitle and the user's
+                    // per-video selection appears to jump.
+                    val hasLogicalSelection = lastActiveSubtitleTrackId > 0 &&
+                        preservedSubList.any { it.id == resolveAdvancedAssOriginalId(lastActiveSubtitleTrackId) }
+                    val isNoneSelected = !hasLogicalSelection &&
+                        (preservedSubList.none { it.isSelected } || currentSid == null || currentSid == "no" || currentSid == "0")
                     if (isNoneSelected && !isSubtitleExplicitlyDisabled && !holdSubtitleAutoSelect) {
                         val matched = SubtitleSessionMemory.findMatchingTrackForNextEpisode(preservedSubList)
                         if (matched != null && matched.id > 0) {
@@ -2016,7 +2033,10 @@ class MpvPlayerController {
                 subtitleFontFamily?.takeIf { it.isNotBlank() } ?: SubtitleFontManager.BUNDLED_FALLBACK_FONT_FAMILY
             )
         } catch (_: Throwable) {}
-        onSelectedSubtitleFontChanged(subtitleFontFamily)
+        onSelectedSubtitleFontChanged(
+            fontFamily = subtitleFontFamily,
+            forceSelectedFont = effectiveOverrideAss && isNativeAssSsa
+        )
         nudgeRedrawIfPaused()
     }
 
@@ -2305,7 +2325,10 @@ class MpvPlayerController {
             }
             val effectiveFontFamily = if (!fontFamily.isNullOrBlank()) fontFamily else SubtitleFontManager.BUNDLED_FALLBACK_FONT_FAMILY
             view.mpv.setPropertyString("sub-font", effectiveFontFamily)
-            onSelectedSubtitleFontChanged(fontFamily)
+            onSelectedSubtitleFontChanged(
+                fontFamily = fontFamily,
+                forceSelectedFont = effectiveOverrideAss && isNativeAssSsa
+            )
 
             // Also configure sub-ass-force-style for fine-grained style override support
             val forceStyles = mutableListOf<String>()
@@ -2381,18 +2404,7 @@ class MpvPlayerController {
                 // from the subtitle's own Style definitions when the toggle is OFF.
                 val previousNativeOverride = lastAppliedNativeAssOverride
                 if (isNativeAssSsa && previousNativeOverride != null && previousNativeOverride != effectiveOverrideAss) {
-                    // `sub-reload` can cause mpv to temporarily re-evaluate `sid` and, on
-                    // some builds, land on the first subtitle track. The user's current
-                    // subtitle selection is a per-video state and must survive this renderer
-                    // refresh. Capture the logical track before reloading and restore it through
-                    // the existing generation-safe recovery path.
-                    val selectedTrackId = _subtitleTracks.value.firstOrNull { it.isSelected }?.id
-                        ?: lastActiveSubtitleTrackId
-                    val selectionGeneration = subtitleSelectionGeneration.get()
                     view.mpv.command("sub-reload")
-                    if (selectedTrackId > 0) {
-                        scheduleNativeAssSelectionRecovery(selectedTrackId, selectionGeneration)
-                    }
                 }
                 lastAppliedNativeAssOverride = if (isNativeAssSsa) effectiveOverrideAss else null
             } catch (_: Throwable) {}
@@ -2778,8 +2790,17 @@ class MpvPlayerController {
         val fontFixed = try {
             SubtitleFontManager.replaceMissingFontsKeepingLayout(context, base)
         } catch (_: Throwable) { null }
-        val renderText = fontFixed ?: base
-        val needsDerived = !overrides.isEmpty || fontFixed != null
+        val fontBase = fontFixed ?: base
+        val renderText = try {
+            // Advanced ASS bypasses the normal generated-subtitle preparation path, so it
+            // must receive the same per-glyph fallback pass explicitly.  This keeps a
+            // selected Devanagari-capable font intact and sends only genuinely missing
+            // glyphs (symbols/other scripts) to the bundled universal font.
+            SubtitleFontManager.applyGlyphFallback(context, fontBase)
+        } catch (_: Throwable) {
+            fontBase
+        }
+        val needsDerived = !overrides.isEmpty || fontFixed != null || renderText != fontBase
         if (needsDerived) {
             val built = renderText
             signature = "${built.length}:${built.hashCode()}"
@@ -3523,7 +3544,8 @@ class MpvPlayerController {
                 context = ctx,
                 file = localFile,
                 videoFps = _estimatedFps.value.takeIf { it > 0.0 } ?: 24.0,
-                videoPath = currentFilePath
+                videoPath = currentFilePath,
+                forceSelectedFont = isNativeAss && subtitleOverrideAssSsa
             )
             // Only our own converted text subtitles are considered generated ASS.
             // Native ASS/SSA is kept completely untouched until the user enables override.

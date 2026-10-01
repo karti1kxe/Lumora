@@ -805,14 +805,16 @@ private fun EnhancedTypographyContent(
 
                     installedFonts.forEach { fontFile ->
                         val originalName = SubtitleFontManager.getOriginalFontName(fontFile)
+                        val familyName = SubtitleFontManager.getFontFamilyName(fontFile)
                         val isSelected = settings.selectedSubtitleFont.equals(fontFile.name, ignoreCase = true) ||
                                 settings.selectedSubtitleFont.equals(fontFile.nameWithoutExtension, ignoreCase = true) ||
-                                settings.selectedSubtitleFont.equals(originalName, ignoreCase = true)
+                                settings.selectedSubtitleFont.equals(originalName, ignoreCase = true) ||
+                                settings.selectedSubtitleFont.equals(familyName, ignoreCase = true)
                         FontItemRow(
                             name = originalName,
                             isSelected = isSelected,
                             onSelect = {
-                                onUpdateSettings { it.copy(selectedSubtitleFont = fontFile.name) }
+                                onUpdateSettings { it.copy(selectedSubtitleFont = familyName) }
                             }
                         )
                     }
