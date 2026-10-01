@@ -199,7 +199,6 @@ object SubtitleFontManager {
                 assetsFontsSynced = true
             }
             ensureDefaultFontAliases(fontsDir)
-            ensureUniqueFontNames(context)
         } catch (t: Throwable) {
             Log.w(TAG, "Unable to initialize subtitle fallback fonts", t)
         }
@@ -230,7 +229,6 @@ object SubtitleFontManager {
                 assetsFontsSynced = true
             }
             ensureDefaultFontAliases(fontsDir)
-            ensureUniqueFontNames(context)
         } catch (t: Throwable) {
             Log.e(TAG, "Error in synchronous font setup", t)
         }
@@ -476,264 +474,11 @@ object SubtitleFontManager {
         }
     }
 
-    // ---------------------------------------------------------------------------------------
-    // UNIQUE FONT IDENTITY
-    //
-    // Many font packs (e.g. the "XE Fonts" set: Subs, N Subs, Songs END, Songs OPE, ONE PIECE,
-    // Romaji ...) ship every file with the SAME family name ("XE Fonts") and the SAME PostScript
-    // name. libass/fontconfig address a font by its FAMILY name - and when "Override ASS/SSA" or
-    // the normal subtitle editor is used, mpv hands the name over as a fontconfig *pattern*, which
-    // never matches a Full Font Name. The result: the wrong face of the pack (or the phone font)
-    // is drawn, English may look right but Hindi/Devanagari ends up in the system font.
-    //
-    // Fix: for fonts the USER imported, give every file its own typographic family name (name ID
-    // 16) equal to its real Full Font Name (name ID 4), and make colliding PostScript names unique.
-    // Glyphs, the original family (ID 1) and the displayed name (ID 4) are untouched, so the list
-    // still shows the original metadata name and old scripts that use the old family still work.
-    // ---------------------------------------------------------------------------------------
-
-    /** Bumped whenever font files on disk were renamed/added, so the renderer rescans the folder. */
-    @Volatile
-    var fontsRevision: Int = 0
-        private set
-
-    @Volatile private var lastUniqueNamesSignature: String? = null
-
-    private class NameRec(val p: Int, val e: Int, val l: Int, val id: Int, val data: ByteArray) {
-        fun text(): String = if (p == 0 || p == 3) {
-            String(data, java.nio.charset.StandardCharsets.UTF_16BE).trim()
-        } else {
-            String(data, java.nio.charset.StandardCharsets.ISO_8859_1).trim()
-        }
-    }
-
-    private fun encodeNameFor(platform: Int, value: String): ByteArray? = when (platform) {
-        0, 3 -> value.toByteArray(java.nio.charset.StandardCharsets.UTF_16BE)
-        1 -> value.toByteArray(java.nio.charset.StandardCharsets.ISO_8859_1)
-        else -> null
-    }
-
-    private fun sfntChecksum(d: ByteArray): Int {
-        var sum = 0
-        var i = 0
-        while (i < d.size) {
-            var w = 0
-            for (k in 0 until 4) {
-                w = (w shl 8) or (if (i + k < d.size) d[i + k].toInt() and 0xFF else 0)
-            }
-            sum += w
-            i += 4
-        }
-        return sum
-    }
-
-    /** All records of the 'name' table of a TTF/OTF (null for TTC/WOFF/broken files). */
-    private fun parseNameRecords(bytes: ByteArray): List<NameRec>? {
-        try {
-            if (bytes.size < 32) return null
-            val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.BIG_ENDIAN)
-            val ver = buf.getInt(0)
-            if (ver != 0x00010000 && ver != 0x4F54544F && ver != 0x74727565) return null
-            val numTables = buf.getShort(4).toInt() and 0xFFFF
-            if (numTables <= 0 || numTables > 200) return null
-            for (i in 0 until numTables) {
-                val rec = 12 + i * 16
-                if (rec + 16 > bytes.size) return null
-                if (buf.getInt(rec) != 0x6E616D65) continue
-                val off = buf.getInt(rec + 8)
-                val len = buf.getInt(rec + 12)
-                if (off < 0 || len < 6 || off.toLong() + len > bytes.size) return null
-                val count = buf.getShort(off + 2).toInt() and 0xFFFF
-                val storage = off + (buf.getShort(off + 4).toInt() and 0xFFFF)
-                val out = ArrayList<NameRec>(count)
-                for (n in 0 until count) {
-                    val np = off + 6 + n * 12
-                    if (np + 12 > bytes.size) break
-                    val length = buf.getShort(np + 8).toInt() and 0xFFFF
-                    val strOff = buf.getShort(np + 10).toInt() and 0xFFFF
-                    val pos = storage + strOff
-                    if (length <= 0 || pos < 0 || pos + length > bytes.size) continue
-                    out.add(
-                        NameRec(
-                            buf.getShort(np).toInt() and 0xFFFF,
-                            buf.getShort(np + 2).toInt() and 0xFFFF,
-                            buf.getShort(np + 4).toInt() and 0xFFFF,
-                            buf.getShort(np + 6).toInt() and 0xFFFF,
-                            bytes.copyOfRange(pos, pos + length)
-                        )
-                    )
-                }
-                return out
-            }
-            return null
-        } catch (_: Throwable) {
-            return null
-        }
-    }
-
-    private fun pickName(recs: List<NameRec>, id: Int): String? {
-        val sameId = recs.filter { it.id == id }
-        return sameId.firstOrNull { (it.p == 3 || it.p == 0) && it.text().isNotBlank() }?.text()
-            ?: sameId.firstOrNull { it.text().isNotBlank() }?.text()
-    }
-
-    /**
-     * Returns a copy of the font whose typographic family (ID 16) equals its Full Font Name (ID 4)
-     * and - when [renamePostScript] - whose PostScript name (ID 6) is unique; null when nothing
-     * has to change or the file cannot be rewritten safely.
-     */
-    private fun buildUniquelyNamedFont(bytes: ByteArray, renamePostScript: Boolean): ByteArray? {
-        try {
-            val recs = parseNameRecords(bytes) ?: return null
-            val full = pickName(recs, 4)?.takeIf { it.isNotBlank() } ?: return null
-            val existing16 = recs.filter { it.id == 16 }
-            val has16 = existing16.isNotEmpty() && existing16.all { it.text().equals(full, ignoreCase = false) }
-            if (has16 && !renamePostScript) return null
-
-            val result = ArrayList<NameRec>()
-            val triples = LinkedHashSet<Triple<Int, Int, Int>>()
-            val psName = full.filter { !it.isWhitespace() }
-            for (r in recs) {
-                if (r.id == 4 && encodeNameFor(r.p, full) != null) triples.add(Triple(r.p, r.e, r.l))
-                if (r.id == 16) continue
-                if (r.id == 6 && renamePostScript) {
-                    val enc = encodeNameFor(r.p, psName)
-                    if (enc != null) { result.add(NameRec(r.p, r.e, r.l, 6, enc)); continue }
-                }
-                result.add(r)
-            }
-            for (t in triples) {
-                val enc = encodeNameFor(t.first, full) ?: continue
-                result.add(NameRec(t.first, t.second, t.third, 16, enc))
-            }
-            val sorted = result.sortedWith(compareBy<NameRec>({ it.p }, { it.e }, { it.l }, { it.id }))
-            val headerSize = 6 + 12 * sorted.size
-            val strings = java.io.ByteArrayOutputStream()
-            val nameHeader = java.nio.ByteBuffer.allocate(headerSize).order(java.nio.ByteOrder.BIG_ENDIAN)
-            nameHeader.putShort(0)
-            nameHeader.putShort(sorted.size.toShort())
-            nameHeader.putShort(headerSize.toShort())
-            for (r in sorted) {
-                if (strings.size() + r.data.size > 0xFFFF) return null
-                nameHeader.putShort(r.p.toShort())
-                nameHeader.putShort(r.e.toShort())
-                nameHeader.putShort(r.l.toShort())
-                nameHeader.putShort(r.id.toShort())
-                nameHeader.putShort(r.data.size.toShort())
-                nameHeader.putShort(strings.size().toShort())
-                strings.write(r.data)
-            }
-            val newName = nameHeader.array() + strings.toByteArray()
-
-            // Re-assemble the sfnt container with the new 'name' table.
-            val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.BIG_ENDIAN)
-            val numTables = buf.getShort(4).toInt() and 0xFFFF
-            val dirEnd = 12 + 16 * numTables
-            val tags = IntArray(numTables)
-            val sums = IntArray(numTables)
-            val tableData = arrayOfNulls<ByteArray>(numTables)
-            var nameIdx = -1
-            var total = dirEnd
-            for (i in 0 until numTables) {
-                val rec = 12 + i * 16
-                tags[i] = buf.getInt(rec)
-                sums[i] = buf.getInt(rec + 4)
-                val off = buf.getInt(rec + 8)
-                val len = buf.getInt(rec + 12)
-                if (off < 0 || len < 0 || off.toLong() + len > bytes.size) return null
-                val d = if (tags[i] == 0x6E616D65) { nameIdx = i; newName } else bytes.copyOfRange(off, off + len)
-                tableData[i] = d
-                total += (d.size + 3) and 3.inv()
-            }
-            if (nameIdx < 0) return null
-            val out = ByteArray(total)
-            System.arraycopy(bytes, 0, out, 0, 12)
-            val ob = java.nio.ByteBuffer.wrap(out).order(java.nio.ByteOrder.BIG_ENDIAN)
-            var pos = dirEnd
-            for (i in 0 until numTables) {
-                val d = tableData[i] ?: return null
-                val rec = 12 + i * 16
-                ob.putInt(rec, tags[i])
-                ob.putInt(rec + 4, if (i == nameIdx) sfntChecksum(d) else sums[i])
-                ob.putInt(rec + 8, pos)
-                ob.putInt(rec + 12, d.size)
-                System.arraycopy(d, 0, out, pos, d.size)
-                pos += (d.size + 3) and 3.inv()
-            }
-            return out
-        } catch (_: Throwable) {
-            return null
-        }
-    }
-
-    private fun uniqueNamesSignature(files: List<File>): String =
-        files.sortedBy { it.name }.joinToString("|") { "${it.name}:${it.length()}:${it.lastModified()}" }
-
-    /**
-     * Makes every user-imported font addressable by its own unique name (see the block comment
-     * above). Cheap when nothing changed (a directory signature is compared); safe to call often.
-     * Returns true when at least one font file was rewritten.
-     */
-    @Synchronized
-    fun ensureUniqueFontNames(context: Context): Boolean {
-        var changedAny = false
-        try {
-            val dir = getSubFontsDir(context)
-            val userFiles = dir.listFiles()?.filter {
-                it.isFile && it.extension.lowercase(java.util.Locale.ROOT) in setOf("ttf", "otf") &&
-                    isUserUploadedFont(context, it)
-            } ?: return false
-            if (userFiles.isEmpty()) return false
-            if (uniqueNamesSignature(userFiles) == lastUniqueNamesSignature) return false
-
-            val psOf = HashMap<File, String?>()
-            val psCount = HashMap<String, Int>()
-            for (f in userFiles) {
-                val ps = try {
-                    if (f.length() in 100..(30L * 1024 * 1024)) parseNameRecords(f.readBytes())?.let { pickName(it, 6) } else null
-                } catch (_: Throwable) { null }
-                psOf[f] = ps
-                if (!ps.isNullOrBlank()) {
-                    val k = ps.lowercase(java.util.Locale.ROOT)
-                    psCount[k] = (psCount[k] ?: 0) + 1
-                }
-            }
-            for (f in userFiles) {
-                if (f.length() !in 100..(30L * 1024 * 1024)) continue
-                val ps = psOf[f]
-                val collide = !ps.isNullOrBlank() && (psCount[ps.lowercase(java.util.Locale.ROOT)] ?: 0) > 1
-                val patched = try { buildUniquelyNamedFont(f.readBytes(), collide) } catch (_: Throwable) { null }
-                    ?: continue
-                try {
-                    val tmp = File(dir, f.name + ".tmp_patch")
-                    tmp.writeBytes(patched)
-                    if (!tmp.renameTo(f)) {
-                        f.writeBytes(patched)
-                        tmp.delete()
-                    }
-                    changedAny = true
-                    Log.d(TAG, "Gave imported font a unique family name: ${f.name}")
-                } catch (t: Throwable) {
-                    Log.w(TAG, "Could not rewrite font names for ${f.name}", t)
-                }
-            }
-            lastUniqueNamesSignature = uniqueNamesSignature(userFiles)
-            if (changedAny) {
-                fontsRevision += 1
-                selectedFontFileCache = null
-                selectedFontFileCacheName = null
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "ensureUniqueFontNames failed", t)
-        }
-        return changedAny
-    }
-
     private fun bundledFallbackFile(context: Context): File = File(getSubFontsDir(context), BUNDLED_FALLBACK_FONT_FILE)
 
     private fun bundledFallbackName(file: File): String {
         return try {
-            (getPreferredFamilyName(file.readBytes()) ?: getFullFontName(file.readBytes()))?.takeIf { it.isNotBlank() } ?: BUNDLED_FALLBACK_FONT_FAMILY
+            getFullFontName(file.readBytes())?.takeIf { it.isNotBlank() } ?: BUNDLED_FALLBACK_FONT_FAMILY
         } catch (_: Throwable) { BUNDLED_FALLBACK_FONT_FAMILY }
     }
 
@@ -958,7 +703,7 @@ object SubtitleFontManager {
                 if (inStylesSection && trimmed.startsWith("Style:", ignoreCase = true)) {
                     val prefixLength = original.indexOf("Style:", ignoreCase = true)
                     val prefix = if (prefixLength >= 0) original.substring(0, prefixLength) else ""
-                    val parts = trimmed.substringAfter(":").split(",", limit = -1).toMutableList()
+                    val parts = trimmed.substringAfter(":").split(",").toMutableList()
                     val fontIndex = styleFormatFields.indexOf("fontname").takeIf { it >= 0 } ?: 1
                     if (fontIndex in parts.indices) {
                         parts[fontIndex] = fallbackFont(parts[fontIndex])
@@ -1042,7 +787,7 @@ object SubtitleFontManager {
             if (inStyles && t.startsWith("Style:", ignoreCase = true)) {
                 val idx = original.indexOf("Style:", ignoreCase = true)
                 val head = original.substring(0, idx + 6)
-                val parts = original.substring(idx + 6).split(",", limit = -1).toMutableList()
+                val parts = original.substring(idx + 6).split(",").toMutableList()
                 val fontIndex = format.indexOf("fontname").takeIf { it >= 0 } ?: 1
                 if (fontIndex in parts.indices) {
                     val before = parts[fontIndex]
@@ -1087,7 +832,6 @@ object SubtitleFontManager {
             }
             if (destFile.exists() && destFile.length() > 0) {
                 markUserUploadedFont(context, fileName)
-                ensureUniqueFontNames(context)
                 Log.d(TAG, "Successfully imported font: $fileName (${destFile.length()} bytes)")
                 fileName
             } else {
@@ -1141,7 +885,6 @@ object SubtitleFontManager {
         } catch (t: Throwable) {
             Log.w(TAG, "Failed to import fonts from selected directory", t)
         }
-        if (imported > 0) ensureUniqueFontNames(context)
         return imported
     }
 
@@ -1306,7 +1049,6 @@ object SubtitleFontManager {
     }
 
     fun getInstalledFonts(context: Context, includeVideoExtracted: Boolean = true): List<File> {
-        ensureUniqueFontNames(context)
         val destDir = getSubFontsDir(context)
         val fontExtensions = setOf("ttf", "otf", "ttc", "woff", "woff2")
         val bundled = BUNDLED_FALLBACK_FONT_FILE.lowercase()
@@ -1326,26 +1068,16 @@ object SubtitleFontManager {
     }
 
     /**
-     * Returns the exact font name that libass should receive for a selected file.
-     * libass/fontconfig supports matching ASS font references against the font's
-     * Full Font Name, which is important when several uploaded files intentionally
-     * share the same internal family name. Passing only the family collapses those
-     * files into whichever face fontconfig happens to select.
+     * Returns the font FAMILY name that libass should receive for a selected file.
+     *
+     * ASS/SSA `Fontname` and mpv's `sub-font` are family-based font selectors. The
+     * user-facing name is intentionally kept separate: [getOriginalFontName] returns
+     * NameID 4 (the full/original font name) for the picker, while this method returns
+     * NameID 1 (the family name) for rendering. This distinction matters for fonts whose
+     * filename/full name differs from their internal family name (for example, a font
+     * whose metadata says family `XE Fonts` but full name `Songs OPE`).
      */
-    fun getRenderFontName(file: File): String {
-        try {
-            if (file.exists() && file.isFile && file.length() in 100..(30L * 1024 * 1024)) {
-                val recs = parseNameRecords(file.readBytes())
-                if (recs != null) {
-                    // Typographic family (16) first: for imported fonts it equals the unique Full
-                    // Font Name; for other fonts it is the family fontconfig indexes them under.
-                    (pickName(recs, 16) ?: pickName(recs, 1) ?: pickName(recs, 4))
-                        ?.takeIf { it.isNotBlank() }?.let { return it }
-                }
-            }
-        } catch (_: Throwable) {}
-        return getOriginalFontName(file)
-    }
+    fun getRenderFontName(file: File): String = getFontFamilyName(file)
 
     /**
      * Deletes a custom font from the fonts directory.
@@ -1853,8 +1585,8 @@ object SubtitleFontManager {
                     val length = buffer.getShort(nrPos + 8).toInt() and 0xFFFF
                     val strOffset = buffer.getShort(nrPos + 10).toInt() and 0xFFFF
 
-                    // nameId 1 = Family, 4 = Full Font Name, 6 = PostScript Name, 16 = Typographic Family
-                    if (nameId == 1 || nameId == 4 || nameId == 6 || nameId == 16) {
+                    // nameId 1 = Font Family Name, nameId 4 = Full Font Name, nameId 6 = PostScript Name
+                    if (nameId == 1 || nameId == 4 || nameId == 6) {
                         val actualPos = storageOffset + strOffset
                         if (actualPos + length <= bytes.size && length > 0) {
                             val str = if (platformId == 0 || platformId == 3 || (platformId == 2 && encodingId == 1)) {

@@ -175,7 +175,6 @@ class MpvPlayerController {
     private var subtitleShadowColor = "0.0/0.0/0.0/0.75"
     private var subtitleUsesGeneratedAss = false
     private var lastAppliedFontDirectory: String? = null
-    private var lastAppliedFontsRevision: Int = -1
 
     /** Prepared (cached) subtitle file path -> the original subtitle file it was built from. */
     private val preparedSubtitleSources = ConcurrentHashMap<String, File>()
@@ -2008,12 +2007,8 @@ class MpvPlayerController {
             view.mpv.setPropertyString("sub-scale-with-window", "yes")
             view.mpv.setPropertyDouble("sub-scale", if (effectiveOverrideAss) subtitleScale else 1.0)
             view.mpv.setPropertyDouble("sub-pos", if (effectiveOverrideAss) subtitlePosition else 100.0)
-            if (subtitleFontDirectory != null &&
-                (subtitleFontDirectory != lastAppliedFontDirectory ||
-                    SubtitleFontManager.fontsRevision != lastAppliedFontsRevision)
-            ) {
+            if (subtitleFontDirectory != null && subtitleFontDirectory != lastAppliedFontDirectory) {
                 lastAppliedFontDirectory = subtitleFontDirectory
-                lastAppliedFontsRevision = SubtitleFontManager.fontsRevision
                 view.mpv.setPropertyString("sub-fonts-dir", subtitleFontDirectory!!)
             }
             view.mpv.setPropertyString(
@@ -2304,12 +2299,8 @@ class MpvPlayerController {
                 view.mpv.setPropertyDouble("sub-spacing", if (effectiveOverrideAss) letterSpacing.toDouble() else 0.0)
             } catch (_: Throwable) {}
 
-            if (fontDirectory != null && fontDirectory.isNotBlank() &&
-                (fontDirectory != lastAppliedFontDirectory ||
-                    SubtitleFontManager.fontsRevision != lastAppliedFontsRevision)
-            ) {
+            if (fontDirectory != null && fontDirectory.isNotBlank() && fontDirectory != lastAppliedFontDirectory) {
                 lastAppliedFontDirectory = fontDirectory
-                lastAppliedFontsRevision = SubtitleFontManager.fontsRevision
                 view.mpv.setPropertyString("sub-fonts-dir", fontDirectory)
             }
             val effectiveFontFamily = if (!fontFamily.isNullOrBlank()) fontFamily else SubtitleFontManager.BUNDLED_FALLBACK_FONT_FAMILY
@@ -2390,7 +2381,18 @@ class MpvPlayerController {
                 // from the subtitle's own Style definitions when the toggle is OFF.
                 val previousNativeOverride = lastAppliedNativeAssOverride
                 if (isNativeAssSsa && previousNativeOverride != null && previousNativeOverride != effectiveOverrideAss) {
+                    // `sub-reload` can cause mpv to temporarily re-evaluate `sid` and, on
+                    // some builds, land on the first subtitle track. The user's current
+                    // subtitle selection is a per-video state and must survive this renderer
+                    // refresh. Capture the logical track before reloading and restore it through
+                    // the existing generation-safe recovery path.
+                    val selectedTrackId = _subtitleTracks.value.firstOrNull { it.isSelected }?.id
+                        ?: lastActiveSubtitleTrackId
+                    val selectionGeneration = subtitleSelectionGeneration.get()
                     view.mpv.command("sub-reload")
+                    if (selectedTrackId > 0) {
+                        scheduleNativeAssSelectionRecovery(selectedTrackId, selectionGeneration)
+                    }
                 }
                 lastAppliedNativeAssOverride = if (isNativeAssSsa) effectiveOverrideAss else null
             } catch (_: Throwable) {}
@@ -2776,14 +2778,8 @@ class MpvPlayerController {
         val fontFixed = try {
             SubtitleFontManager.replaceMissingFontsKeepingLayout(context, base)
         } catch (_: Throwable) { null }
-        val fontFixedText = fontFixed ?: base
-        // Characters the chosen font has no glyph for (music notes, symbols, other scripts) are
-        // drawn from the bundled universal font; every character the font DOES have (English
-        // Roman + Hindi Devanagari for fonts such as Subs / Songs END) keeps the chosen font.
-        val renderText = try {
-            SubtitleFontManager.applyGlyphFallback(context, fontFixedText)
-        } catch (_: Throwable) { fontFixedText }
-        val needsDerived = !overrides.isEmpty || fontFixed != null || renderText != fontFixedText
+        val renderText = fontFixed ?: base
+        val needsDerived = !overrides.isEmpty || fontFixed != null
         if (needsDerived) {
             val built = renderText
             signature = "${built.length}:${built.hashCode()}"
@@ -2840,12 +2836,6 @@ class MpvPlayerController {
             // re-layout EVERY subtitle line, which is what made animations/timing of untouched
             // styles hiccup while a single style was being edited.
             val fontsDir = SubtitleFontManager.syncFonts(context, currentFilePath)
-            if (SubtitleFontManager.fontsRevision != lastAppliedFontsRevision) {
-                // Font files were renamed/added since libass last indexed the folder: force a rescan.
-                lastAppliedFontsRevision = SubtitleFontManager.fontsRevision
-                lastAppliedFontDirectory = fontsDir.absolutePath
-                try { view.mpv.setPropertyString("sub-fonts-dir", fontsDir.absolutePath) } catch (_: Throwable) {}
-            }
             setMpvStringIfChanged(view, "sub-fonts-dir", fontsDir.absolutePath)
             if ((try { view.mpv.getPropertyBoolean("embeddedfonts") } catch (_: Throwable) { null }) != true) {
                 view.mpv.setPropertyBoolean("embeddedfonts", true)

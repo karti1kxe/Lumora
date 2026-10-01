@@ -209,6 +209,8 @@ internal fun AdvancedAssStyleEditorContent(
                         }
                     },
                     fontFamilies = fontFamilies,
+                    context = context,
+                    settings = settings,
                     otherStyleNames = otherNames,
                     onOverridesChange = updateOverrides
                 )
@@ -261,6 +263,8 @@ private fun AssStyleCard(
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
     fontFamilies: List<String>,
+    context: Context,
+    settings: PlayerSettings,
     otherStyleNames: List<String>,
     onOverridesChange: ((AssSubtitleOverrides) -> AssSubtitleOverrides) -> Unit
 ) {
@@ -401,7 +405,24 @@ private fun AssStyleCard(
                             fontPickerOpen = false
                         },
                         onSelectFamily = { family ->
-                            AssFields.normalize(AssFields.FONT_NAME, family)?.let { set(AssFields.FONT_NAME, it) }
+                            // The picker displays the original/full metadata name (NameID 4),
+                            // but ASS/SSA rendering must receive the font's internal family
+                            // name (NameID 1). Keeping those two names separate prevents
+                            // libass/fontconfig from falling back when a font's filename/full
+                            // name differs from its family.
+                            val renderFamily = fontFamilies
+                                .firstOrNull { it.equals(family, ignoreCase = true) }
+                                ?.let { displayName ->
+                                    SubtitleFontManager.getInstalledFonts(
+                                        context,
+                                        includeVideoExtracted = settings.showVideoEmbeddedSubtitleFonts
+                                    ).firstOrNull {
+                                        SubtitleFontManager.getOriginalFontName(it).equals(displayName, ignoreCase = true)
+                                    }
+                                }
+                                ?.let { SubtitleFontManager.getFontFamilyName(it) }
+                                ?: family
+                            AssFields.normalize(AssFields.FONT_NAME, renderFamily)?.let { set(AssFields.FONT_NAME, it) }
                             fontPickerOpen = false
                         }
                     )
