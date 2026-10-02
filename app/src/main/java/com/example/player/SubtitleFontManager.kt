@@ -340,20 +340,37 @@ object SubtitleFontManager {
             ?.filter { it.isFile && it.extension.lowercase(java.util.Locale.ROOT) in FONT_EXTS }
             ?: return null
         files.firstOrNull { f -> namesOfFontFile(f).any { it.equals(clean, ignoreCase = true) } }?.let { return it }
-        files.firstOrNull { f -> namesOfFontFile(f).any { normalizeFontName(it) == norm } }?.let { return it }
-        // Last resort: the exact names the UI / libass use for a file (full name, family name).
-        return files.firstOrNull { f ->
-            normalizeFontName(getOriginalFontName(f)) == norm || normalizeFontName(getFontFamilyName(f)) == norm
-        }
+        return files.firstOrNull { f -> namesOfFontFile(f).any { normalizeFontName(it) == norm } }
     }
 
     fun getSelectedFontFile(context: Context): File? {
         val name = selectedFontRenderName ?: return null
         if (selectedFontFileCacheName == name && selectedFontFileCache?.exists() == true) return selectedFontFileCache
-        val file = findFontFile(context, name)
+        val file = findFontFile(context, name) ?: findInstalledFontByRenderName(context, name)
         selectedFontFileCache = file
         selectedFontFileCacheName = name
         return file
+    }
+
+    /**
+     * Second way to locate the selected font's file: the same lookup the font picker UI uses
+     * (render name / family name of every installed font). Without it a font whose name table
+     * could not be matched by [findFontFile] (TTC, very large or oddly named fonts) looked like
+     * "no file" and every non-Latin character was needlessly sent to the universal fallback font.
+     */
+    private fun findInstalledFontByRenderName(context: Context, name: String): File? {
+        val clean = name.trim().removePrefix("@")
+        if (clean.isBlank()) return null
+        val norm = normalizeFontName(clean)
+        return try {
+            getInstalledFonts(context).firstOrNull { f ->
+                val render = getRenderFontName(f)
+                val family = getFontFamilyName(f)
+                render.equals(clean, ignoreCase = true) || family.equals(clean, ignoreCase = true) ||
+                    f.name.equals(clean, ignoreCase = true) || f.nameWithoutExtension.equals(clean, ignoreCase = true) ||
+                    normalizeFontName(render) == norm || normalizeFontName(family) == norm
+            }
+        } catch (_: Throwable) { null }
     }
 
     /** Sorted, merged code point ranges (start[i]..end[i]) a font has glyphs for. */
@@ -592,13 +609,11 @@ object SubtitleFontManager {
                     // only basic Latin; the bundled font then draws the rest (it is only used
                     // for characters it really has).
                     val parsed = file?.let { coverageOf(it) }
-                    // The user's OWN selected font must never be assumed to be "Latin only": if its
-                    // glyph table cannot be read or the file cannot be matched by name, wrapping
-                    // every Hindi/other-script character in the universal font would override the
-                    // font the user picked even though it has those glyphs. Report "unknown" instead
-                    // (no inline fallback; libass still falls back per glyph on its own).
-                    if (isSelected) parsed
-                    else parsed ?: if (file != null) CONSERVATIVE_LATIN_COVERAGE else null
+                    // The USER'S selected font whose glyph table cannot be read/located is trusted
+                    // (null = "no fallback tags"): it must keep drawing its own characters (e.g.
+                    // Hindi Devanagari) instead of handing them to the universal font. Only a
+                    // different, non-selected font with an unreadable table stays conservative.
+                    parsed ?: if (isSelected) null else if (file != null) CONSERVATIVE_LATIN_COVERAGE else null
                 }
             }
 
@@ -1636,15 +1651,13 @@ object SubtitleFontManager {
         try {
             if (bytes.size < 12) return names
             val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.BIG_ENDIAN)
-            val ttcBase = if (bytes.size >= 16 && buffer.getInt(0) == 0x74746366) buffer.getInt(12) else 0
-            if (ttcBase < 0 || ttcBase + 12 > bytes.size) return names
-            val numTables = buffer.getShort(ttcBase + 4).toInt() and 0xFFFF
+            val numTables = buffer.getShort(4).toInt() and 0xFFFF
             if (numTables <= 0 || numTables > 200) return names
 
             var nameTableOffset = -1
             var nameTableLength = -1
             for (i in 0 until numTables) {
-                val recordPos = ttcBase + 12 + i * 16
+                val recordPos = 12 + i * 16
                 if (recordPos + 16 > bytes.size) break
                 val tag = buffer.getInt(recordPos)
                 // Tag 'name' == 0x6E616D65
