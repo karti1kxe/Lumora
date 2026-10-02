@@ -937,6 +937,17 @@ fun VideoPlayerScreen(
         }
     }
 
+    // A newly uploaded / pasted subtitle becomes Primary and the subtitle that was Primary until
+    // now (embedded or uploaded) becomes Secondary. Any older Secondary is released, so the
+    // result is always exactly two tidy slots and a later tap on Secondary simply unselects it.
+    fun promoteNewSubtitleToPrimary(newTrackId: Int, previousPrimaryId: Int) {
+        if (newTrackId <= 0) return
+        val oldPrimary = if (previousPrimaryId > 0 && previousPrimaryId != newTrackId &&
+            controller.subtitleTracks.value.any { it.id == previousPrimaryId }
+        ) previousPrimaryId else 0
+        selectSubtitleTracks(newTrackId, oldPrimary, notify = false)
+    }
+
     // Persist an uploaded subtitle once per source and return the canonical private path.
     // This keeps repeated select/unselect/select operations idempotent.
     suspend fun attachUploadedSubtitle(
@@ -964,6 +975,7 @@ fun VideoPlayerScreen(
     // crashed the app for big / font-heavy subtitles). Any Throwable is reported instead of crashing.
     // Returns true when the subtitle was attached.
     suspend fun importSubtitleFileSafely(selectedFile: File): Boolean {
+        val previousPrimaryId = controller.subtitleTracks.value.firstOrNull { it.isSelected }?.id ?: selectedSubtitleTrackId
         val targetId = withContext(Dispatchers.IO) {
             try {
                 if (!selectedFile.exists() || !selectedFile.isFile || selectedFile.length() <= 0L) {
@@ -987,7 +999,7 @@ fun VideoPlayerScreen(
             }
         } ?: return false
         if (targetId > 0) {
-            selectSubtitleTracks(targetId, controller.secondarySubtitleTrackId.value, notify = false)
+            promoteNewSubtitleToPrimary(targetId, previousPrimaryId)
         }
         return true
     }
@@ -1006,7 +1018,10 @@ fun VideoPlayerScreen(
                         }
                     } catch (_: Throwable) { null } ?: "imported_sub_${System.currentTimeMillis() % 10000}.ass"
 
-                    val persistentSubFile = CustomSubtitlePersistenceManager.persistSubtitleFromUri(context, uri, subFileName)
+                    val previousPrimaryId = controller.subtitleTracks.value.firstOrNull { it.isSelected }?.id ?: selectedSubtitleTrackId
+                    val persistentSubFile = withContext(Dispatchers.IO) {
+                        CustomSubtitlePersistenceManager.persistSubtitleFromUri(context, uri, subFileName)
+                    }
 
                     if (persistentSubFile != null && persistentSubFile.exists() && persistentSubFile.length() > 0) {
                         val attachedPath = attachUploadedSubtitle(
@@ -1014,10 +1029,12 @@ fun VideoPlayerScreen(
                             originalName = subFileName,
                             sourceUri = uri.toString()
                         ) ?: persistentSubFile.absolutePath
-                        val addedSubId = controller.addExternalSubtitle(attachedPath, context, originalName = subFileName, select = true)
+                        val addedSubId = withContext(Dispatchers.IO) {
+                            controller.addExternalSubtitle(attachedPath, context, originalName = subFileName, select = true)
+                        }
                         val targetId = addedSubId?.takeIf { it > 0 } ?: controller.subtitleTracks.value.lastOrNull()?.id ?: 0
                         if (targetId > 0) {
-                            selectSubtitleTracks(targetId, controller.secondarySubtitleTrackId.value, notify = false)
+                            promoteNewSubtitleToPrimary(targetId, previousPrimaryId)
                         }
                         showNotification("Loaded Subtitle: $subFileName")
                     } else {
@@ -2822,31 +2839,46 @@ fun VideoPlayerScreen(
                 if (pastedText.isNullOrBlank()) {
                     showNotification("Clipboard is empty or contains no subtitle text")
                 } else {
+                    val previousPrimaryId = realSubtitleTracks.firstOrNull { it.isSelected }?.id ?: selectedSubtitleTrackId
                     coroutineScope.launch {
                         try {
                             val detectedFormat = SubtitleEngine.detectFormat(pastedText)
                             val extension = detectedFormat.extension
-                            val trackName = "PASTED-SUB"
+                            // Every paste gets its own name (PASTED-SUB, PASTED-SUB-2, ...): a fixed name made
+                            // the next paste replace the previous one, so two pasted subtitles could never
+                            // exist together in the Uploaded list.
+                            val usedPasteNames = controller.subtitleTracks.value
+                                .filter { it.isExternal }
+                                .map { (it.originalFilename.ifBlank { it.title }).substringBeforeLast('.').lowercase() }
+                                .toSet()
+                            var pasteIndex = 1
+                            var trackName = "PASTED-SUB"
+                            while (trackName.lowercase() in usedPasteNames) {
+                                pasteIndex++
+                                trackName = "PASTED-SUB-$pasteIndex"
+                            }
                             val originalName = "$trackName.$extension"
-                            val persistentFile = CustomSubtitlePersistenceManager.persistSubtitleFromText(
-                                context = context,
-                                content = pastedText,
-                                trackName = trackName,
-                                extension = extension
-                            )
-                            val attachedPath = attachUploadedSubtitle(
-                                filePath = persistentFile.absolutePath,
-                                originalName = originalName
-                            ) ?: persistentFile.absolutePath
-                            val addedSubId = controller.addExternalSubtitle(
-                                filePath = attachedPath,
-                                context = context,
-                                originalName = originalName,
-                                select = true
-                            )
-                            val targetId = addedSubId?.takeIf { it > 0 } ?: controller.subtitleTracks.value.lastOrNull()?.id ?: 0
+                            val targetId = withContext(Dispatchers.IO) {
+                                val persistentFile = CustomSubtitlePersistenceManager.persistSubtitleFromText(
+                                    context = context,
+                                    content = pastedText,
+                                    trackName = trackName,
+                                    extension = extension
+                                )
+                                val attachedPath = attachUploadedSubtitle(
+                                    filePath = persistentFile.absolutePath,
+                                    originalName = originalName
+                                ) ?: persistentFile.absolutePath
+                                val addedSubId = controller.addExternalSubtitle(
+                                    filePath = attachedPath,
+                                    context = context,
+                                    originalName = originalName,
+                                    select = true
+                                )
+                                addedSubId?.takeIf { it > 0 } ?: controller.subtitleTracks.value.lastOrNull()?.id ?: 0
+                            }
                             if (targetId > 0) {
-                                selectSubtitleTracks(targetId, controller.secondarySubtitleTrackId.value, notify = false)
+                                promoteNewSubtitleToPrimary(targetId, previousPrimaryId)
                             }
                             showNotification("Added & Applied: $originalName")
                         } catch (e: Exception) {

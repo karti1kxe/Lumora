@@ -3867,6 +3867,59 @@ class MpvPlayerController {
         } catch (_: Throwable) {}
     }
 
+    /** Track id mpv assigned to the external subtitle loaded from [path], or 0 if not listed (yet). */
+    private fun findExternalTrackIdByPath(view: VideoPlayerMpvView, path: String): Int {
+        val target = File(path).absolutePath
+        val targetName = File(path).name
+        val count = try { view.mpv.getPropertyInt("track-list/count") ?: 0 } catch (_: Throwable) { 0 }
+        for (i in 0 until count) {
+            if ((try { view.mpv.getPropertyString("track-list/$i/type") } catch (_: Throwable) { "" }) != "sub") continue
+            val ext = try {
+                view.mpv.getPropertyString("track-list/$i/external-filename")
+                    ?: view.mpv.getPropertyString("track-list/$i/filename") ?: ""
+            } catch (_: Throwable) { "" }
+            if (ext.isBlank()) continue
+            val normalized = if (ext.startsWith("file://")) Uri.parse(ext).path ?: ext else ext
+            if (normalized == target || File(normalized).name.equals(targetName, ignoreCase = true)) {
+                return try { view.mpv.getPropertyInt("track-list/$i/id") ?: 0 } catch (_: Throwable) { 0 }
+            }
+        }
+        return 0
+    }
+
+    /**
+     * Right after `sub-add` mpv can take a few frames to list the new external track. Waiting for
+     * it here (briefly, never on the main thread) means the Uploaded Subtitles list and the
+     * returned track id are correct the moment the file is touched, instead of showing the old
+     * list / returning the previous track's id. If it is still late, a short background watcher
+     * refreshes the list as soon as the track appears.
+     */
+    private fun awaitAddedExternalTrack(view: VideoPlayerMpvView, path: String): Int {
+        val onMain = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
+        val attempts = if (onMain) 1 else 30
+        for (attempt in 0 until attempts) {
+            val id = findExternalTrackIdByPath(view, path)
+            if (id > 0) {
+                refreshTracksAndChapters()
+                return id
+            }
+            if (!onMain) { try { Thread.sleep(25L) } catch (_: InterruptedException) { break } }
+        }
+        refreshTracksAndChapters()
+        playerScope.launch {
+            repeat(40) {
+                if (isReleased) return@launch
+                delay(50L)
+                val found = try { findExternalTrackIdByPath(view, path) } catch (_: Throwable) { 0 }
+                if (found > 0) {
+                    refreshTracksAndChapters()
+                    return@launch
+                }
+            }
+        }
+        return 0
+    }
+
     fun addExternalSubtitle(filePath: String, context: Context? = null, originalName: String? = null, select: Boolean = true): Int? {
         try {
             val view = mpvView ?: return null
@@ -3995,9 +4048,12 @@ class MpvPlayerController {
                 view.mpv.setPropertyString("sub-ass-force-style", "")
             }
             view.mpv.command("sub-add", pathToAdd, if (select) "select" else "auto")
-            refreshTracksAndChapters()
+            val addedTrackId = awaitAddedExternalTrack(view, pathToAdd)
 
-            val activeSid = try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }
+            // The track mpv just created is THE answer; `sid` may still be the previous track's id
+            // for a moment, which used to make the new upload look "not loaded".
+            val activeSid = (if (addedTrackId > 0) addedTrackId else null)
+                ?: try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }
                 ?: _subtitleTracks.value.firstOrNull {
                     it.isExternal && (
                         it.originalFilename.equals(origTitle, ignoreCase = true) ||
@@ -4010,6 +4066,7 @@ class MpvPlayerController {
                 setSubtitleTrack(activeSid)
                 return activeSid
             }
+            if (!select && addedTrackId > 0) return addedTrackId
             // MPV may expose a newly attached external track a few frames after `sub-add`.
             // The command already requests `select`; the recovery pass below catches the late
             // track-list update without making the UI wait synchronously.
