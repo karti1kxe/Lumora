@@ -140,51 +140,44 @@ class MpvPlayerController {
     }
 
     /**
-     * True only while Lumora itself is re-initialising the CURRENT subtitle track (Override
-     * ASS/SSA toggled, font changed). mpv's `sub-reload` removes the track and adds it again, so
-     * for a moment (and sometimes permanently, when the track id changes) the track list shows
-     * "no subtitle selected". Without this guard the next-episode auto-select below mistook that
-     * for "nothing selected", picked the first track of the video and even switched Override
-     * ASS/SSA back OFF - the exact "my subtitle gets un-selected when I turn Override on" glitch.
+     * `sub-reload` (used by Override ASS/SSA, font and style changes) unloads and re-adds the
+     * subtitle, so for a moment mpv reports "no subtitle selected" and the re-added external
+     * track may even get a new id. That transient state must never be mistaken for "the user has
+     * nothing selected": the track list refresh would otherwise auto-pick another track (and
+     * switch Override OFF), which looks like the subtitle un-selecting itself.
      */
-    @Volatile
-    private var subtitleReloadInFlight: Boolean = false
+    @Volatile private var subtitleReloadUntilMs = 0L
 
     /**
-     * Re-initialises the active subtitle track so libass drops cached (overridden) styles, while
-     * keeping the user's selection intact: external tracks go through `sub-reload` and the new
-     * track id (if mpv issued one) is carried over to every piece of selection bookkeeping;
-     * embedded tracks (where `sub-reload` is not supported) are re-initialised by cycling `sid`.
+     * Storage key of an uploaded/pasted subtitle's edits. It includes the VIDEO it is used with,
+     * so the same subtitle text used in another video gets its own independent edits (embedded
+     * subtitles were already per video).
      */
-    private fun reinitActiveSubtitleKeepingSelection(view: VideoPlayerMpvView) {
-        val oldSid = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
-        if (oldSid <= 0) return
-        subtitleReloadInFlight = true
-        try {
-            val isExternal = (try { readAdvancedAssTrackInfo(view, oldSid)?.isExternal } catch (_: Throwable) { null }) == true
-            if (isExternal) {
-                try { view.mpv.command("sub-reload") } catch (_: Throwable) {}
-            } else {
-                try {
-                    view.mpv.setPropertyString("sid", "no")
-                    view.mpv.setPropertyInt("sid", oldSid)
-                } catch (_: Throwable) {}
-            }
-            var newSid = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
-            if (newSid <= 0) {
-                // The re-add did not re-select anything: put the previous selection back.
-                try { view.mpv.setPropertyInt("sid", oldSid) } catch (_: Throwable) {}
-                newSid = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
-            }
-            if (newSid > 0 && newSid != oldSid) {
-                if (lastActiveSubtitleTrackId == oldSid) lastActiveSubtitleTrackId = newSid
-                trackDelayMap.remove(oldSid)?.let { trackDelayMap[newSid] = it }
-            }
-            try { view.mpv.setPropertyBoolean("sub-visibility", !isSubtitleExplicitlyDisabled) } catch (_: Throwable) {}
-        } finally {
-            subtitleReloadInFlight = false
-        }
-        try { refreshTracksAndChapters() } catch (_: Throwable) {}
+    private fun externalSubtitleKey(text: String): String {
+        val video = currentFilePath
+        return AdvancedAssStyleEngine.contentKey(if (video.isNullOrBlank()) text else "$video\u0000$text")
+    }
+
+    private fun markSubtitleReload() {
+        subtitleReloadUntilMs = System.currentTimeMillis() + 2500L
+    }
+
+    /** Identity of the track the user picked for THIS video, to find it again if its id changes. */
+    @Volatile private var userSubtitleIdentity: String? = null
+
+    private fun subtitleIdentity(t: PlayerMediaTrack): String =
+        (if (t.isExternal) "ext|" + t.originalFilename.ifBlank { t.title } else "emb|" + t.title + "|" + t.language + "|" + t.codec)
+
+    /**
+     * The track the user explicitly chose in this video, if it is still present (by id, or - when
+     * mpv re-created it with a new id - by identity). Returns null if the user never picked one.
+     */
+    private fun findUserSelectedSubtitle(list: List<PlayerMediaTrack>): PlayerMediaTrack? {
+        val logical = lastActiveSubtitleTrackId
+        if (logical <= 0 || isSubtitleExplicitlyDisabled) return null
+        list.firstOrNull { it.id == logical }?.let { return it }
+        val ident = userSubtitleIdentity ?: return null
+        return list.firstOrNull { subtitleIdentity(it) == ident }
     }
 
     // Track discovery bookkeeping (see startPolling / discoverTracksPromptly)
@@ -241,6 +234,8 @@ class MpvPlayerController {
         SubtitleFontManager.forceSelectedFontOnAss = forceFont
         SubtitleFontManager.setSelectedFont(fontFamily)
         val ctx = mpvView?.context ?: return
+        // Edited / pasted (raw) copies carry the font inside their text: rebuild them too.
+        if (rawEditorEnabled || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
         // Embedded ASS/SSA tracks are not rewritten by us; libass caches the font it resolved for
         // each style, so a live font change only shows up after the track is re-initialised.
         val refreshEmbeddedAss = preparedSubtitleSources.isEmpty() && isCurrentSubtitleNativeAssSsa()
@@ -249,7 +244,13 @@ class MpvPlayerController {
             try {
                 if (refreshEmbeddedAss) {
                     withMpvLock(Unit) { v ->
-                        try { reinitActiveSubtitleKeepingSelection(v) } catch (_: Throwable) {}
+                        try {
+                            val sid = v.mpv.getPropertyInt("sid") ?: 0
+                            if (sid > 0) {
+                                v.mpv.setPropertyString("sid", "no")
+                                v.mpv.setPropertyInt("sid", sid)
+                            }
+                        } catch (_: Throwable) {}
                     }
                     nudgeRedrawIfPaused()
                     return@launch
@@ -270,7 +271,7 @@ class MpvPlayerController {
                 }
                 if (changed) {
                     withMpvLock(Unit) { v ->
-                        try { reinitActiveSubtitleKeepingSelection(v) } catch (_: Throwable) {}
+                        try { markSubtitleReload(); v.mpv.command("sub-reload") } catch (_: Throwable) {}
                     }
                     nudgeRedrawIfPaused()
                 }
@@ -907,6 +908,8 @@ class MpvPlayerController {
         // Selections belong to ONE video: never carry the 2nd subtitle over to the next file.
         _secondarySubtitleTrackId.value = 0
         lastActiveSubtitleTrackId = 0
+        userSubtitleIdentity = null
+        subtitleReloadUntilMs = 0L
         isSubtitleExplicitlyDisabled = false
         trackDiscoveryStartedAt = System.currentTimeMillis()
         lastTrackListCount = -1
@@ -1116,7 +1119,7 @@ class MpvPlayerController {
                         // file in place. Removing and re-adding the track caused visible subtitle
                         // flicker and could momentarily disturb the playback pipeline.
                         try {
-                            view.mpv.command("sub-reload")
+                            markSubtitleReload(); view.mpv.command("sub-reload")
                         } catch (_: Throwable) {
                             // Last-resort fallback: add/select the same file without touching the video.
                             try {
@@ -1893,7 +1896,28 @@ class MpvPlayerController {
                     if ((advancedAssEnabled || rawEditorEnabled) && !advancedAssSyncing) scheduleAdvancedAssSync()
                     val currentSid = view.mpv.getPropertyString("sid")
                     val isNoneSelected = preservedSubList.none { it.isSelected } || currentSid == null || currentSid == "no" || currentSid == "0"
-                    if (isNoneSelected && !isSubtitleExplicitlyDisabled && !holdSubtitleAutoSelect && !subtitleReloadInFlight) {
+                    // Remember which track the user has selected in THIS video (id may change later).
+                    preservedSubList.firstOrNull { it.isSelected }?.let { userSubtitleIdentity = subtitleIdentity(it) }
+                    val reloading = System.currentTimeMillis() < subtitleReloadUntilMs
+                    val ownSelection = if (isNoneSelected && !isSubtitleExplicitlyDisabled) findUserSelectedSubtitle(preservedSubList) else null
+                    if (isNoneSelected && reloading && lastActiveSubtitleTrackId > 0) {
+                        // Mid sub-reload: do nothing, the next refresh sees the re-added track.
+                    } else if (ownSelection != null && ownSelection.id > 0) {
+                        // The user's own subtitle lost its selection (reload / id change): put it
+                        // back instead of guessing another track, and keep Override as it is.
+                        try {
+                            lastActiveSubtitleTrackId = ownSelection.id
+                            view.mpv.setPropertyInt("sid", resolveAdvancedAssPlaybackId(ownSelection.id))
+                            view.mpv.setPropertyBoolean("sub-visibility", true)
+                            val secId = _secondarySubtitleTrackId.value
+                            _subtitleTracks.value = preservedSubList.map {
+                                it.copy(
+                                    isSelected = (it.id == ownSelection.id),
+                                    isSecondarySelected = (secId > 0 && it.id == secId)
+                                )
+                            }
+                        } catch (_: Throwable) {}
+                    } else if (isNoneSelected && !isSubtitleExplicitlyDisabled && !holdSubtitleAutoSelect && lastActiveSubtitleTrackId <= 0) {
                         val matched = SubtitleSessionMemory.findMatchingTrackForNextEpisode(preservedSubList)
                         if (matched != null && matched.id > 0) {
                             val chosenSubId = matched.id
@@ -1934,7 +1958,7 @@ class MpvPlayerController {
                                 // until the user manually deselects and reselects it (which works
                                 // only because that manual path already issues this same reload).
                                 try {
-                                    view.mpv.command("sub-reload")
+                                    markSubtitleReload(); view.mpv.command("sub-reload")
                                 } catch (_: Throwable) {}
                             } catch (_: Throwable) {}
                         }
@@ -2426,9 +2450,7 @@ class MpvPlayerController {
                 // from the subtitle's own Style definitions when the toggle is OFF.
                 val previousNativeOverride = lastAppliedNativeAssOverride
                 if (isNativeAssSsa && previousNativeOverride != null && previousNativeOverride != effectiveOverrideAss) {
-                    // Selection-safe re-init (see [reinitActiveSubtitleKeepingSelection]): a bare
-                    // `sub-reload` here is what used to un-select the user's subtitle.
-                    reinitActiveSubtitleKeepingSelection(view)
+                    markSubtitleReload(); view.mpv.command("sub-reload")
                 }
                 lastAppliedNativeAssOverride = if (isNativeAssSsa) effectiveOverrideAss else null
             } catch (_: Throwable) {}
@@ -2532,7 +2554,7 @@ class MpvPlayerController {
             }
             sourceExtension = source.extension.lowercase(Locale.ROOT)
             text = UniversalSubtitleEngine.readTextWithCharsetDetection(source)
-            key = AdvancedAssStyleEngine.contentKey(text)
+            key = externalSubtitleKey(text)
         } else {
             if (info.isExternal) return null
             if (info.codec !in rawTextCodecs) return null
@@ -2650,10 +2672,19 @@ class MpvPlayerController {
             } catch (_: Throwable) {
                 null
             }
+            // "Override ASS/SSA Styles" ON: the selected font must drive every style and inline
+            // \\fn of this edited/pasted script too (same rule as UniversalSubtitleEngine uses for
+            // uploaded files). Without it the script's own font stays in the text, the glyph
+            // fallback judges Hindi/other scripts against THAT font and wraps them in Go Noto.
+            var forcedText = fixed ?: cleaned
+            val forcedFontName = SubtitleFontManager.selectedFontRenderName
+            if (SubtitleFontManager.forceSelectedFontOnAss && !forcedFontName.isNullOrBlank() && !advancedAssGoverning) {
+                forcedText = SubtitleFontManager.forceSelectedFontEverywhere(forcedText, forcedFontName)
+            }
             renderText = try {
-                SubtitleFontManager.applyGlyphFallback(context, fixed ?: cleaned)
+                SubtitleFontManager.applyGlyphFallback(context, forcedText)
             } catch (_: Throwable) {
-                fixed ?: cleaned
+                forcedText
             }
         }
         val signature = "${binding.isAss}:${renderText.length}:${renderText.hashCode()}"
@@ -2999,7 +3030,7 @@ class MpvPlayerController {
         val binding = if (path != null) {
             val text = UniversalSubtitleEngine.readTextWithCharsetDetection(File(path))
             if (AdvancedAssStyleEngine.parse(text) == null) return null
-            AdvancedAssBinding(AdvancedAssStyleEngine.contentKey(text), title, info.id, text, null)
+            AdvancedAssBinding(externalSubtitleKey(text), title, info.id, text, null)
         } else {
             val video = currentFilePath ?: return null
             val key = "emb_" + AdvancedAssStyleEngine
@@ -3374,6 +3405,7 @@ class MpvPlayerController {
                 )
             }
             if (trackId > 0) {
+                _subtitleTracks.value.firstOrNull { it.id == trackId }?.let { userSubtitleIdentity = subtitleIdentity(it) }
                 reapplyAppearanceForTrack(view, trackId)
                 // Native ASS/SSA can be enumerated by mpv slightly after the UI selection
                 // callback.  If the selection lands in that short window, the UI can correctly
@@ -3429,7 +3461,7 @@ class MpvPlayerController {
                     // One reload after the real track exists fixes the exact failure mode where
                     // mpv reports `sid` successfully but libass has not attached the external
                     // ASS event stream yet. Do not repeat it on every polling attempt.
-                    try { view.mpv.command("sub-reload") } catch (_: Throwable) {}
+                    try { markSubtitleReload(); view.mpv.command("sub-reload") } catch (_: Throwable) {}
                     try {
                         if (!(_isPlaying.value)) view.mpv.command("seek", "0", "relative+exact")
                     } catch (_: Throwable) {}
@@ -3608,7 +3640,7 @@ class MpvPlayerController {
                 val wasSelected = (view.mpv.getPropertyInt("sid") ?: 0) == playbackId
                 // sub-reload is only used here because the SOURCE FILE CONTENT changed. Normal
                 // select/unselect never reaches this path. Keep the same sid across the reload.
-                view.mpv.command("sub-reload")
+                markSubtitleReload(); view.mpv.command("sub-reload")
                 if (wasSelected) {
                     try { view.mpv.setPropertyInt("sid", playbackId) } catch (_: Throwable) {}
                     try { view.mpv.setPropertyBoolean("sub-visibility", true) } catch (_: Throwable) {}
@@ -4003,7 +4035,7 @@ class MpvPlayerController {
                                 try { v.mpv.setPropertyBoolean("sub-visibility", true) } catch (_: Throwable) {}
                                 try { v.mpv.setPropertyString("sub-ass", "yes") } catch (_: Throwable) {}
                                 try { v.mpv.setPropertyString("sub-ass-override", "no") } catch (_: Throwable) {}
-                                try { v.mpv.command("sub-reload") } catch (_: Throwable) {}
+                                try { markSubtitleReload(); v.mpv.command("sub-reload") } catch (_: Throwable) {}
                             }
                             found
                         }

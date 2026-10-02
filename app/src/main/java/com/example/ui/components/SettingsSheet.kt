@@ -4574,6 +4574,20 @@ fun SubtitlesTab(
                                                         verticalAlignment = Alignment.CenterVertically,
                                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                                     ) {
+                                                        if (!originalFontName.equals(fontFile.name, ignoreCase = true)) {
+                                                            Text(
+                                                                text = fontFile.name,
+                                                                fontSize = 11.sp,
+                                                                color = secondaryText.copy(alpha = 0.85f),
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                            Text(
+                                                                text = "•",
+                                                                fontSize = 11.sp,
+                                                                color = secondaryText.copy(alpha = 0.5f)
+                                                            )
+                                                        }
                                                         Text(
                                                             text = "${fileSizeKb} KB",
                                                             fontSize = 11.sp,
