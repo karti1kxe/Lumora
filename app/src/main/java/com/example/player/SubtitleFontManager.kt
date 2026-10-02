@@ -320,12 +320,35 @@ object SubtitleFontManager {
 
     private val fontNamesCache = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
 
+    private val fullNameCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * The font's own metadata name (name table, NameID 4 "Full Font Name"), or "" when the file has
+     * none. Unlike the family name this is what tells apart fonts that intentionally share one
+     * family (several files all declaring the family "XE Fonts", for example).
+     */
+    private fun fullNameOf(file: File): String {
+        val key = file.absolutePath + "|" + file.length() + "|" + file.lastModified()
+        return fullNameCache.getOrPut(key) {
+            try {
+                if (file.isFile && file.length() in 100..(30L * 1024 * 1024)) {
+                    getFullFontName(file.readBytes()).orEmpty()
+                } else ""
+            } catch (_: Throwable) { "" }
+        }
+    }
+
     private fun namesOfFontFile(file: File): List<String> {
         val key = file.absolutePath + "|" + file.length() + "|" + file.lastModified()
         return fontNamesCache.getOrPut(key) {
-            val names = mutableListOf(file.name, file.nameWithoutExtension)
+            // The metadata (full) name goes first so it is always the preferred identity of the
+            // file; family / PostScript names - which many fonts share - only come after it.
+            val names = LinkedHashSet<String>()
+            fullNameOf(file).takeIf { it.isNotBlank() }?.let { names.add(it) }
+            names.add(file.name)
+            names.add(file.nameWithoutExtension)
             names.addAll(extractFontNamesFromTtfFile(file))
-            names
+            names.toList()
         }
     }
 
@@ -338,7 +361,13 @@ object SubtitleFontManager {
         val norm = normalizeFontName(clean)
         val files = getSubFontsDir(context).listFiles()
             ?.filter { it.isFile && it.extension.lowercase(java.util.Locale.ROOT) in FONT_EXTS }
+            ?.sortedBy { it.name.lowercase(java.util.Locale.ROOT) }
             ?: return null
+        // 1) The font's own metadata (full) name wins: several files can share one family name,
+        //    so the family must never decide which of them is meant.
+        files.firstOrNull { f -> fullNameOf(f).equals(clean, ignoreCase = true) }?.let { return it }
+        files.firstOrNull { f -> fullNameOf(f).let { it.isNotBlank() && normalizeFontName(it) == norm } }?.let { return it }
+        // 2) Anything else that names the file (file name, family, PostScript name).
         files.firstOrNull { f -> namesOfFontFile(f).any { it.equals(clean, ignoreCase = true) } }?.let { return it }
         return files.firstOrNull { f -> namesOfFontFile(f).any { normalizeFontName(it) == norm } }
     }
@@ -346,31 +375,10 @@ object SubtitleFontManager {
     fun getSelectedFontFile(context: Context): File? {
         val name = selectedFontRenderName ?: return null
         if (selectedFontFileCacheName == name && selectedFontFileCache?.exists() == true) return selectedFontFileCache
-        val file = findFontFile(context, name) ?: findInstalledFontByRenderName(context, name)
+        val file = findFontFile(context, name)
         selectedFontFileCache = file
         selectedFontFileCacheName = name
         return file
-    }
-
-    /**
-     * Second way to locate the selected font's file: the same lookup the font picker UI uses
-     * (render name / family name of every installed font). Without it a font whose name table
-     * could not be matched by [findFontFile] (TTC, very large or oddly named fonts) looked like
-     * "no file" and every non-Latin character was needlessly sent to the universal fallback font.
-     */
-    private fun findInstalledFontByRenderName(context: Context, name: String): File? {
-        val clean = name.trim().removePrefix("@")
-        if (clean.isBlank()) return null
-        val norm = normalizeFontName(clean)
-        return try {
-            getInstalledFonts(context).firstOrNull { f ->
-                val render = getRenderFontName(f)
-                val family = getFontFamilyName(f)
-                render.equals(clean, ignoreCase = true) || family.equals(clean, ignoreCase = true) ||
-                    f.name.equals(clean, ignoreCase = true) || f.nameWithoutExtension.equals(clean, ignoreCase = true) ||
-                    normalizeFontName(render) == norm || normalizeFontName(family) == norm
-            }
-        } catch (_: Throwable) { null }
     }
 
     /** Sorted, merged code point ranges (start[i]..end[i]) a font has glyphs for. */
@@ -530,6 +538,10 @@ object SubtitleFontManager {
         }
     }
 
+    /** A font name is safe inside an inline `{\\fn...}` tag only without tag/field delimiters. */
+    private fun fontNameForTag(fontName: String): String =
+        fontName.trim().removePrefix("@").takeIf { it.none { c -> c == '{' || c == '}' || c == '\\' || c == ',' } }.orEmpty()
+
     /**
      * Gives every Style line and every inline `\\fn` the same [fontName], so one font drives the
      * whole script. Layout, colours, tags and timing are untouched.
@@ -541,6 +553,7 @@ object SubtitleFontManager {
             var inStyles = false
             var format = emptyList<String>()
             var inEvents = false
+            var eventFormat = emptyList<String>()
             val fnPattern = Regex("\\\\fn[^\\\\}]*")
             for (i in lines.indices) {
                 val original = lines[i]
@@ -568,8 +581,38 @@ object SubtitleFontManager {
                     }
                     continue
                 }
+                if (inEvents && t.startsWith("Format:", ignoreCase = true)) {
+                    eventFormat = t.substringAfter(":").split(",").map { it.trim().lowercase(java.util.Locale.ROOT) }
+                    continue
+                }
                 if (inEvents && original.contains("\\fn")) {
                     lines[i] = fnPattern.replace(original) { "" }
+                }
+                // Make the selected font explicit on EVERY dialogue, not only through the style
+                // table. libass leaves the style of events that carry positioning / animation tags
+                // (\pos, \an, \move, ...) alone, so a dialogue like that (sign, song, italic
+                // style at the top...) could still come out in a different (or the universal) font
+                // even though its Style line was rewritten. A leading {\fn<font>} changes nothing
+                // about timing, position, colours or animation - it only pins the font.
+                if (inEvents && t.startsWith("Dialogue:", ignoreCase = true) && eventFormat.isNotEmpty()) {
+                    val line = lines[i]
+                    val cr = line.endsWith("\r")
+                    val body = if (cr) line.dropLast(1) else line
+                    val colon = body.indexOf(':')
+                    if (colon >= 0) {
+                        val n = eventFormat.size
+                        val parts = body.substring(colon + 1).split(",", limit = n)
+                        if (parts.size == n) {
+                            val textIdx = eventFormat.indexOf("text").takeIf { it >= 0 } ?: (n - 1)
+                            val textPart = parts[textIdx]
+                            val tagFont = fontNameForTag(fontName)
+                            if (tagFont.isNotBlank()) {
+                                val rebuilt = parts.toMutableList()
+                                rebuilt[textIdx] = "{\\fn$tagFont}" + textPart
+                                lines[i] = body.substring(0, colon + 1) + rebuilt.joinToString(",") + (if (cr) "\r" else "")
+                            }
+                        }
+                    }
                 }
             }
             lines.joinToString("\n")
@@ -609,11 +652,7 @@ object SubtitleFontManager {
                     // only basic Latin; the bundled font then draws the rest (it is only used
                     // for characters it really has).
                     val parsed = file?.let { coverageOf(it) }
-                    // The USER'S selected font whose glyph table cannot be read/located is trusted
-                    // (null = "no fallback tags"): it must keep drawing its own characters (e.g.
-                    // Hindi Devanagari) instead of handing them to the universal font. Only a
-                    // different, non-selected font with an unreadable table stays conservative.
-                    parsed ?: if (isSelected) null else if (file != null) CONSERVATIVE_LATIN_COVERAGE else null
+                    parsed ?: if (file != null || isSelected) CONSERVATIVE_LATIN_COVERAGE else null
                 }
             }
 
@@ -1096,6 +1135,7 @@ object SubtitleFontManager {
             val storageOffset = nameTableOffset + stringOffset
 
             val byNameId = mutableMapOf<Int, String>()
+            val ranks = mutableMapOf<Int, Int>()
             for (i in 0 until count) {
                 val nrPos = nameTableOffset + 6 + i * 12
                 if (nrPos + 12 > bytes.size) break
@@ -1113,12 +1153,21 @@ object SubtitleFontManager {
                     String(bytes, actualPos, length, java.nio.charset.StandardCharsets.UTF_8)
                 }.trim()
                 if (str.isBlank()) continue
-                val isPreferredPlatform = platformId == 0 || platformId == 3
-                val existing = byNameId[nameId]
-                if (existing == null || isPreferredPlatform) {
+                // Windows/English record > any other Windows/Unicode record > Macintosh record.
+                val languageId = buffer.getShort(nrPos + 4).toInt() and 0xFFFF
+                val rank = when {
+                    platformId == 3 && languageId == 0x0409 -> 3
+                    platformId == 0 || platformId == 3 -> 2
+                    else -> 1
+                }
+                val existingRank = ranks[nameId] ?: 0
+                if (rank > existingRank) {
                     byNameId[nameId] = str
+                    ranks[nameId] = rank
                 }
             }
+            // Full Font Name (NameID 4) is the identity of the font. The family name (NameID 1) is
+            // only a last resort for fonts that have no full name at all.
             return byNameId[4] ?: byNameId[1] ?: byNameId[6]
         } catch (_: Throwable) {
             return null

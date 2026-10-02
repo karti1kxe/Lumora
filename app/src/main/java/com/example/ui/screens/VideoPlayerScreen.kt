@@ -1329,10 +1329,6 @@ fun VideoPlayerScreen(
     // Automatically select Preferred Audio Language if available
     LaunchedEffect(realSubtitleTracks, uiState.playerSettings.preferredSubtitleLanguages, uiState.playerSettings.applySubtitleLanguageToSelectedContentOnly, uiState.playerSettings.selectedSubtitleFolders, uiState.playerSettings.selectedSubtitleVideos, uiState.playerSettings.subtitleSignsAndSongs, currentVideo) {
         if (SubtitleSessionMemory.preferredTrackNumber != null) return@LaunchedEffect
-        // A font/Override restyle is reloading the subtitle (track ids shift for a moment): never
-        // treat that as "nothing selected" and switch to another subtitle. The track list is
-        // refreshed again right after, which re-runs this effect with the settled state.
-        if (controller.isSubtitleRestyling) return@LaunchedEffect
         // This video has a subtitle choice of its own: never override it with a language default.
         val videoForSelection = currentVideo
         if (videoForSelection != null && CustomSubtitlePersistenceManager.getSubtitleSelection(
