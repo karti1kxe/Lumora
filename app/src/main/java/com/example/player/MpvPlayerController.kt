@@ -187,15 +187,11 @@ class MpvPlayerController {
      */
     private fun onSelectedSubtitleFontChanged(fontFamily: String?) {
         val forceFont = subtitleOverrideAssSsaUserPref && !advancedAssGoverning
-        val key = fontFamily?.trim().orEmpty() + "|ov=" + subtitleOverrideAssSsaUserPref + "|force=" + forceFont
+        val key = fontFamily?.trim().orEmpty() + "|force=" + forceFont
         if (key == lastSelectedFontKey) return
         lastSelectedFontKey = key
         SubtitleFontManager.forceSelectedFontOnAss = forceFont
         SubtitleFontManager.setSelectedFont(fontFamily)
-        // Advanced ASS/SSA (or the raw editor) owns the rendering copy of the current subtitle:
-        // it must be rebuilt too when the font or the Override switch changes, otherwise the
-        // old copy keeps showing the previous fonts.
-        if (advancedAssEnabled || rawEditorEnabled || overrideBakeWanted || advancedAssBindings.isNotEmpty()) scheduleAdvancedAssSync()
         val ctx = mpvView?.context ?: return
         // Embedded ASS/SSA tracks are not rewritten by us; libass caches the font it resolved for
         // each style, so a live font change only shows up after the track is re-initialised.
@@ -232,7 +228,7 @@ class MpvPlayerController {
                 }
                 if (changed) {
                     withMpvLock(Unit) { v ->
-                        try { v.mpv.command("sub-reload") } catch (_: Throwable) {}
+                        try { reloadSubtitleKeepingSelection(v) } catch (_: Throwable) {}
                     }
                     nudgeRedrawIfPaused()
                 }
@@ -869,6 +865,8 @@ class MpvPlayerController {
         // Selections belong to ONE video: never carry the 2nd subtitle over to the next file.
         _secondarySubtitleTrackId.value = 0
         lastActiveSubtitleTrackId = 0
+        subtitleAutoMatchDone = false
+        subtitleReloadGuardUntil = 0L
         isSubtitleExplicitlyDisabled = false
         trackDiscoveryStartedAt = System.currentTimeMillis()
         lastTrackListCount = -1
@@ -1711,6 +1709,32 @@ class MpvPlayerController {
 
     private var isSubtitleExplicitlyDisabled: Boolean = false
 
+    // The "next episode" best-effort subtitle match may run at most once per loaded video, and
+    // never while we are ourselves reloading the active subtitle (font / Override ASS/SSA change).
+    @Volatile private var subtitleAutoMatchDone = false
+    @Volatile private var subtitleReloadGuardUntil = 0L
+
+    /**
+     * mpv's `sub-reload` removes an external subtitle and re-adds it under a NEW track id. The
+     * app's own "active subtitle" bookkeeping still pointed at the old id, so right after a
+     * font / Override ASS/SSA change no track looked selected: the next-episode auto-match then
+     * picked a DIFFERENT subtitle file and silently switched Override ASS/SSA off. Follow the
+     * new id here so the subtitle the user is editing stays selected.
+     */
+    private fun reloadSubtitleKeepingSelection(view: VideoPlayerMpvView) {
+        subtitleReloadGuardUntil = System.currentTimeMillis() + 3000L
+        val sidBefore = try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null } ?: 0
+        try { view.mpv.command("sub-reload") } catch (_: Throwable) { return }
+        val sidAfter = try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null } ?: 0
+        if (sidBefore > 0 && sidAfter > 0 && sidAfter != sidBefore && !isSubtitleExplicitlyDisabled &&
+            lastActiveSubtitleTrackId == sidBefore
+        ) {
+            lastActiveSubtitleTrackId = sidAfter
+        }
+        subtitleReloadGuardUntil = System.currentTimeMillis() + 1500L
+        try { refreshTracksAndChapters() } catch (_: Throwable) {}
+    }
+
     fun refreshTracksAndChapters() {
         val view = mpvView ?: return
         try {
@@ -1852,12 +1876,17 @@ class MpvPlayerController {
                         .filterNot { it.id in advancedDerivedIds }
 
                     _subtitleTracks.value = preservedSubList
-                    if ((advancedAssEnabled || rawEditorEnabled || overrideBakeWanted) && !advancedAssSyncing) scheduleAdvancedAssSync()
+                    if ((advancedAssEnabled || rawEditorEnabled) && !advancedAssSyncing) scheduleAdvancedAssSync()
                     val currentSid = view.mpv.getPropertyString("sid")
                     val isNoneSelected = preservedSubList.none { it.isSelected } || currentSid == null || currentSid == "no" || currentSid == "0"
-                    if (isNoneSelected && !isSubtitleExplicitlyDisabled && !holdSubtitleAutoSelect) {
+                    if (!isNoneSelected) subtitleAutoMatchDone = true
+                    if (isNoneSelected && !isSubtitleExplicitlyDisabled && !holdSubtitleAutoSelect &&
+                        !subtitleAutoMatchDone && lastActiveSubtitleTrackId <= 0 &&
+                        System.currentTimeMillis() >= subtitleReloadGuardUntil
+                    ) {
                         val matched = SubtitleSessionMemory.findMatchingTrackForNextEpisode(preservedSubList)
                         if (matched != null && matched.id > 0) {
+                            subtitleAutoMatchDone = true
                             val chosenSubId = matched.id
                             try {
                                 view.mpv.setPropertyInt("sid", chosenSubId)
@@ -2322,9 +2351,7 @@ class MpvPlayerController {
             if (fontSize > 0f) {
                 forceStyles.add("FontSize=${fontSize.toInt()}")
             }
-            if (!(isNativeAssSsa && overrideBakeActive)) {
-                forceStyles.add("FontName=$effectiveFontFamily")
-            }
+            forceStyles.add("FontName=$effectiveFontFamily")
             if (letterSpacing != 0f) {
                 forceStyles.add("Spacing=$letterSpacing")
             }
@@ -2390,7 +2417,7 @@ class MpvPlayerController {
                 // from the subtitle's own Style definitions when the toggle is OFF.
                 val previousNativeOverride = lastAppliedNativeAssOverride
                 if (isNativeAssSsa && previousNativeOverride != null && previousNativeOverride != effectiveOverrideAss) {
-                    view.mpv.command("sub-reload")
+                    reloadSubtitleKeepingSelection(view)
                 }
                 lastAppliedNativeAssOverride = if (isNativeAssSsa) effectiveOverrideAss else null
             } catch (_: Throwable) {}
@@ -2800,29 +2827,6 @@ class MpvPlayerController {
         get() = advancedAssEnabled && advancedAssActive
 
     /**
-     * "Override ASS/SSA Styles" is ON with a selected font (and Advanced ASS/SSA is not the one in
-     * charge): the current native ASS/SSA subtitle is rendered from a private rewritten copy in
-     * which EVERY style and inline \fn uses the selected font, and only the characters that font
-     * lacks are drawn with the bundled fallback font. This is the very same pipeline Advanced
-     * ASS/SSA uses, so it works for uploaded, attached AND embedded ASS/SSA subtitles (libass'
-     * own force-style cannot fix inline \fn tags or mixed-script text).
-     */
-    private val overrideBakeWanted: Boolean
-        get() = subtitleOverrideAssSsaUserPref && !advancedAssEnabled &&
-            !SubtitleFontManager.selectedFontRenderName.isNullOrBlank()
-
-    /** True while the current native ASS/SSA track is shown from such a rewritten copy. */
-    @Volatile private var overrideBakeActive = false
-
-    private fun setOverrideBakeActive(active: Boolean) {
-        if (overrideBakeActive == active) return
-        overrideBakeActive = active
-        // Re-apply the appearance: while the copy carries the font, libass must not be forced to
-        // another FontName (that would also disable the inline fallback-font tags).
-        try { lastAppearanceReplay?.invoke() } catch (_: Throwable) {}
-    }
-
-    /**
      * Called whenever the subtitle settings change. Cheap when nothing relevant changed. Global
      * "Override ASS/SSA" is suppressed for an ASS/SSA track while Advanced ASS/SSA is enabled, so
      * global settings are never blindly applied on top of per-style values.
@@ -2896,7 +2900,6 @@ class MpvPlayerController {
         rawBindings.clear()
         rawPreview = null
         advancedAssActive = false
-        overrideBakeActive = false
         if (ctx != null) {
             try { File(ctx.cacheDir, ADVANCED_ASS_CACHE_DIR).listFiles()?.forEach { it.delete() } } catch (_: Throwable) {}
             try { File(ctx.cacheDir, RAW_SUBTITLE_CACHE_DIR).listFiles()?.forEach { it.delete() } } catch (_: Throwable) {}
@@ -3077,9 +3080,8 @@ class MpvPlayerController {
         } catch (t: Throwable) {
             Log.w("MpvPlayerController", "Raw subtitle sync failed", t)
         }
-        val bakeOnly = overrideBakeWanted
-        val enabled = advancedAssEnabled || bakeOnly
-        val json = if (bakeOnly) "" else advancedAssOverridesJson
+        val enabled = advancedAssEnabled
+        val json = advancedAssOverridesJson
 
         // ---- Phase A (native, locked): inspect the current subtitle track ----
         val plan = withMpvLock<AdvancedAssPlan?>(null) { view ->
@@ -3093,7 +3095,6 @@ class MpvPlayerController {
                     }
                 }
                 setAdvancedAssActive(false)
-                setOverrideBakeActive(false)
                 if (removed) refreshTracksAndChapters()
                 return@withMpvLock null
             }
@@ -3109,7 +3110,6 @@ class MpvPlayerController {
                     }
                 }
                 setAdvancedAssActive(false)
-                setOverrideBakeActive(false)
                 if (removed) refreshTracksAndChapters()
                 return@withMpvLock null
             }
@@ -3122,10 +3122,9 @@ class MpvPlayerController {
             val info = readAdvancedAssTrackInfo(view, originalId)
             if (info == null || !isAdvancedAssEligible(context, info)) {
                 setAdvancedAssActive(false)
-                setOverrideBakeActive(false)
                 return@withMpvLock null
             }
-            setAdvancedAssActive(!bakeOnly)
+            setAdvancedAssActive(true)
             val existing = advancedAssBindings[originalId]
             // Even with no per-style edits the script may name fonts nobody ships; Phase B then
             // decides whether a font-fallback rendering copy is needed (see below).
@@ -3137,12 +3136,12 @@ class MpvPlayerController {
         val binding = advancedAssBindings[plan.originalId]?.takeIf { !it.unsupported }
             ?: resolveAdvancedAssBinding(context, plan.info)
         if (binding == null) {
-            withMpvLock(Unit) { setAdvancedAssActive(false); setOverrideBakeActive(false) }
+            withMpvLock(Unit) { setAdvancedAssActive(false) }
             return
         }
         val text = ensureAdvancedAssSourceText(context, binding)
         if (text == null) {
-            withMpvLock(Unit) { setAdvancedAssActive(false); setOverrideBakeActive(false) }
+            withMpvLock(Unit) { setAdvancedAssActive(false) }
             return
         }
         val overrides = AssOverridesStore.get(json, binding.key)
@@ -3165,16 +3164,7 @@ class MpvPlayerController {
         // tags computed for the OLD font (e.g. every Hindi character wrapped in {\fnGo Noto...}).
         // Those tags would keep overriding the font the user now picks in Advanced ASS/SSA, so
         // they are removed first and recomputed below against the NEW fonts.
-        val strippedText = SubtitleFontManager.stripGlyphFallback(context, text)
-        // "Override ASS/SSA Styles" is ON together with Advanced ASS/SSA: the selected font is the
-        // base font of EVERY style and inline \fn; the per-style edits made in Advanced ASS/SSA are
-        // applied on top of it and keep priority for the styles they touch.
-        val uniformFont = SubtitleFontManager.selectedFontRenderName
-        val cleanText = if (subtitleOverrideAssSsaUserPref && !uniformFont.isNullOrBlank()) {
-            SubtitleFontManager.forceSelectedFontEverywhere(strippedText, uniformFont)
-        } else {
-            strippedText
-        }
+        val cleanText = SubtitleFontManager.stripGlyphFallback(context, text)
         val base = if (overrides.isEmpty) cleanText else AdvancedAssStyleEngine.apply(cleanText, overrides)
         val fontFixed = try {
             SubtitleFontManager.replaceMissingFontsKeepingLayout(context, base)
@@ -3185,7 +3175,7 @@ class MpvPlayerController {
             SubtitleFontManager.applyGlyphFallback(context, fontsReady)
         } catch (_: Throwable) { fontsReady }
         val renderText = withFallback
-        val needsDerived = bakeOnly || !overrides.isEmpty || fontFixed != null || withFallback != text
+        val needsDerived = !overrides.isEmpty || fontFixed != null || withFallback != text
         if (needsDerived) {
             val built = renderText
             signature = "${built.length}:${built.hashCode()}"
@@ -3247,10 +3237,8 @@ class MpvPlayerController {
                 view.mpv.setPropertyBoolean("embeddedfonts", true)
             }
             setMpvStringIfChanged(view, "sub-ass", "yes")
-            if (!bakeOnly) {
-                setMpvStringIfChanged(view, "sub-ass-override", "no")
-                setMpvStringIfChanged(view, "sub-ass-force-style", "")
-            }
+            setMpvStringIfChanged(view, "sub-ass-override", "no")
+            setMpvStringIfChanged(view, "sub-ass-force-style", "")
 
             externalSubtitlesMap[file.absolutePath] = binding.title
             externalSubtitlesMap[file.name] = binding.title
@@ -3264,7 +3252,6 @@ class MpvPlayerController {
                 }
                 try { view.mpv.setPropertyBoolean("sub-visibility", true) } catch (_: Throwable) {}
                 lastActiveSubtitleTrackId = binding.originalTrackId
-                setOverrideBakeActive(bakeOnly)
                 return@withMpvLock
             }
 
@@ -3314,7 +3301,6 @@ class MpvPlayerController {
             // but explicitly preserve the revision that is now selected.
             removeOrphanedAdvancedAssTracks(view, binding.key, keepPath = file.absolutePath)
             refreshTracksAndChapters()
-            setOverrideBakeActive(bakeOnly)
 
         }
     }
@@ -3387,7 +3373,7 @@ class MpvPlayerController {
                     scheduleNativeAssSelectionRecovery(trackId, selectionGeneration)
                 }
             }
-            if (advancedAssEnabled || rawEditorEnabled || overrideBakeWanted || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
+            if (advancedAssEnabled || rawEditorEnabled || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
             nudgeRedrawIfPaused()
         } catch (_: Throwable) {}
     }
@@ -3549,7 +3535,7 @@ class MpvPlayerController {
 
             }
 
-            if (advancedAssEnabled || rawEditorEnabled || overrideBakeWanted || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
+            if (advancedAssEnabled || rawEditorEnabled || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
 
             _subtitleTracks.value = _subtitleTracks.value.map { track ->
                 track.copy(

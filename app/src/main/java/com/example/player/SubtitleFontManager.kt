@@ -340,7 +340,11 @@ object SubtitleFontManager {
             ?.filter { it.isFile && it.extension.lowercase(java.util.Locale.ROOT) in FONT_EXTS }
             ?: return null
         files.firstOrNull { f -> namesOfFontFile(f).any { it.equals(clean, ignoreCase = true) } }?.let { return it }
-        return files.firstOrNull { f -> namesOfFontFile(f).any { normalizeFontName(it) == norm } }
+        files.firstOrNull { f -> namesOfFontFile(f).any { normalizeFontName(it) == norm } }?.let { return it }
+        // Last resort: the exact names the UI / libass use for a file (full name, family name).
+        return files.firstOrNull { f ->
+            normalizeFontName(getOriginalFontName(f)) == norm || normalizeFontName(getFontFamilyName(f)) == norm
+        }
     }
 
     fun getSelectedFontFile(context: Context): File? {
@@ -588,7 +592,13 @@ object SubtitleFontManager {
                     // only basic Latin; the bundled font then draws the rest (it is only used
                     // for characters it really has).
                     val parsed = file?.let { coverageOf(it) }
-                    parsed ?: if (file != null || isSelected) CONSERVATIVE_LATIN_COVERAGE else null
+                    // The user's OWN selected font must never be assumed to be "Latin only": if its
+                    // glyph table cannot be read or the file cannot be matched by name, wrapping
+                    // every Hindi/other-script character in the universal font would override the
+                    // font the user picked even though it has those glyphs. Report "unknown" instead
+                    // (no inline fallback; libass still falls back per glyph on its own).
+                    if (isSelected) parsed
+                    else parsed ?: if (file != null) CONSERVATIVE_LATIN_COVERAGE else null
                 }
             }
 
@@ -1626,13 +1636,15 @@ object SubtitleFontManager {
         try {
             if (bytes.size < 12) return names
             val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.BIG_ENDIAN)
-            val numTables = buffer.getShort(4).toInt() and 0xFFFF
+            val ttcBase = if (bytes.size >= 16 && buffer.getInt(0) == 0x74746366) buffer.getInt(12) else 0
+            if (ttcBase < 0 || ttcBase + 12 > bytes.size) return names
+            val numTables = buffer.getShort(ttcBase + 4).toInt() and 0xFFFF
             if (numTables <= 0 || numTables > 200) return names
 
             var nameTableOffset = -1
             var nameTableLength = -1
             for (i in 0 until numTables) {
-                val recordPos = 12 + i * 16
+                val recordPos = ttcBase + 12 + i * 16
                 if (recordPos + 16 > bytes.size) break
                 val tag = buffer.getInt(recordPos)
                 // Tag 'name' == 0x6E616D65
