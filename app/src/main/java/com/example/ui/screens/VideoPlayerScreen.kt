@@ -1576,6 +1576,16 @@ fun VideoPlayerScreen(
         // 4. Retrieve target VideoItem and resolved file path
         val targetVideo = currentPlaylist.getOrNull(validIndex) ?: return
         com.example.util.MediaSeenManager.markSeen(context, targetVideo.path, targetVideo.id)
+        // This episode is now the "last watched" one right away (not only after the first 3 s tick),
+        // so the folder's resume button can never fall back to the episode before it.
+        com.example.util.PlaybackHistoryManager.markOpened(
+            context = context,
+            videoId = targetVideo.id,
+            path = targetVideo.path,
+            uriString = targetVideo.uri.toString(),
+            title = targetVideo.displayName,
+            durationMs = targetVideo.durationMs
+        )
         val path = getPlayableFilePath(context, targetVideo.uri, targetVideo.path)
 
         // 5. Restore saved position & duration (respecting Resume Playback setting)
@@ -1671,15 +1681,27 @@ fun VideoPlayerScreen(
     }
 
     // Hardware-synchronized A-B loop boundaries, repeat mode auto-advance, and periodic playback persistence
+    // The end-of-video action must run ONCE per ending. It is re-armed as soon as playback is no
+    // longer at the end (new episode loaded, or the user dragged the slider back).
+    var endActionHandled by remember { mutableStateOf(false) }
     LaunchedEffect(controllerPos, isPlaying, loopPointA, loopPointB, repeatMode, durationMs, controllerEof) {
         val ptA = loopPointA
         val ptB = loopPointB
         val isAtEnd = (durationMs > 1000L && controllerPos >= (durationMs - 450L)) || (controllerEof && durationMs > 0L)
+        // Stays "handled" while the old episode's end state is still visible during the switch to the
+        // next one (otherwise the next-next episode would be started too); re-armed once playback has
+        // left the end (new file loaded / user seeked back).
+        if (!isAtEnd) {
+            endActionHandled = false
+        }
         if (ptA != null && ptB != null && ptB > ptA && isPlaying) {
             if (controllerPos >= ptB) {
                 controller.seekTo(ptA)
             }
-        } else if (isAtEnd && isPlaying) {
+        // At EOF mpv (keep-open) is PAUSED, so `isPlaying` is false there: the old `isAtEnd && isPlaying`
+        // test never became true and the player just sat on the last frame.
+        } else if (isAtEnd && (isPlaying || controllerEof) && !endActionHandled) {
+            endActionHandled = true
             when (repeatMode) {
                 PlayerRepeatMode.ONE -> {
                     controller.seekTo(0L)

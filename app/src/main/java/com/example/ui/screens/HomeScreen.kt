@@ -80,6 +80,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -138,6 +139,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -432,6 +434,7 @@ fun HomeScreen(
 
     val libraryListState = rememberLazyListState()
     val folderContentListState = rememberLazyListState()
+    val folderContentGridState = rememberLazyGridState()
 
     var isInsideMusicFolder by remember { mutableStateOf(false) }
     var selectedMusicFolder by remember { mutableStateOf<AudioFolderItem?>(null) }
@@ -1318,28 +1321,62 @@ fun HomeScreen(
     }
 
     // Auto-scroll to the most recently played video when opening a list.
+    // - Uses the last watched video OF THIS FOLDER (the global "last watched" is usually in another folder).
+    // - Runs once per folder visit: the list is re-enriched (subtitle info etc.) several times after it
+    //   opens, which used to restart the animation and fight the user's own scrolling.
+    // - Jumps instantly to a few rows before the target and only glides the last stretch. Animating
+    //   through dozens of rows composes every card on the way, which is what made it janky.
+    var autoScrolledKey by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(currentFolder?.id, viewMode) {
+        if (currentFolder == null) autoScrolledKey = null
+    }
     LaunchedEffect(
         uiState.autoScrollToLastPlayed,
         viewMode,
-        allLibraryVideos,
-        displayedVideos,
-        displayedSubFolders
+        currentFolder?.id,
+        homeContentLayoutMode,
+        displayedVideos.size,
+        displayedSubFolders.size
     ) {
         if (!uiState.autoScrollToLastPlayed) return@LaunchedEffect
-        val last = com.example.util.PlaybackHistoryManager.getLastWatchedRecord(context)
-            ?: return@LaunchedEffect
+        val scrollKey = if (viewMode == ViewMode.FOLDER && currentFolder != null) "folder_${currentFolder.id}" else "library"
+        if (autoScrolledKey == scrollKey) return@LaunchedEffect
+
+        val last = withContext(Dispatchers.Default) {
+            if (viewMode == ViewMode.FOLDER && currentFolder != null) {
+                com.example.util.PlaybackHistoryManager.getLastWatchedRecordInFolder(context, currentFolder.path)
+            } else {
+                com.example.util.PlaybackHistoryManager.getLastWatchedRecord(context)
+            }
+        } ?: return@LaunchedEffect
+
+        val matches = { it: VideoItem ->
+            (last.path.isNotBlank() && it.path == last.path) ||
+                (last.uriString.isNotBlank() && it.uri.toString() == last.uriString) ||
+                (last.videoId > 0 && it.id == last.videoId)
+        }
+
         if (viewMode == ViewMode.LIBRARY) {
-            val index = allLibraryVideos.indexOfFirst {
-                (last.path.isNotBlank() && it.path == last.path) || it.id == last.videoId
-            }
-            if (index >= 0) libraryListState.animateScrollToItem(index)
+            val index = allLibraryVideos.indexOfFirst(matches)
+            if (index < 0) return@LaunchedEffect
+            autoScrolledKey = scrollKey
+            withFrameNanos { }
+            if (index > 4) libraryListState.scrollToItem((index - 6).coerceAtLeast(0))
+            libraryListState.animateScrollToItem(index)
         } else if (viewMode == ViewMode.FOLDER && currentFolder != null) {
-            val videoIndex = displayedVideos.indexOfFirst {
-                (last.path.isNotBlank() && it.path == last.path) || it.id == last.videoId
-            }
-            if (videoIndex >= 0) {
-                val itemIndex = displayedSubFolders.size + 1 + videoIndex
-                folderContentListState.animateScrollToItem(itemIndex.coerceAtLeast(0))
+            val videoIndex = displayedVideos.indexOfFirst(matches)
+            if (videoIndex < 0) return@LaunchedEffect
+            // Item layout of the folder list/grid: [folders header + folders] then [videos header + videos].
+            val foldersBlock = if (displayedSubFolders.isNotEmpty()) 1 + displayedSubFolders.size else 0
+            val itemIndex = foldersBlock + 1 + videoIndex
+            autoScrolledKey = scrollKey
+            withFrameNanos { }
+            if (homeContentLayoutMode == LayoutMode.GRID) {
+                if (itemIndex > 6) folderContentGridState.scrollToItem((itemIndex - 8).coerceAtLeast(0))
+                folderContentGridState.animateScrollToItem(itemIndex)
+            } else {
+                if (itemIndex > 4) folderContentListState.scrollToItem((itemIndex - 6).coerceAtLeast(0))
+                folderContentListState.animateScrollToItem(itemIndex)
             }
         }
     }
@@ -2371,6 +2408,7 @@ fun HomeScreen(
                             }
                         } else if (homeContentLayoutMode == LayoutMode.GRID) {
                             LazyVerticalGrid(
+                                state = folderContentGridState,
                                 columns = GridCells.Fixed(2),
                                 modifier = Modifier.fillMaxSize(),
                                 contentPadding = PaddingValues(top = 4.dp, bottom = 84.dp),
@@ -2634,41 +2672,47 @@ fun HomeScreen(
                         )
                         .border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape)
                         .bounceClick(scaleDown = 0.88f) {
-                            val lastRecord = if (currentFolder != null) {
-                                com.example.util.PlaybackHistoryManager.getLastWatchedRecordInFolder(context, currentFolder.path)
-                            } else {
-                                com.example.util.PlaybackHistoryManager.getLastWatchedRecord(context)
+                            // Resume = the video that was really watched LAST in this folder, from the exact
+                            // second it was left at (the player restores the saved position by itself).
+                            val source = if (currentFolder != null) currentFolder.getAllVideos() else allLibraryVideos
+                            var targetVideo: VideoItem? = null
+                            // Most recent history record that still maps to an existing video of this folder
+                            // (id / path / uri only - matching by title could pick a same-named video of
+                            // another episode or sub-folder).
+                            val inFolderRecords = com.example.util.PlaybackHistoryManager.getAllPlaybackRecords(context)
+                            for (rec in inFolderRecords) {
+                                val found = source.firstOrNull {
+                                    (rec.path.isNotBlank() && it.path == rec.path) ||
+                                        (rec.uriString.isNotBlank() && it.uri.toString() == rec.uriString) ||
+                                        (rec.videoId > 0 && it.id == rec.videoId)
+                                }
+                                if (found != null) { targetVideo = found; break }
                             }
-                            val targetVideo = lastRecord?.let { record ->
-                                val source = if (currentFolder != null) currentFolder.getAllVideos() else allLibraryVideos
-                                source.find {
-                                    (record.videoId > 0 && it.id == record.videoId) ||
-                                    (record.path.isNotBlank() && it.path == record.path) ||
-                                    (record.uriString.isNotBlank() && it.uri.toString() == record.uriString) ||
-                                    (record.title.isNotBlank() && it.displayName == record.title)
-                                } ?: if (record.path.isNotBlank()) VideoItem(
-                                    id = if (record.videoId > 0) record.videoId else 1L,
-                                    uri = if (record.uriString.isNotBlank()) runCatching { Uri.parse(record.uriString) }.getOrDefault(Uri.EMPTY) else Uri.EMPTY,
-                                    displayName = record.title.ifBlank { record.path.substringAfterLast('/').ifBlank { "Recent Video" } },
-                                    path = record.path,
-                                    sizeBytes = 0L,
-                                    durationMs = record.durationMs,
-                                    dateModified = record.lastWatchedTimestamp / 1000L,
-                                    isNew = false
-                                ) else null
-                            } ?: run {
-                                if (currentFolder != null) {
-                                    val folderVideos = if (displayedVideos.isNotEmpty()) displayedVideos else currentFolder.getAllVideos()
-                                    folderVideos.firstOrNull()
-                                } else {
-                                    allLibraryVideos.firstOrNull()
+                            if (targetVideo == null && currentFolder == null) {
+                                // Library level: keep the old behaviour (video that may live outside the scanned list).
+                                targetVideo = com.example.util.PlaybackHistoryManager.getLastWatchedRecord(context)?.let { record ->
+                                    if (record.path.isNotBlank()) VideoItem(
+                                        id = if (record.videoId > 0) record.videoId else 1L,
+                                        uri = if (record.uriString.isNotBlank()) runCatching { Uri.parse(record.uriString) }.getOrDefault(Uri.EMPTY) else Uri.EMPTY,
+                                        displayName = record.title.ifBlank { record.path.substringAfterLast('/').ifBlank { "Recent Video" } },
+                                        path = record.path,
+                                        sizeBytes = 0L,
+                                        durationMs = record.durationMs,
+                                        dateModified = record.lastWatchedTimestamp / 1000L,
+                                        isNew = false
+                                    ) else null
                                 }
                             }
                             if (targetVideo != null) {
-                                val source = if (currentFolder != null) {
-                                    if (displayedVideos.isNotEmpty()) displayedVideos else currentFolder.getAllVideos()
-                                } else allLibraryVideos
-                                onPlayVideo(targetVideo, if (source.isNotEmpty()) source else listOf(targetVideo))
+                                val chosen: VideoItem = targetVideo!!
+                                val shown = if (currentFolder != null && displayedVideos.isNotEmpty()) displayedVideos else source
+                                val queue = if (shown.any { it.path == chosen.path }) shown else source
+                                onPlayVideo(chosen, if (queue.isNotEmpty()) queue else listOf(chosen))
+                            } else if (source.isNotEmpty()) {
+                                // Nothing played in this folder yet: start from its FIRST episode (natural
+                                // name order, so "Ep 2" comes before "Ep 10") and queue the rest in that order.
+                                val ordered = source.sortedWith { a, b -> NaturalOrderComparator.compare(a.displayName, b.displayName) }
+                                onPlayVideo(ordered.first(), ordered)
                             }
                         }
                         .testTag("resume_fab"),

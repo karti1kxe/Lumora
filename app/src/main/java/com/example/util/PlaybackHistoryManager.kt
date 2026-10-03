@@ -65,6 +65,13 @@ object PlaybackHistoryManager {
     private val memoryDurCache = ConcurrentHashMap<String, Long>()
     private val memoryRecordCache = ConcurrentHashMap<String, VideoPlaybackRecord>()
     private val lastDiskSaveTimes = ConcurrentHashMap<String, Long>()
+    /**
+     * Bumped whenever a record is committed (exit / pause / episode change). Progress bars observe it
+     * so they refresh the moment the user comes back from the player instead of showing stale values.
+     */
+    private val _version = kotlinx.coroutines.flow.MutableStateFlow(0)
+    val version: kotlinx.coroutines.flow.StateFlow<Int> = _version
+
     @Volatile
     private var inMemoryLastWatchedRecord: VideoPlaybackRecord? = null
     @Volatile
@@ -197,6 +204,7 @@ object PlaybackHistoryManager {
         )
 
         inMemoryLastWatchedRecord = record
+        if (forceDiskWrite) _version.value = _version.value + 1
 
         // Instant in-memory cache update (UI sees changes in 0ms)
         candidateKeys.forEach { key ->
@@ -233,6 +241,57 @@ object PlaybackHistoryManager {
                 // Ignore background disk write failures gracefully
             }
         }
+    }
+
+    /**
+     * Marks a video as the most recently watched one WITHOUT touching its saved position.
+     * Called the instant an episode opens, so "last watched" is always the episode the user is
+     * really on (previously it only became the last watched after the first periodic save).
+     */
+    fun markOpened(
+        context: Context,
+        videoId: Long,
+        path: String,
+        uriString: String = "",
+        title: String = "",
+        durationMs: Long = 0L
+    ) {
+        ensureMemoryCacheLoaded(context)
+        val candidateKeys = generateCandidateKeys(videoId, path, uriString, title)
+        val primaryKey = candidateKeys.firstOrNull() ?: return
+        if (primaryKey == "unknown") return
+        val now = System.currentTimeMillis()
+        val pos = candidateKeys.firstNotNullOfOrNull { memoryPosCache[it] } ?: 0L
+        val dur = if (durationMs > 0L) durationMs else (candidateKeys.firstNotNullOfOrNull { memoryDurCache[it] } ?: 0L)
+        val record = VideoPlaybackRecord(
+            videoId = videoId,
+            path = path,
+            uriString = uriString,
+            title = if (title.isNotBlank()) title else path.substringAfterLast('/'),
+            positionMs = pos,
+            durationMs = dur,
+            lastWatchedTimestamp = now
+        )
+        inMemoryLastWatchedRecord = record
+        candidateKeys.forEach { key ->
+            memoryRecordCache[key] = record
+            if (dur > 0L) memoryDurCache[key] = dur
+        }
+        try {
+            val editor = getPrefs(context).edit()
+            candidateKeys.forEach { key ->
+                editor.putLong(KEY_POS_PREFIX + key, pos)
+                if (dur > 0L) editor.putLong(KEY_DUR_PREFIX + key, dur)
+                editor.putLong(KEY_TIME_PREFIX + key, now)
+                if (title.isNotBlank()) editor.putString(KEY_TITLE_PREFIX + key, title)
+                if (path.isNotBlank()) editor.putString(KEY_PATH_PREFIX + key, path)
+                if (uriString.isNotBlank()) editor.putString(KEY_URI_PREFIX + key, uriString)
+                if (videoId > 0L) editor.putLong(KEY_ID_PREFIX + key, videoId)
+            }
+            editor.putString(KEY_LAST_WATCHED_KEY, primaryKey)
+            editor.apply()
+        } catch (_: Throwable) {}
+        _version.value = _version.value + 1
     }
 
     /**
@@ -286,9 +345,13 @@ object PlaybackHistoryManager {
         uriString: String = "",
         title: String = ""
     ): Float {
-        if (durationMs <= 0L) return 0f
+        ensureMemoryCacheLoaded(context)
+        // The scanned duration can be 0 / stale: fall back to the duration recorded while playing.
+        val dur = if (durationMs > 0L) durationMs
+        else generateCandidateKeys(videoId, path, uriString, title).firstNotNullOfOrNull { memoryDurCache[it] } ?: 0L
+        if (dur <= 0L) return 0f
         val pos = getSavedPosition(context, videoId, path, uriString, title)
-        return (pos.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+        return (pos.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
     }
 
     /**

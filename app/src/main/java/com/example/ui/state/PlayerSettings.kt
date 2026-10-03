@@ -14,7 +14,7 @@ data class PlayerSettings(
     val orientation: String = "FREE",
     val savePositionOnQuit: Boolean = true,
     val closeAfterEnd: Boolean = false,
-    val autoplayNext: Boolean = false,
+    val autoplayNext: Boolean = true,
     val repeatPlaylistAfterLast: Boolean = false,
     val enableNextPrevious: Boolean = true,
     val rememberBrightness: Boolean = true,
@@ -193,7 +193,9 @@ data class PlayerSettings(
                     orientation = o.optString("orientation", "FREE"),
                     savePositionOnQuit = o.optBoolean("savePositionOnQuit", true),
                     closeAfterEnd = o.optBoolean("closeAfterEnd", false),
-                    autoplayNext = o.optBoolean("autoplayNext", false),
+                    // Default is ON. Settings saved by older versions (before the default changed) carry no
+                    // "autoplayNextDefaultOn" marker, so their stored OFF is treated as "never chosen".
+                    autoplayNext = if (o.has("autoplayNextDefaultOn")) o.optBoolean("autoplayNext", true) else true,
                     repeatPlaylistAfterLast = o.optBoolean("repeatPlaylistAfterLast", false),
                     enableNextPrevious = o.optBoolean("enableNextPrevious", true),
                     rememberBrightness = o.optBoolean("rememberBrightness", true),
@@ -344,6 +346,7 @@ data class PlayerSettings(
             o.put("savePositionOnQuit", value.savePositionOnQuit)
             o.put("closeAfterEnd", value.closeAfterEnd)
             o.put("autoplayNext", value.autoplayNext)
+            o.put("autoplayNextDefaultOn", true)
             o.put("repeatPlaylistAfterLast", value.repeatPlaylistAfterLast)
             o.put("enableNextPrevious", value.enableNextPrevious)
             o.put("rememberBrightness", value.rememberBrightness)

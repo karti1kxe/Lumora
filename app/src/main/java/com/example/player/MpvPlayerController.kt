@@ -1183,11 +1183,18 @@ class MpvPlayerController {
 
     fun seekTo(timeMs: Long) {
         try {
+            // Seeking away from the very end: with keep-open mpv sits paused at EOF, so the video
+            // must be un-paused again or "drag the slider back and play" appears to do nothing.
+            val wasAtEof = _eofReached.value || (try { mpvView?.mpv?.getPropertyBoolean("eof-reached") } catch (_: Throwable) { null } == true)
             _eofReached.value = false
             val sec = timeMs / 1000.0
             val mode = if (preciseSeekingEnabled) "absolute+exact" else "absolute"
             mpvView?.mpv?.command("seek", "$sec", mode)
             _currentPositionMs.value = timeMs
+            if (wasAtEof) {
+                mpvView?.mpv?.setPropertyBoolean("pause", false)
+                _isPlaying.value = true
+            }
         } catch (t: Throwable) {
             t.printStackTrace()
         }

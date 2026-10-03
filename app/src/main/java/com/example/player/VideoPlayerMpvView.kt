@@ -55,6 +55,10 @@ class VideoPlayerMpvView @JvmOverloads constructor(
         mpv.setOptionString("vd-lavc-dr", "yes")
         mpv.setOptionString("keepaspect", "yes")
         mpv.setOptionString("force-window", "yes")
+        // Keep the file loaded at its end. Without this mpv UNLOADS the file at EOF: the player then
+        // can't report "finished" reliably (autoplay-next missed) and a seek back from the end
+        // does nothing because there is no file left to play.
+        mpv.setOptionString("keep-open", "yes")
         mpv.setOptionString("input-default-bindings", "yes")
         mpv.setOptionString("volume-max", "200")
         mpv.setOptionString("audio-pitch-correction", "yes")

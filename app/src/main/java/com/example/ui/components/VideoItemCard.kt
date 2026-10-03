@@ -22,6 +22,9 @@ import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -156,9 +159,10 @@ fun VideoItemCard(
     }
 
     val context = androidx.compose.ui.platform.LocalContext.current
-    val effectiveProgress = if (video.watchedProgress > 0f) {
-        video.watchedProgress
-    } else {
+    // Playback history is the single source of truth (video.watchedProgress is a stale snapshot taken
+    // at scan time) and it is observed, so the bar updates as soon as the user returns from the player.
+    val historyVersion by com.example.util.PlaybackHistoryManager.version.collectAsState()
+    val effectiveProgress = remember(video.id, video.path, video.durationMs, historyVersion) {
         com.example.util.PlaybackHistoryManager.getProgressFraction(context, video.id, video.path, video.durationMs)
     }
 
@@ -405,7 +409,7 @@ fun VideoItemCard(
                 }
 
                 // Mini watched progress bar if thumbnails are turned off but progress is enabled
-                if (!visibleFields.showThumbnails && visibleFields.showProgressBar && video.watchedProgress > 0f) {
+                if (!visibleFields.showThumbnails && visibleFields.showProgressBar && effectiveProgress > 0f) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Box(
                         modifier = Modifier
@@ -417,7 +421,7 @@ fun VideoItemCard(
                         Box(
                             modifier = Modifier
                                 .fillMaxHeight()
-                                .fillMaxWidth(video.watchedProgress.coerceIn(0f, 1f))
+                                .fillMaxWidth(effectiveProgress.coerceIn(0f, 1f))
                                 .background(Color(0xFFEF4444))
                         )
                     }
@@ -494,9 +498,10 @@ fun VideoItemGridCard(
     }
 
     val context = androidx.compose.ui.platform.LocalContext.current
-    val effectiveProgress = if (video.watchedProgress > 0f) {
-        video.watchedProgress
-    } else {
+    // Playback history is the single source of truth (video.watchedProgress is a stale snapshot taken
+    // at scan time) and it is observed, so the bar updates as soon as the user returns from the player.
+    val historyVersion by com.example.util.PlaybackHistoryManager.version.collectAsState()
+    val effectiveProgress = remember(video.id, video.path, video.durationMs, historyVersion) {
         com.example.util.PlaybackHistoryManager.getProgressFraction(context, video.id, video.path, video.durationMs)
     }
 
