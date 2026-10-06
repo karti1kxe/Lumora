@@ -362,7 +362,16 @@ fun VideoPlayerScreen(
 
     var currentVideoIndex by remember(video, playlist) {
         val initialList = if (playlist.isNotEmpty()) playlist else listOfNotNull(video)
-        val idx = initialList.indexOfFirst { it.id == video?.id }
+        // Match by path / uri first: ids are not guaranteed unique (files without a MediaStore id,
+        // rebuilt history items), and an id-only match could open an earlier episode of the list.
+        val target = video
+        val byPath = if (target != null && target.path.isNotBlank()) initialList.indexOfFirst { it.path == target.path } else -1
+        val byUri = if (byPath < 0 && target != null && target.uri != Uri.EMPTY) initialList.indexOfFirst { it.uri == target.uri } else -1
+        val idx = when {
+            byPath >= 0 -> byPath
+            byUri >= 0 -> byUri
+            else -> initialList.indexOfFirst { it.id == video?.id }
+        }
         mutableIntStateOf(if (idx >= 0) idx else 0)
     }
 

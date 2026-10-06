@@ -36,6 +36,7 @@ import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
@@ -1801,15 +1802,17 @@ fun AudioPlayerScreen(
                                     .zIndex(if (isBeingDragged) 99f else 1f)
                                     .pointerInput(item.id) {
                                         var totalSwipe = 0f
-                                        detectDragGestures(
+                                        // Horizontal-only detector: vertical movement is never consumed here, so the
+                                        // LazyColumn scrolls smoothly even when the finger starts on a track row.
+                                        detectHorizontalDragGestures(
                                             onDragStart = { totalSwipe = 0f },
-                                            onDrag = { change, dragAmount ->
-                                                if (draggingIndex == null && kotlin.math.abs(dragAmount.x) > kotlin.math.abs(dragAmount.y) * 1.15f) {
-                                                    totalSwipe += dragAmount.x
+                                            onHorizontalDrag = { change, dragAmount ->
+                                                if (draggingIndex == null) {
+                                                    totalSwipe += dragAmount
                                                     if (totalSwipe < 0f) {
                                                         change.consume()
                                                         swipeScope.launch {
-                                                            swipeOffsetX.snapTo((swipeOffsetX.value + dragAmount.x).coerceAtMost(0f))
+                                                            swipeOffsetX.snapTo((swipeOffsetX.value + dragAmount).coerceAtMost(0f))
                                                         }
                                                     }
                                                 }

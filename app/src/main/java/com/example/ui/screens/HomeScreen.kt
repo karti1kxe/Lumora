@@ -2681,11 +2681,12 @@ fun HomeScreen(
                             // another episode or sub-folder).
                             val inFolderRecords = com.example.util.PlaybackHistoryManager.getAllPlaybackRecords(context)
                             for (rec in inFolderRecords) {
-                                val found = source.firstOrNull {
-                                    (rec.path.isNotBlank() && it.path == rec.path) ||
-                                        (rec.uriString.isNotBlank() && it.uri.toString() == rec.uriString) ||
-                                        (rec.videoId > 0 && it.id == rec.videoId)
-                                }
+                                // Strongest identifier first (path, then uri); the numeric id is only a last
+                                // resort for records that have neither, because ids can collide and would
+                                // otherwise resolve to a different (earlier) episode.
+                                val found = (if (rec.path.isNotBlank()) source.firstOrNull { it.path == rec.path } else null)
+                                    ?: (if (rec.uriString.isNotBlank()) source.firstOrNull { it.uri.toString() == rec.uriString } else null)
+                                    ?: (if (rec.path.isBlank() && rec.uriString.isBlank() && rec.videoId > 0) source.firstOrNull { it.id == rec.videoId } else null)
                                 if (found != null) { targetVideo = found; break }
                             }
                             if (targetVideo == null && currentFolder == null) {

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -67,6 +68,26 @@ private fun isRestrictedPath(file: File): Boolean {
         return true
     }
     return false
+}
+
+/**
+ * Remembers, per folder, which subtitle file the user picked last. The picker uses it to scroll the
+ * list straight to that file the next time the same folder is opened (e.g. for the next episode),
+ * so the user does not have to scroll through dozens of subtitle files again.
+ */
+private object SubtitlePickerMemory {
+    private const val PREFS_NAME = "subtitle_picker_last_selected_v1"
+
+    fun get(context: Context, dirPath: String): String? = try {
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(dirPath, null)
+    } catch (_: Throwable) { null }
+
+    fun put(context: Context, dirPath: String, fileName: String) {
+        try {
+            context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putString(dirPath, fileName).apply()
+        } catch (_: Throwable) {}
+    }
 }
 
 data class SubtitleFileItem(
@@ -244,6 +265,18 @@ fun SubtitleFileTreeDialog(
     val displayedItems = remember(fileItems, searchQuery) {
         if (searchQuery.isBlank()) fileItems
         else fileItems.filter { it.name.contains(searchQuery, ignoreCase = true) }
+    }
+
+    val subtitleListState = rememberLazyListState()
+
+    // Scroll to the subtitle that was picked last in this folder (once per folder load).
+    LaunchedEffect(currentDir, isLoading) {
+        if (isLoading) return@LaunchedEffect
+        val lastName = SubtitlePickerMemory.get(context, currentDir.absolutePath) ?: return@LaunchedEffect
+        val idx = fileItems.indexOfFirst { !it.isDirectory && it.name == lastName }
+        if (idx >= 0) {
+            try { subtitleListState.scrollToItem(idx) } catch (_: Throwable) {}
+        }
     }
 
     PlayerGlassModalSheet(
@@ -487,6 +520,7 @@ fun SubtitleFileTreeDialog(
             }
         } else {
             LazyColumn(
+                state = subtitleListState,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
@@ -537,6 +571,7 @@ fun SubtitleFileTreeDialog(
                                 if (item.isDirectory) {
                                     currentDir = item.file
                                 } else {
+                                    SubtitlePickerMemory.put(context, currentDir.absolutePath, item.name)
                                     onSubtitleSelected(item.file)
                                     onDismiss()
                                 }
