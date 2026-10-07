@@ -420,6 +420,7 @@ class MpvPlayerController {
         try {
             // sub-delay shifts the Primary Subtitle (in seconds with millisecond double precision)
             view.mpv.setPropertyDouble("sub-delay", delayMs / 1000.0)
+            nudgeRedrawIfPaused()
             // Note: Never reset or touch secondary-sub-delay here; secondary subtitle delay is preserved!
         } catch (_: Throwable) {}
     }
@@ -604,6 +605,10 @@ class MpvPlayerController {
             } catch (_: Throwable) {
                 view.playFile(path)
             }
+            try {
+                view.mpv.setPropertyDouble("audio-delay", currentAudioDelayMs / 1000.0)
+                view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
+            } catch (_: Throwable) {}
 
             view.mpv.setPropertyDouble("speed", currentSpeed.coerceIn(0.25, 4.0))
             view.mpv.setPropertyString("sub-ass", "yes")
@@ -935,6 +940,10 @@ class MpvPlayerController {
             } catch (_: Throwable) {
                 view.playFile(filePath)
             }
+            try {
+                view.mpv.setPropertyDouble("audio-delay", currentAudioDelayMs / 1000.0)
+                view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
+            } catch (_: Throwable) {}
 
             try {
                 view.mpv.setPropertyString("hwdec", resolveHwdecValue())
@@ -1761,6 +1770,17 @@ class MpvPlayerController {
 
     fun refreshTracksAndChapters() {
         val view = mpvView ?: return
+        // mpv can drop per-file delays while a file (re)loads; the user's dialled-in values win.
+        try {
+            val liveAudio = view.mpv.getPropertyDouble("audio-delay")
+            if (liveAudio != null && kotlin.math.abs(liveAudio * 1000.0 - currentAudioDelayMs) > 1.0) {
+                view.mpv.setPropertyDouble("audio-delay", currentAudioDelayMs / 1000.0)
+            }
+            val liveSub = view.mpv.getPropertyDouble("sub-delay")
+            if (liveSub != null && kotlin.math.abs(liveSub * 1000.0 - currentSubtitleDelayMs) > 1.0) {
+                view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
+            }
+        } catch (_: Throwable) {}
         try {
             val count = view.mpv.getPropertyInt("track-list/count") ?: 0
             if (count > 0) {
@@ -3397,9 +3417,9 @@ class MpvPlayerController {
                 view.mpv.setPropertyInt("sid", playbackTrackId)
                 view.mpv.setPropertyBoolean("sub-visibility", true)
                 view.mpv.setPropertyString("sub-ass", "yes")
-                val primDelay = trackDelayMap[trackId] ?: 0L
-                currentSubtitleDelayMs = primDelay
-                view.mpv.setPropertyDouble("sub-delay", primDelay / 1000.0)
+                // Keep the delay the user dialled in: re-selecting / auto-reselecting a track must
+                // never silently fall back to 0 while the UI still shows the old value.
+                view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
             }
             // Mark the new selection BEFORE recomputing/re-applying appearance below, so that
             // Override ASS/SSA (and every Typography/Colors value) is evaluated against the
@@ -3538,8 +3558,7 @@ class MpvPlayerController {
                     subtitleUsesGeneratedAss = false
                     view.mpv.setPropertyBoolean("sub-visibility", false)
                     view.mpv.setPropertyString("sid", "no")
-                    currentSubtitleDelayMs = 0L
-                    view.mpv.setPropertyDouble("sub-delay", 0.0)
+                    view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
                 } else {
                     subtitleUsesGeneratedAss = false
                     val trackCount = (try { view.mpv.getPropertyInt("track-list/count") } catch (_: Throwable) { null }) ?: 0
@@ -3554,9 +3573,7 @@ class MpvPlayerController {
                     view.mpv.setPropertyInt("sid", playbackPrimaryTrackId)
                     view.mpv.setPropertyBoolean("sub-visibility", true)
                     view.mpv.setPropertyString("sub-ass", "yes")
-                    val primDelay = trackDelayMap[primaryTrackId] ?: 0L
-                    currentSubtitleDelayMs = primDelay
-                    view.mpv.setPropertyDouble("sub-delay", primDelay / 1000.0)
+                    view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
                 }
 
                 if (secondaryTrackId <= 0) {

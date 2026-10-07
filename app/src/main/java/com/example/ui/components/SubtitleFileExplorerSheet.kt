@@ -275,7 +275,7 @@ fun SubtitleFileTreeDialog(
         val lastName = SubtitlePickerMemory.get(context, currentDir.absolutePath) ?: return@LaunchedEffect
         val idx = fileItems.indexOfFirst { !it.isDirectory && it.name == lastName }
         if (idx >= 0) {
-            try { subtitleListState.scrollToItem(idx) } catch (_: Throwable) {}
+            try { subtitleListState.glideToItem(idx) } catch (_: Throwable) {}
         }
     }
 

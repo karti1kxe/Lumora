@@ -126,6 +126,7 @@ import com.example.ui.components.BottomMoveCopyProgressBar
 import com.example.ui.components.DirectoryPickerAction
 import com.example.ui.components.DynamicBottomNavigation
 import com.example.ui.components.FloatingDirectoryPickerSheet
+import com.example.ui.components.glideToItem
 import com.example.ui.components.NavigationTab
 import com.example.util.CustomPlaylist
 import com.example.util.PlaylistManager
@@ -1353,7 +1354,7 @@ fun HomeScreen(
         val matches = { it: VideoItem ->
             (last.path.isNotBlank() && it.path == last.path) ||
                 (last.uriString.isNotBlank() && it.uri.toString() == last.uriString) ||
-                (last.videoId > 0 && it.id == last.videoId)
+                (last.path.isBlank() && last.uriString.isBlank() && last.videoId > 0 && it.id == last.videoId)
         }
 
         if (viewMode == ViewMode.LIBRARY) {
@@ -1361,8 +1362,7 @@ fun HomeScreen(
             if (index < 0) return@LaunchedEffect
             autoScrolledKey = scrollKey
             withFrameNanos { }
-            if (index > 4) libraryListState.scrollToItem((index - 6).coerceAtLeast(0))
-            libraryListState.animateScrollToItem(index)
+            libraryListState.glideToItem(index)
         } else if (viewMode == ViewMode.FOLDER && currentFolder != null) {
             val videoIndex = displayedVideos.indexOfFirst(matches)
             if (videoIndex < 0) return@LaunchedEffect
@@ -1372,11 +1372,9 @@ fun HomeScreen(
             autoScrolledKey = scrollKey
             withFrameNanos { }
             if (homeContentLayoutMode == LayoutMode.GRID) {
-                if (itemIndex > 6) folderContentGridState.scrollToItem((itemIndex - 8).coerceAtLeast(0))
-                folderContentGridState.animateScrollToItem(itemIndex)
+                folderContentGridState.glideToItem(itemIndex)
             } else {
-                if (itemIndex > 4) folderContentListState.scrollToItem((itemIndex - 6).coerceAtLeast(0))
-                folderContentListState.animateScrollToItem(itemIndex)
+                folderContentListState.glideToItem(itemIndex)
             }
         }
     }

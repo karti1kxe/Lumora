@@ -379,6 +379,13 @@ fun VideoPlayerScreen(
         currentPlaylist.getOrNull(currentVideoIndex) ?: video
     }
 
+    // Always-fresh view of the episode that is playing RIGHT NOW. persistPlaybackPosition() is also
+    // called from lifecycle / dispose callbacks that were created when the player first opened; reading
+    // `currentVideo` directly there kept saving the FIRST episode (with the last episode's position)
+    // after the user had moved on with the next-episode button.
+    val persistVideoState by rememberUpdatedState(currentVideo)
+    val persistSaveOnQuitState by rememberUpdatedState(uiState.playerSettings.savePositionOnQuit)
+
     val initialSavedPosition = remember(currentVideo, uiState.playerSettings.savePositionOnQuit) {
         if (uiState.playerSettings.savePositionOnQuit && currentVideo != null) {
             val p = PlaybackHistoryManager.getSavedPosition(
@@ -1452,8 +1459,8 @@ fun VideoPlayerScreen(
     }
 
     fun persistPlaybackPosition(posMs: Long = currentPositionMs, forceDisk: Boolean = true) {
-        val vid = currentVideo ?: return
-        if (!uiState.playerSettings.savePositionOnQuit) return
+        val vid = persistVideoState ?: return
+        if (!persistSaveOnQuitState) return
 
         val controllerVal = controller.currentPositionMs.value
         val rawPos = if (controllerVal > 0L) controllerVal else posMs

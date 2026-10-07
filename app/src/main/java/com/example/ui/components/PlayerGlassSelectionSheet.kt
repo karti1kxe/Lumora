@@ -2176,6 +2176,75 @@ fun AudioSelectionPanel(
     }
 }
 
+/** Shows " ms" after the typed digits inside the delay text field. */
+private object DelayMsSuffixTransformation : androidx.compose.ui.text.input.VisualTransformation {
+    override fun filter(text: androidx.compose.ui.text.AnnotatedString): androidx.compose.ui.text.input.TransformedText {
+        val shown = androidx.compose.ui.text.AnnotatedString(text.text + " ms")
+        return androidx.compose.ui.text.input.TransformedText(
+            shown,
+            object : androidx.compose.ui.text.input.OffsetMapping {
+                override fun originalToTransformed(offset: Int): Int = offset
+                override fun transformedToOriginal(offset: Int): Int = offset.coerceAtMost(text.length)
+            }
+        )
+    }
+}
+
+/**
+ * +/- button for the delay panels: one tap = one step; pressing and HOLDING keeps stepping
+ * (slowly at first, then faster) until the finger is lifted.
+ */
+@Composable
+private fun HoldRepeatStepButton(
+    modifier: Modifier = Modifier,
+    onStep: () -> Unit,
+    content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit
+) {
+    val latestOnStep by rememberUpdatedState(onStep)
+    var pressed by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(targetValue = if (pressed) 0.88f else 1f, label = "HoldStepScale")
+    Box(
+        modifier = modifier
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    try {
+                        pressed = true
+                        latestOnStep()
+                        var repeats = 0
+                        var nextAt = System.currentTimeMillis() + 420L
+                        while (true) {
+                            val remaining = nextAt - System.currentTimeMillis()
+                            val ev = if (remaining > 0L) withTimeoutOrNull(remaining) { awaitPointerEvent() } else null
+                            if (ev == null) {
+                                latestOnStep()
+                                repeats++
+                                val gap = when {
+                                    repeats > 30 -> 35L
+                                    repeats > 15 -> 60L
+                                    repeats > 6 -> 90L
+                                    else -> 140L
+                                }
+                                nextAt = System.currentTimeMillis() + gap
+                            } else {
+                                val ch = ev.changes.firstOrNull { it.id == down.id }
+                                if (ch == null || !ch.pressed) break
+                            }
+                        }
+                    } finally {
+                        pressed = false
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center,
+        content = content
+    )
+}
+
 /**
  * 2B. AUDIO DELAY & SYNC PANEL
  * Synchronizes audio track with video playback.
@@ -2213,9 +2282,17 @@ fun AudioDelayPanel(
     var selectedStepMs by remember { mutableStateOf(100L) }
     
     var isDelayFocused by remember { mutableStateOf(false) }
-    var delayInputText by remember(audioDelayMs) { mutableStateOf(audioDelayMs.toString()) }
+    var delayInputText by remember { mutableStateOf(audioDelayMs.toString()) }
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+
+    // Keep the text box in sync with the real delay, but never overwrite what the user is typing.
+    LaunchedEffect(audioDelayMs, isDelayFocused) {
+        if (!isDelayFocused) delayInputText = audioDelayMs.toString()
+    }
+    // Running value so a held +/- button never works from a stale delay between recompositions.
+    val liveDelay = remember { longArrayOf(audioDelayMs) }
+    liveDelay[0] = audioDelayMs
 
     // Dark sheet (dark app theme OR very transparent glass): the sheet text is light, so fields,
     // +/- buttons and separators must use the dark-glass surfaces, not the light ones. This is
@@ -2276,18 +2353,18 @@ fun AudioDelayPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // Minus Button
-                Box(
+                HoldRepeatStepButton(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
                         .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else Color(0xFFF1F5F9))
-                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape)
-                        .cardBounceClick(scaleDown = 0.88f) {
-                            val newMs = (audioDelayMs - selectedStepMs).coerceIn(-60000L, 60000L)
-                            onAudioDelayChange(newMs)
-                            delayInputText = newMs.toString()
-                        },
-                    contentAlignment = Alignment.Center
+                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
+                    onStep = {
+                        val newMs = (liveDelay[0] - selectedStepMs).coerceIn(-60000L, 60000L)
+                        liveDelay[0] = newMs
+                        onAudioDelayChange(newMs)
+                        delayInputText = newMs.toString()
+                    }
                 ) {
                     StyledIcon(
                         imageVector = Icons.Outlined.Remove,
@@ -2309,77 +2386,61 @@ fun AudioDelayPanel(
                             if (audioDelayMs != 0L || isDelayFocused) ActiveHighlightColor else (if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1)),
                             RoundedCornerShape(22.dp)
                         )
-                        .clickable {
-                            isDelayFocused = true
-                            runCatching { focusRequester.requestFocus() }
-                        }
                         .padding(horizontal = 12.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (!isDelayFocused) {
-                        val formattedMs = if (audioDelayMs == 0L) "0 ms" else if (audioDelayMs > 0) "+$audioDelayMs ms" else "$audioDelayMs ms"
-                        Text(
-                            text = formattedMs,
+                    BasicTextField(
+                        value = delayInputText,
+                        onValueChange = { newText ->
+                            if (newText.isEmpty() || newText == "-" || newText.matches(Regex("^-?\\d*$"))) {
+                                delayInputText = newText
+                                val parsed = newText.toLongOrNull()
+                                if (parsed != null) {
+                                    // Applied live: the video shows the shift while the user types.
+                                    onAudioDelayChange(parsed.coerceIn(-60000L, 60000L))
+                                }
+                            }
+                        },
+                        textStyle = TextStyle(
+                            color = if (audioDelayMs != 0L) ActiveHighlightColor else LocalSheetNormalTextColor.current,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (audioDelayMs != 0L) ActiveHighlightColor else LocalSheetNormalTextColor.current
-                        )
-                    } else {
-                        BasicTextField(
-                            value = delayInputText,
-                            onValueChange = { newText ->
-                                if (newText.isEmpty() || newText == "-" || newText.matches(Regex("^-?\\d*$"))) {
-                                    delayInputText = newText
-                                    val parsed = newText.toLongOrNull()
-                                    if (parsed != null) {
-                                        onAudioDelayChange(parsed)
-                                    } else if (newText.isEmpty() || newText == "-") {
-                                        // Keep editing local; commit zero only when the field is cleared.
-                                        onAudioDelayChange(0L)
-                                    }
-                                }
-                            },
-                            textStyle = TextStyle(
-                                color = if (audioDelayMs != 0L) ActiveHighlightColor else LocalSheetNormalTextColor.current,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                textAlign = TextAlign.Center
-                            ),
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Ascii,
-                                imeAction = ImeAction.Done
-                            ),
-                            keyboardActions = KeyboardActions(
-                                onDone = {
-                                    isDelayFocused = false
-                                    focusManager.clearFocus()
-                                }
-                            ),
-                            cursorBrush = SolidColor(ActiveHighlightColor),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .focusRequester(focusRequester)
-                                .onFocusChanged { focusState ->
-                                    isDelayFocused = focusState.isFocused
-                                }
-                        )
-                    }
+                            textAlign = TextAlign.Center
+                        ),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Ascii,
+                            imeAction = ImeAction.Done
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                focusManager.clearFocus()
+                            }
+                        ),
+                        cursorBrush = SolidColor(ActiveHighlightColor),
+                        visualTransformation = DelayMsSuffixTransformation,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { focusState ->
+                                isDelayFocused = focusState.isFocused
+                            }
+                    )
                 }
 
                 // Plus Button
-                Box(
+                HoldRepeatStepButton(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
                         .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else Color(0xFFF1F5F9))
-                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape)
-                        .cardBounceClick(scaleDown = 0.88f) {
-                            val newMs = (audioDelayMs + selectedStepMs).coerceIn(-60000L, 60000L)
-                            onAudioDelayChange(newMs)
-                            delayInputText = newMs.toString()
-                        },
-                    contentAlignment = Alignment.Center
+                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
+                    onStep = {
+                        val newMs = (liveDelay[0] + selectedStepMs).coerceIn(-60000L, 60000L)
+                        liveDelay[0] = newMs
+                        onAudioDelayChange(newMs)
+                        delayInputText = newMs.toString()
+                    }
                 ) {
                     StyledIcon(
                         imageVector = Icons.Outlined.Add,
@@ -2542,9 +2603,17 @@ fun SubtitleDelayPanel(
     var selectedStepMs by remember { mutableStateOf(100L) }
 
     var isDelayFocused by remember { mutableStateOf(false) }
-    var delayInputText by remember(subtitleDelayMs) { mutableStateOf(subtitleDelayMs.toString()) }
+    var delayInputText by remember { mutableStateOf(subtitleDelayMs.toString()) }
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+
+    // Keep the text box in sync with the real delay, but never overwrite what the user is typing.
+    LaunchedEffect(subtitleDelayMs, isDelayFocused) {
+        if (!isDelayFocused) delayInputText = subtitleDelayMs.toString()
+    }
+    // Running value so a held +/- button never works from a stale delay between recompositions.
+    val liveDelay = remember { longArrayOf(subtitleDelayMs) }
+    liveDelay[0] = subtitleDelayMs
 
     // Dark sheet (dark app theme OR very transparent glass): the sheet text is light, so fields,
     // +/- buttons and separators must use the dark-glass surfaces, not the light ones. This is
@@ -2617,18 +2686,18 @@ fun SubtitleDelayPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // Minus Button
-                Box(
+                HoldRepeatStepButton(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
                         .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else Color(0xFFF1F5F9))
-                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape)
-                        .cardBounceClick(scaleDown = 0.88f) {
-                            val newMs = (subtitleDelayMs - selectedStepMs).coerceIn(-60000L, 60000L)
-                            onSubtitleDelayChange(newMs)
-                            delayInputText = newMs.toString()
-                        },
-                    contentAlignment = Alignment.Center
+                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
+                    onStep = {
+                        val newMs = (liveDelay[0] - selectedStepMs).coerceIn(-60000L, 60000L)
+                        liveDelay[0] = newMs
+                        onSubtitleDelayChange(newMs)
+                        delayInputText = newMs.toString()
+                    }
                 ) {
                     StyledIcon(
                         imageVector = Icons.Outlined.Remove,
@@ -2650,76 +2719,61 @@ fun SubtitleDelayPanel(
                             if (subtitleDelayMs != 0L || isDelayFocused) ActiveHighlightColor else (if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1)),
                             RoundedCornerShape(22.dp)
                         )
-                        .clickable {
-                            isDelayFocused = true
-                            runCatching { focusRequester.requestFocus() }
-                        }
                         .padding(horizontal = 12.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (!isDelayFocused) {
-                        val formattedMs = if (subtitleDelayMs == 0L) "0 ms" else if (subtitleDelayMs > 0) "+$subtitleDelayMs ms" else "$subtitleDelayMs ms"
-                        Text(
-                            text = formattedMs,
+                    BasicTextField(
+                        value = delayInputText,
+                        onValueChange = { newText ->
+                            if (newText.isEmpty() || newText == "-" || newText.matches(Regex("^-?\\d*$"))) {
+                                delayInputText = newText
+                                val parsed = newText.toLongOrNull()
+                                if (parsed != null) {
+                                    // Applied live: the video shows the shift while the user types.
+                                    onSubtitleDelayChange(parsed.coerceIn(-60000L, 60000L))
+                                }
+                            }
+                        },
+                        textStyle = TextStyle(
+                            color = if (subtitleDelayMs != 0L) ActiveHighlightColor else LocalSheetNormalTextColor.current,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (subtitleDelayMs != 0L) ActiveHighlightColor else LocalSheetNormalTextColor.current
-                        )
-                    } else {
-                        BasicTextField(
-                            value = delayInputText,
-                            onValueChange = { newText ->
-                                if (newText.isEmpty() || newText == "-" || newText.matches(Regex("^-?\\d*$"))) {
-                                    delayInputText = newText
-                                    val parsed = newText.toLongOrNull()
-                                    if (parsed != null) {
-                                        onSubtitleDelayChange(parsed)
-                                    } else if (newText.isEmpty() || newText == "-") {
-                                        onSubtitleDelayChange(0L)
-                                    }
-                                }
-                            },
-                            textStyle = TextStyle(
-                                color = if (subtitleDelayMs != 0L) ActiveHighlightColor else LocalSheetNormalTextColor.current,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                textAlign = TextAlign.Center
-                            ),
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Ascii,
-                                imeAction = ImeAction.Done
-                            ),
-                            keyboardActions = KeyboardActions(
-                                onDone = {
-                                    isDelayFocused = false
-                                    focusManager.clearFocus()
-                                }
-                            ),
-                            cursorBrush = SolidColor(ActiveHighlightColor),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .focusRequester(focusRequester)
-                                .onFocusChanged { focusState ->
-                                    isDelayFocused = focusState.isFocused
-                                }
-                        )
-                    }
+                            textAlign = TextAlign.Center
+                        ),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Ascii,
+                            imeAction = ImeAction.Done
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                focusManager.clearFocus()
+                            }
+                        ),
+                        cursorBrush = SolidColor(ActiveHighlightColor),
+                        visualTransformation = DelayMsSuffixTransformation,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { focusState ->
+                                isDelayFocused = focusState.isFocused
+                            }
+                    )
                 }
 
                 // Plus Button
-                Box(
+                HoldRepeatStepButton(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
                         .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else Color(0xFFF1F5F9))
-                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape)
-                        .cardBounceClick(scaleDown = 0.88f) {
-                            val newMs = (subtitleDelayMs + selectedStepMs).coerceIn(-60000L, 60000L)
-                            onSubtitleDelayChange(newMs)
-                            delayInputText = newMs.toString()
-                        },
-                    contentAlignment = Alignment.Center
+                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
+                    onStep = {
+                        val newMs = (liveDelay[0] + selectedStepMs).coerceIn(-60000L, 60000L)
+                        liveDelay[0] = newMs
+                        onSubtitleDelayChange(newMs)
+                        delayInputText = newMs.toString()
+                    }
                 ) {
                     StyledIcon(
                         imageVector = Icons.Outlined.Add,
