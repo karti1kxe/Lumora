@@ -211,6 +211,8 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -948,6 +950,7 @@ fun VideoPlayerOverlay(
     val updatedOnBrightnessChange by rememberUpdatedState(onBrightnessChange)
     val updatedOnVolumeBoostChange by rememberUpdatedState(onVolumeBoostChange)
     val updatedOnSeekTo by rememberUpdatedState(onSeekTo)
+    var scrubberBottomPx by remember { mutableFloatStateOf(-1f) }
     val updatedCurrentPositionMs by rememberUpdatedState(currentPositionMs)
     val updatedDurationMs by rememberUpdatedState(durationMs)
     val updatedIsScreenLocked by rememberUpdatedState(isScreenLocked)
@@ -1078,6 +1081,10 @@ fun VideoPlayerOverlay(
                             }
 
                             val isStartInsideVideo = startPos.x in videoRect.left..videoRect.right && startPos.y in videoRect.top..videoRect.bottom
+                            // Everything under the progress slider counts as "below the seek bar". Falls back to the
+                            // bottom ~14% of the screen while the slider's position is not known yet.
+                            val seekBarBottomY = scrubberBottomPx
+                            val startedBelowSeekBar = if (seekBarBottomY > 0f) startPos.y >= seekBarBottomY - 4f else startPos.y >= h * 0.86f
                             val leftBoundary = videoRect.left + videoRect.width * 0.35f
                             val rightBoundary = videoRect.right - videoRect.width * 0.35f
                             val isStartInLeft = startPos.x < leftBoundary
@@ -1237,8 +1244,20 @@ fun VideoPlayerOverlay(
                                     val absX = kotlin.math.abs(totalDragX)
                                     val absY = kotlin.math.abs(totalDragY)
 
+                                    // Swipe up that STARTS BELOW the seek bar opens the episode list. A swipe that
+                                    // starts anywhere else (video centre, sides) never does.
+                                    val isSwipeUpFromBelowSeekBar = startedBelowSeekBar && swipeUpCenterForPlaylistEnabled &&
+                                        totalDragY < 0f && absY > absX * 1.2f
+                                    if (lockMode == GestureLockMode.NONE && isSwipeUpFromBelowSeekBar && totalDragY < -80f) {
+                                        AppHaptics.performGestureThreshold(view, haptic)
+                                        openRootPanel(PlayerPanelType.PLAYLIST)
+                                        notifyInteraction()
+                                        change.consume()
+                                        break
+                                    }
+
                                     // Directional and zone locking on initial move
-                                    if (lockMode == GestureLockMode.NONE && isStartInsideVideo && (absX > 12f || absY > 12f)) {
+                                    if (lockMode == GestureLockMode.NONE && isStartInsideVideo && !isSwipeUpFromBelowSeekBar && (absX > 12f || absY > 12f)) {
                                         holdJob?.cancel()
                                         if (isStartInLeft) {
                                             if (absY >= absX) {
@@ -1267,12 +1286,6 @@ fun VideoPlayerOverlay(
                                                 lockMode = GestureLockMode.SEEK
                                                 lastHapticSeekSec = initialSeekPosition / 1000L
                                                 AppHaptics.performGestureThreshold(view, haptic)
-                                            } else if (swipeUpCenterForPlaylistEnabled && totalDragY < -80f && absY > absX * 1.2f) {
-                                                AppHaptics.performGestureThreshold(view, haptic)
-                                                openRootPanel(PlayerPanelType.PLAYLIST)
-                                                notifyInteraction()
-                                                change.consume()
-                                                break
                                             }
                                         }
                                     }
@@ -2694,22 +2707,28 @@ fun VideoPlayerOverlay(
                     }
 
                     // Bottom Scrubber Bar: 00:05 [=========|===] 23:59 (Recomposition isolated)
-                    PlayerScrubberBar(
-                        currentPositionMs = currentPositionMs,
-                        durationMs = durationMs,
-                        seekbarStyle = seekbarStyle,
-                        loopPointA = loopPointA,
-                        loopPointB = loopPointB,
-                        chapters = chapters,
-                        skipMarkers = skipMarkers,
-                        bufferedPositionMs = bufferedPositionMs,
-                        showBufferedRange = showBufferedRange,
-                        thumbFastPreview = thumbFastPreview,
-                        previewVideoUri = previewVideoUri,
-                        previewVideoPath = previewVideoPath,
-                        onSeekTo = onSeekTo,
-                        notifyInteraction = ::notifyInteraction
-                    )
+                    Box(
+                        modifier = Modifier.onGloballyPositioned { coords ->
+                            scrubberBottomPx = coords.positionInRoot().y + coords.size.height
+                        }
+                    ) {
+                        PlayerScrubberBar(
+                            currentPositionMs = currentPositionMs,
+                            durationMs = durationMs,
+                            seekbarStyle = seekbarStyle,
+                            loopPointA = loopPointA,
+                            loopPointB = loopPointB,
+                            chapters = chapters,
+                            skipMarkers = skipMarkers,
+                            bufferedPositionMs = bufferedPositionMs,
+                            showBufferedRange = showBufferedRange,
+                            thumbFastPreview = thumbFastPreview,
+                            previewVideoUri = previewVideoUri,
+                            previewVideoPath = previewVideoPath,
+                            onSeekTo = onSeekTo,
+                            notifyInteraction = ::notifyInteraction
+                        )
+                    }
                 }
             }
         }

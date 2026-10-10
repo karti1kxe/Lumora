@@ -182,6 +182,9 @@ private object VideoThumbnailDiskCache {
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 private val thumbnailDispatcher = Dispatchers.IO.limitedParallelism(3)
+// Library-wide background warming gets its OWN small pool, so thumbnails of the cards the user is
+// actually looking at are never queued behind thousands of prefetch jobs.
+private val prefetchThumbnailDispatcher = Dispatchers.IO.limitedParallelism(2)
 
 suspend fun loadVideoThumbnail(
     context: Context,
@@ -191,8 +194,9 @@ suspend fun loadVideoThumbnail(
     strategy: ThumbnailStrategy = ThumbnailStrategy.SMART,
     quality: ThumbnailQuality = ThumbnailQuality.HIGH,
     allowNetwork: Boolean = false,
-    fallbackSecond: Int = 1
-): Bitmap? = withContext(thumbnailDispatcher) {
+    fallbackSecond: Int = 1,
+    background: Boolean = false
+): Bitmap? = withContext(if (background) prefetchThumbnailDispatcher else thumbnailDispatcher) {
     if (!isActive) return@withContext null
 
     val targetWidth = quality.sizeDp.coerceIn(120, 720)
@@ -404,6 +408,81 @@ suspend fun loadVideoThumbnail(
 }
 
 /**
+ * Process-wide thumbnail warming. Unlike a LaunchedEffect inside one screen, these jobs keep running
+ * while the user moves between folders / opens a video, so every folder's thumbnails are ready by the
+ * time it is opened. Starting the same library again (same videos + settings) is a no-op.
+ */
+object ThumbnailPrefetcher {
+    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
+    private var libraryJob: kotlinx.coroutines.Job? = null
+    private var librarySignature: String? = null
+    private var priorityJob: kotlinx.coroutines.Job? = null
+    private var prioritySignature: String? = null
+
+    @Volatile
+    var isPaused: Boolean = false
+        private set
+
+    fun setPaused(paused: Boolean) {
+        isPaused = paused
+    }
+
+    private fun signature(
+        videos: List<com.example.ui.screens.VideoItem>,
+        strategy: ThumbnailStrategy,
+        quality: ThumbnailQuality,
+        allowNetwork: Boolean,
+        fallbackSecond: Int
+    ): String {
+        var acc = videos.size.toLong()
+        for (v in videos) acc += v.path.hashCode().toLong() * 31L + v.id
+        return "$acc|${strategy.name}|${quality.name}|$allowNetwork|$fallbackSecond"
+    }
+
+    @Synchronized
+    fun startLibrary(
+        context: Context,
+        videos: List<com.example.ui.screens.VideoItem>,
+        strategy: ThumbnailStrategy,
+        quality: ThumbnailQuality,
+        allowNetwork: Boolean,
+        fallbackSecond: Int
+    ) {
+        if (videos.isEmpty()) return
+        val sig = signature(videos, strategy, quality, allowNetwork, fallbackSecond)
+        if (sig == librarySignature && libraryJob?.isActive == true) return
+        if (sig == librarySignature && libraryJob?.isCompleted == true) return
+        libraryJob?.cancel()
+        librarySignature = sig
+        val appContext = context.applicationContext
+        libraryJob = scope.launch {
+            prefetchVideoThumbnails(appContext, videos, strategy, quality, allowNetwork, fallbackSecond)
+        }
+    }
+
+    /** The folder the user has open is warmed first (and re-warmed if it changes). */
+    @Synchronized
+    fun startPriority(
+        context: Context,
+        videos: List<com.example.ui.screens.VideoItem>,
+        strategy: ThumbnailStrategy,
+        quality: ThumbnailQuality,
+        allowNetwork: Boolean,
+        fallbackSecond: Int
+    ) {
+        if (videos.isEmpty()) return
+        val sig = signature(videos, strategy, quality, allowNetwork, fallbackSecond)
+        if (sig == prioritySignature && priorityJob?.isActive == true) return
+        priorityJob?.cancel()
+        prioritySignature = sig
+        val appContext = context.applicationContext
+        priorityJob = scope.launch {
+            prefetchVideoThumbnails(appContext, videos, strategy, quality, allowNetwork, fallbackSecond)
+        }
+    }
+}
+
+/**
  * Warms the thumbnail cache for the complete visible library in the background. Three workers
  * keep extraction moving without creating one coroutine per video, while loadVideoThumbnail's
  * own bounded dispatcher remains the final CPU/IO guard.
@@ -426,6 +505,8 @@ suspend fun prefetchVideoThumbnails(
                     val index = nextIndex.getAndIncrement()
                     if (index >= uniqueVideos.size) break
                     val video = uniqueVideos[index]
+                    // Stay out of the way while a video is opening / playing.
+                    while (isActive && ThumbnailPrefetcher.isPaused) kotlinx.coroutines.delay(300L)
                     try {
                         loadVideoThumbnail(
                             context = context,
@@ -435,7 +516,8 @@ suspend fun prefetchVideoThumbnails(
                             strategy = strategy,
                             quality = quality,
                             allowNetwork = allowNetwork,
-                            fallbackSecond = fallbackSecond
+                            fallbackSecond = fallbackSecond,
+                            background = true
                         )
                     } catch (_: Throwable) {
                         // One unreadable/corrupt file must not stop the rest of the library.

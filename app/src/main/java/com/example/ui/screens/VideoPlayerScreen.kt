@@ -1451,7 +1451,9 @@ fun VideoPlayerScreen(
                 // automatic/default/forced metadata instead of forcing a hard-coded language.
                 resolveContainerAudioFallback(realAudioTracks)
             }
-            if (bestTrack != null && bestTrack.id != selectedAudioTrackId) {
+            // Also compare with what mpv is REALLY playing (isSelected): after an episode change the UI id is
+            // reset to 1, so "same id" no longer proves the right (e.g. Japanese) track is the active one.
+            if (bestTrack != null && (bestTrack.id != selectedAudioTrackId || !bestTrack.isSelected)) {
                 selectedAudioTrackId = bestTrack.id
                 controller.setAudioTrack(bestTrack.id)
             }
@@ -1604,6 +1606,20 @@ fun VideoPlayerScreen(
         )
         val path = getPlayableFilePath(context, targetVideo.uri, targetVideo.path)
 
+        // A "stub" MP4 (placeholder clip + unreadable appended data, made for another app's own player)
+        // would otherwise just look like a broken video: tell the user what it is.
+        coroutineScope.launch(Dispatchers.IO) {
+            if (com.example.util.PackagedStubVideoDetector.isPackagedStub(path)) {
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        context,
+                        "यह file किसी दूसरे app के विशेष format में है, इसलिए यहाँ सिर्फ़ placeholder दिख रहा है",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+
         // 5. Restore saved position & duration (respecting Resume Playback setting)
         val savedPos = if (uiState.playerSettings.savePositionOnQuit) {
             PlaybackHistoryManager.getSavedPosition(
@@ -1664,7 +1680,7 @@ fun VideoPlayerScreen(
             // first load of this screen the animation is allowed to finish first.
             val firstLoad = !entryLoadDelayDone
             entryLoadDelayDone = true
-            val entryDelayMs = (330 / uiState.animationSpeed.coerceIn(0.25f, 2f)).toLong()
+            val entryDelayMs = (150 / uiState.animationSpeed.coerceIn(0.25f, 2f)).toLong()
             coroutineScope.launch {
                 if (firstLoad) kotlinx.coroutines.delay(entryDelayMs)
                 if (lastLoadedVideoKey != key) return@launch
@@ -1935,6 +1951,12 @@ fun VideoPlayerScreen(
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
         }
+    }
+
+    // Background thumbnail warming must not compete with the video that is opening / playing.
+    DisposableEffect(Unit) {
+        com.example.ui.components.ThumbnailPrefetcher.setPaused(true)
+        onDispose { com.example.ui.components.ThumbnailPrefetcher.setPaused(false) }
     }
 
     // Keep-screen-on: When actively playing (video is NOT paused), the screen stays awake (FLAG_KEEP_SCREEN_ON).

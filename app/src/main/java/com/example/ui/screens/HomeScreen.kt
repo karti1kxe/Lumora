@@ -1214,7 +1214,17 @@ fun HomeScreen(
             // Let the currently visible UI render first; extraction then continues off the main
             // thread and progressively fills the disk/memory cache for all folders.
             kotlinx.coroutines.yield()
-            prefetchVideoThumbnails(
+            // Jobs live in a process-wide scope (not in this screen), so they keep warming every
+            // folder while the user browses folders or plays a video.
+            com.example.ui.components.ThumbnailPrefetcher.startPriority(
+                context = context,
+                videos = currentFolder?.videos.orEmpty(),
+                strategy = uiState.thumbnailStrategy,
+                quality = uiState.thumbnailQuality,
+                allowNetwork = uiState.showNetworkThumbnails,
+                fallbackSecond = uiState.thumbnailFallbackSecond
+            )
+            com.example.ui.components.ThumbnailPrefetcher.startLibrary(
                 context = context,
                 videos = thumbnailPrefetchVideos,
                 strategy = uiState.thumbnailStrategy,

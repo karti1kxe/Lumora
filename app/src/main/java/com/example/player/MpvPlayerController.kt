@@ -491,6 +491,8 @@ class MpvPlayerController {
                     val surface = mpvView?.holder?.surface
                     if (surface != null && surface.isValid) {
                         mpvView?.mpv?.attachSurface(surface)
+                        mpvView?.mpv?.setOptionString("force-window", "yes")
+                        mpvView?.mpv?.setPropertyString("vo", "gpu")
                     }
                 } catch (_: Throwable) {}
             } else {
@@ -551,7 +553,62 @@ class MpvPlayerController {
         } catch (_: Throwable) {}
     }
 
+    private var lastFastSurfaceRecoveryAt = 0L
+
+    /**
+     * Called after the screen was locked / the app came back. The file is still open inside mpv, so
+     * only the video OUTPUT has to be re-created on the new surface (this is what the stock mpv
+     * Android app does). Reloading the whole file - what used to happen here - is what caused the
+     * black screen for several seconds after unlocking. If the output does not come back, we still
+     * fall back to the full reload below.
+     */
     fun refreshSurface() {
+        val now = System.currentTimeMillis()
+        if (now - lastFastSurfaceRecoveryAt < 350L) return
+        lastFastSurfaceRecoveryAt = now
+
+        val view = mpvView ?: return
+        val surface = view.holder.surface
+        val fileLoaded = _durationMs.value > 0L && !currentFilePath.isNullOrBlank()
+        if (!fileLoaded || surface == null || !surface.isValid) {
+            refreshSurfaceByReload()
+            return
+        }
+        val wasPlaying = wasPlayingBeforeStop || _isPlaying.value
+        try {
+            view.mpv.attachSurface(surface)
+            view.mpv.setOptionString("force-window", "yes")
+            view.mpv.setPropertyString("vo", "gpu")
+            view.mpv.setPropertyString("hwdec", resolveHwdecValue())
+        } catch (_: Throwable) {
+            refreshSurfaceByReload()
+            return
+        }
+        playerScope.launch {
+            var configured = false
+            var tries = 0
+            while (!configured && tries < 8 && !isReleased) {
+                delay(120L)
+                configured = try {
+                    mpvView?.mpv?.getPropertyBoolean("vo-configured") == true
+                } catch (_: Throwable) { false }
+                tries++
+            }
+            if (isReleased) return@launch
+            if (configured) {
+                try {
+                    mpvView?.mpv?.setPropertyBoolean("pause", !wasPlaying)
+                    _isPlaying.value = wasPlaying
+                } catch (_: Throwable) {}
+                _isBuffering.value = false
+                nudgeRedrawIfPaused()
+            } else {
+                refreshSurfaceByReload()
+            }
+        }
+    }
+
+    private fun refreshSurfaceByReload() {
         val now = System.currentTimeMillis()
         if (now - lastSurfaceRefreshTimestamp < 350L) {
             return

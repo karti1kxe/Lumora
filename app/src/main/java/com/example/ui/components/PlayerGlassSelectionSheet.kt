@@ -5169,7 +5169,8 @@ private fun PlaylistEpisodeGridCard(
         }
     }
 
-    val activeCardBg = Color(0xFFE0F2FE)
+    // Slightly see-through so the video/background still shows behind the playing item.
+    val activeCardBg = Color(0xFFE0F2FE).copy(alpha = 0.78f)
     val activeBorderColor = Color(0xFF0284C7)
     val normalCardBg = Color(0x0A000000)
     val normalBorderColor = Color(0x14000000)
@@ -5381,7 +5382,8 @@ private fun PlaylistEpisodeRow(
         }
     }
 
-    val activeCardBg = Color(0xFFE0F2FE)
+    // Slightly see-through so the video/background still shows behind the playing item.
+    val activeCardBg = Color(0xFFE0F2FE).copy(alpha = 0.78f)
     val activeBorderColor = Color(0xFF0284C7)
     val normalCardBg = Color(0x0A000000)
     val normalBorderColor = Color(0x14000000)
