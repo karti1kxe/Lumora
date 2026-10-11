@@ -130,6 +130,7 @@ fun SortAndViewOptionsPopup(
     isOnlineMode: Boolean = false,
     isOnlinePlaylist: Boolean = false,
     isOnlineAudioFolder: Boolean = false,
+    isOnlineVideoFolder: Boolean = false,
     appScale: Float = 75f,
     glassBlurTransparency: Float = 85f,
     onSortFieldChange: (SortField) -> Unit,
@@ -252,7 +253,7 @@ fun SortAndViewOptionsPopup(
                     // - Count: Folder views only (Home Video root, Home Audio root, Online Audio root)
                     // - Duration: Media items inside folders & playlists (positioned directly after Title)
                     // - Size: Available in all views except Online Playlists (Sections 11 & 12)
-                    val isOnlineMediaFolder = isOnlineAudioFolder
+                    val isOnlineMediaFolder = isOnlineAudioFolder || isOnlineVideoFolder
                     val showCountSort = !isInsideFolder && !isPlaylistMode && !isRecentsMode && !isOnlineMediaFolder
                     val showDurationSort = (isInsideFolder || isPlaylistMode) && !isOnlineMediaFolder
                     val showSizeSort = !isOnlinePlaylist && !isOnlineMediaFolder
@@ -384,7 +385,7 @@ fun SortAndViewOptionsPopup(
                         }
                     )
 
-                    if (!isOnlineAudioFolder) {
+                    if (!(isOnlineAudioFolder || isOnlineVideoFolder)) {
                         HorizontalDivider(
                             modifier = Modifier.padding(top = 12.dp, bottom = 12.dp),
                             color = dividerColor,
@@ -477,8 +478,8 @@ fun SortAndViewOptionsPopup(
                                 .padding(top = 8.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (isOnlineAudioFolder) {
-                                // ONLINE AUDIO FOLDER:
+                            if (isOnlineAudioFolder || isOnlineVideoFolder) {
+                                // ONLINE AUDIO / VIDEO FOLDER:
                                 // Keep ONLY: Thumbnails, Duration, Date, Audio Type, Progress Bar (Extension is not offered online)
                                 // COMPLETELY REMOVE: Size, Path, Subtitle Indicator, Framerate, Resolution, Video Count, New Badge, Full Name
                                 Row(
@@ -508,12 +509,22 @@ fun SortAndViewOptionsPopup(
                                         modifier = Modifier.weight(0.9f),
                                         onClick = { onVisibleFieldsChange(visibleFields.copy(showDate = !visibleFields.showDate)) }
                                     )
-                                    FieldChip(
-                                        label = "Audio Type",
-                                        isActive = visibleFields.showAudioType,
-                                        modifier = Modifier.weight(1.15f),
-                                        onClick = { onVisibleFieldsChange(visibleFields.copy(showAudioType = !visibleFields.showAudioType)) }
-                                    )
+                                    if (isOnlineVideoFolder) {
+                                        // Online video: the highest available picture quality (e.g. 4K, 1080p) instead of the audio type.
+                                        FieldChip(
+                                            label = "Resolution",
+                                            isActive = visibleFields.showResolution,
+                                            modifier = Modifier.weight(1.15f),
+                                            onClick = { onVisibleFieldsChange(visibleFields.copy(showResolution = !visibleFields.showResolution)) }
+                                        )
+                                    } else {
+                                        FieldChip(
+                                            label = "Audio Type",
+                                            isActive = visibleFields.showAudioType,
+                                            modifier = Modifier.weight(1.15f),
+                                            onClick = { onVisibleFieldsChange(visibleFields.copy(showAudioType = !visibleFields.showAudioType)) }
+                                        )
+                                    }
                                     FieldChip(
                                         label = "Progress Bar",
                                         isActive = visibleFields.showProgressBar,

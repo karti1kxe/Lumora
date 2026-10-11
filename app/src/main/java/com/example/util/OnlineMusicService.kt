@@ -113,6 +113,9 @@ object OnlineMusicService {
         }
     }
 
+    /** Lets the online VIDEO service share the same NewPipe initialisation. */
+    fun ensureNewPipeReady() = ensureInit()
+
     /** Minimal NewPipeExtractor Downloader implementation backed by OkHttp. */
     private class OkHttpNewPipeDownloader(private val client: OkHttpClient) : Downloader() {
         override fun execute(request: Request): Response {

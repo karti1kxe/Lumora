@@ -12,6 +12,7 @@ import androidx.compose.material.icons.outlined.Cast
 import androidx.compose.material.icons.outlined.DashboardCustomize
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.Headphones
+import androidx.compose.material.icons.outlined.HighQuality
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.MoreVert
@@ -305,6 +306,14 @@ enum class PlayerControlId(
         description = "Episode Queue & Playlist Manager",
         icon = Icons.Outlined.VideoLibrary,
         lumoraDrawableRes = R.drawable.lumora_library,
+        defaultArea = null
+    ),
+    VIDEO_QUALITY(
+        id = "video_quality",
+        displayName = "Video Quality",
+        description = "Choose the stream quality of an online video (4K, 1080p, 720p...)",
+        icon = Icons.Outlined.HighQuality,
+        lumoraDrawableRes = null,
         defaultArea = null
     );
 

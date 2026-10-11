@@ -120,6 +120,34 @@ class MpvPlayerController {
     private val externalSubtitlesMap = mutableMapOf<String, String>()
     private val subtitleTrackSourcePaths = mutableMapOf<Int, String>()
     private val subtitleTrackExtractorIndices = mutableMapOf<Int, Int>()
+    /**
+     * True while the loaded video is an internet stream (online video). Switches mpv to a large read-ahead
+     * cache and reconnect handling, and skips the local-file metadata probe.
+     */
+    @Volatile
+    var isOnlineStream: Boolean = false
+
+    // True from the moment an online video is tapped until its stream was handed to mpv: the loading spinner
+    // must keep turning (and an old video that is still decoding must not hide it).
+    @Volatile
+    private var onlineLoadPending: Boolean = false
+
+    /** Online video was tapped: show the loading spinner right away while its stream address is being looked up. */
+    fun beginOnlineLoading() {
+        isOnlineStream = true
+        onlineLoadPending = true
+        _errorMessage.value = null
+        _isBuffering.value = true
+        try { mpvView?.mpv?.setPropertyBoolean("pause", true) } catch (_: Throwable) {}
+    }
+
+    /** Looking up the online stream failed. */
+    fun reportOnlineError(message: String) {
+        onlineLoadPending = false
+        _isBuffering.value = false
+        _errorMessage.value = message
+    }
+
     private val loadedExternalAudios = mutableListOf<String>()
     private val externalAudiosMap = mutableMapOf<String, String>()
     private val externalAudiosLangMap = mutableMapOf<String, String>()
@@ -770,7 +798,7 @@ class MpvPlayerController {
                                 ?: view.mpv.getPropertyInt("dwidth") ?: 0
                             val frameHeight = view.mpv.getPropertyInt("video-params/dh")
                                 ?: view.mpv.getPropertyInt("dheight") ?: 0
-                            if (posSec >= 0.0) {
+                            if (posSec >= 0.0 && !onlineLoadPending) {
                                 _isBuffering.value = false
                             }
                         }
@@ -778,6 +806,12 @@ class MpvPlayerController {
                             _durationMs.value = (durSec * 1000.0).toLong()
                         }
                         _isPlaying.value = !paused
+                        if (isOnlineStream && !onlineLoadPending) {
+                            // Network video: the spinner follows what mpv really does (waiting for data / no frame yet).
+                            val waitingForData = try { view.mpv.getPropertyBoolean("paused-for-cache") == true } catch (_: Throwable) { false }
+                            val notStarted = posSec == null || posSec < 0.0
+                            _isBuffering.value = waitingForData || notStarted
+                        }
                         if (cacheTimeSec > 0.0 && posSec != null && posSec >= 0.0) {
                             _bufferedPositionMs.value = ((posSec + cacheTimeSec) * 1000.0).toLong().coerceAtLeast(_currentPositionMs.value)
                         } else {
@@ -920,6 +954,7 @@ class MpvPlayerController {
         }
         _errorMessage.value = null
         _isBuffering.value = true
+        onlineLoadPending = false
         if (currentFilePath != filePath) {
             loadedExternalSubtitles.clear()
             loadedExternalAudios.clear()
@@ -954,6 +989,29 @@ class MpvPlayerController {
         // single initial load from pendingFilePath. This avoids a duplicate decoder load.
     }
 
+    /**
+     * Online streams: keep a few minutes of video buffered ahead (so playback does not stutter on every
+     * network hiccup) and reconnect dropped connections. Only the playing video's own stream is cached,
+     * never other tracks of the playlist. Local files keep mpv's tiny default read-ahead.
+     */
+    private fun applyStreamCacheOptions(view: VideoPlayerMpvView) {
+        try {
+            if (isOnlineStream) {
+                view.mpv.setPropertyString("user-agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36")
+                view.mpv.setPropertyString("cache", "yes")
+                view.mpv.setPropertyString("demuxer-max-bytes", "192MiB")
+                view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
+                view.mpv.setPropertyString("demuxer-readahead-secs", "180")
+                view.mpv.setPropertyString("cache-pause", "yes")
+                view.mpv.setPropertyString("cache-pause-wait", "3")
+                view.mpv.setPropertyString("network-timeout", "20")
+                view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5")
+            } else {
+                view.mpv.setPropertyString("demuxer-readahead-secs", "1")
+            }
+        } catch (_: Throwable) {}
+    }
+
     private fun loadVideoInternal(filePath: String, startPositionMs: Long = 0L) {
         if (isReleased) return
         subtitleSelectionGeneration.incrementAndGet()
@@ -984,6 +1042,7 @@ class MpvPlayerController {
 
         try {
             val startSec = initialPos / 1000.0
+            applyStreamCacheOptions(view)
             try {
                 // Do not disable native track selection while a new file is opening.
                 // mpv's auto mode is responsible for honoring container/Matroska
@@ -1098,6 +1157,8 @@ class MpvPlayerController {
 
         // Asynchronously extract real tracks, dimensions, and sibling subtitles in background IO to eliminate startup delay
         playerScope.launch {
+            // An online stream would be downloaded a second time just to read its size: mpv already knows it.
+            if (isOnlineStream) return@launch
             try {
                 val retriever = android.media.MediaMetadataRetriever()
                 if (filePath.startsWith("fd://")) {
