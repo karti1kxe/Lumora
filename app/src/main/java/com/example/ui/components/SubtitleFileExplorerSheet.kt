@@ -189,14 +189,16 @@ fun SubtitleFileTreeDialog(
     }
 
     // Color Palette matching Player Glass aesthetic
+    // Light surfaces follow the glass-transparency slider (same value the sheet background uses).
+    val whiteAlpha = if (glassBlurTransparency < 25f) 1f else (glassBlurTransparency / 100f).coerceIn(0.40f, 1f)
     val isDark = com.example.ui.theme.isAppInDarkTheme()
     val accentBlue = if (isDark) Color(0xFF38BDF8) else Color(0xFF0284C7)
     val textPrimary = if (isDark) Color(0xFFF8FAFC) else Color(0xFF0F172A)
     val textSecondary = if (isDark) Color(0xFF94A3B8) else Color(0xFF64748B)
-    val cardBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.70f) else Color(0xFFF1F5F9).copy(alpha = 0.85f)
+    val cardBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.70f) else Color(0xFFF1F5F9).copy(alpha = whiteAlpha)
     val borderCol = if (isDark) Color.White.copy(alpha = 0.18f) else Color(0xFFCBD5E1)
-    val badgeBg = if (isDark) Color(0xFF0284C7).copy(alpha = 0.25f) else Color(0xFFE0F2FE)
-    val inputBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.60f) else Color(0xFFF1F5F9)
+    val badgeBg = if (isDark) Color(0xFF0284C7).copy(alpha = 0.25f) else Color(0xFFE0F2FE).copy(alpha = whiteAlpha)
+    val inputBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.60f) else Color(0xFFF1F5F9).copy(alpha = whiteAlpha)
 
     // Load file list filtered to STRICT_SUBTITLE_EXTENSIONS and navigatable directories
     var fileItems by remember { mutableStateOf<List<SubtitleFileItem>>(emptyList()) }
@@ -604,8 +606,8 @@ private fun SubtitleSheetItemRow(
     }
 
     val isDark = com.example.ui.theme.isAppInDarkTheme()
-    val badgeBg = if (isDark) Color(0xFF0284C7).copy(alpha = 0.25f) else Color(0xFFE0F2FE)
-    val itemBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.50f) else Color(0xFFF8FAFC)
+    val badgeBg = if (isDark) Color(0xFF0284C7).copy(alpha = 0.25f) else sheetWhite(Color(0xFFE0F2FE))
+    val itemBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.50f) else sheetWhite(Color(0xFFF8FAFC))
 
     Box(
         modifier = Modifier

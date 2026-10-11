@@ -148,7 +148,7 @@ fun ControlLayoutEditor(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(16.dp))
-                .background(if (isDark) Color(0xFF0F172A).copy(alpha = 0.8f) else Color(0xFFE2E8F0))
+                .background(if (isDark) Color(0xFF0F172A).copy(alpha = 0.8f) else Color(0xFFE2E8F0).copy(alpha = alphaRatio.coerceIn(0.40f, 1f)))
                 .padding(4.dp)
         ) {
             Row(
@@ -426,6 +426,7 @@ fun ControlLayoutEditor(
                     items = activeControls,
                     allAreasInMode = availableAreasForMode,
                     isDark = isDark,
+                    whiteAlpha = alphaRatio.coerceIn(0.40f, 1f),
                     onReorder = { newItems ->
                         onConfigChange(config.withAreaUpdated(selectedArea, newItems))
                     },
@@ -502,6 +503,7 @@ fun ControlLayoutEditor(
                         AvailableControlPill(
                             control = controlId,
                             isDark = isDark,
+                            whiteAlpha = alphaRatio.coerceIn(0.40f, 1f),
                             onAdd = {
                                 val currentList = config.getControlsForArea(selectedArea).toMutableList()
                                 val isTopArea = selectedArea == ControlArea.TOP_RIGHT || selectedArea == ControlArea.PORTRAIT_TOP
@@ -537,6 +539,7 @@ private fun ReorderableControlList(
     items: List<PlayerControlId>,
     allAreasInMode: List<ControlArea>,
     isDark: Boolean,
+    whiteAlpha: Float = 1f,
     onReorder: (List<PlayerControlId>) -> Unit,
     onRemove: (PlayerControlId) -> Unit,
     onTransferToArea: (PlayerControlId, ControlArea) -> Unit
@@ -611,7 +614,7 @@ private fun ReorderableControlList(
             val itemBg = if (isDark) {
                 if (isBeingDragged) Color(0xFF1E293B) else Color(0xFF334155).copy(alpha = 0.75f)
             } else {
-                if (isBeingDragged) Color(0xFFF1F5F9) else Color.White
+                if (isBeingDragged) Color(0xFFF1F5F9).copy(alpha = whiteAlpha) else Color.White.copy(alpha = whiteAlpha)
             }
 
             val itemBorderModifier = if (isBeingDragged) {
@@ -810,10 +813,11 @@ private fun ReorderableControlList(
 private fun AvailableControlPill(
     control: PlayerControlId,
     isDark: Boolean,
-    onAdd: () -> Unit
+    onAdd: () -> Unit,
+    whiteAlpha: Float = 1f
 ) {
     val primaryTextColor = if (isDark) DarkTextPrimary else LightTextPrimary
-    val itemBg = if (isDark) Color(0xFF334155) else Color.White
+    val itemBg = if (isDark) Color(0xFF334155) else Color.White.copy(alpha = whiteAlpha)
     val borderColor = if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f)
 
     Box(

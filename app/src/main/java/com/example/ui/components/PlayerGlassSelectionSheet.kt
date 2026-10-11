@@ -266,6 +266,17 @@ val LocalSheetNormalTextColor = compositionLocalOf { Color(0xFF1E293B) }
 val LocalSheetSecondaryTextColor = compositionLocalOf { Color(0xFF64748B) }
 val LocalSheetIsLowGlassOpacity = compositionLocalOf { false }
 
+/**
+ * Opacity of every white / light surface (cards, chips, the selected item) inside a glass sheet.
+ * It follows the Settings "glass transparency" slider, exactly like the sheet background does.
+ */
+val LocalSheetWhiteAlpha = compositionLocalOf { 1f }
+
+/** Applies the slider-controlled opacity to a light surface colour. */
+@Composable
+@androidx.compose.runtime.ReadOnlyComposable
+fun sheetWhite(base: Color): Color = base.copy(alpha = base.alpha * LocalSheetWhiteAlpha.current)
+
 val NormalItemColor: Color
     @Composable get() = LocalSheetNormalTextColor.current
 
@@ -273,10 +284,14 @@ val SecondaryTextColor: Color
     @Composable get() = LocalSheetSecondaryTextColor.current
 
 val SheetButtonBgColor: Color
-    @Composable get() = if (LocalSheetIsLowGlassOpacity.current) Color(0x22FFFFFF) else Color(0xFFF1F5F9)
+    @Composable get() = if (LocalSheetIsLowGlassOpacity.current) Color(0x22FFFFFF) else sheetWhite(Color(0xFFF1F5F9))
 
 val SheetButtonTextColor: Color
     @Composable get() = Color(0xFF0F172A)
+
+/** Text on a light chip: dark on the light chip, light only when the chip itself is see-through glass. */
+val SheetChipTextColor: Color
+    @Composable get() = if (LocalSheetIsLowGlassOpacity.current) LocalSheetNormalTextColor.current else Color(0xFF0F172A)
 
 val SheetButtonBorderColor: Color
     @Composable get() = if (LocalSheetIsLowGlassOpacity.current) Color(0x30FFFFFF) else Color(0xFFCBD5E1)
@@ -487,7 +502,8 @@ fun PlayerGlassModalSheet(
                 CompositionLocalProvider(
                     LocalSheetNormalTextColor provides sheetNormalTextColor,
                     LocalSheetSecondaryTextColor provides sheetSecondaryTextColor,
-                    LocalSheetIsLowGlassOpacity provides isLowGlassOpacity
+                    LocalSheetIsLowGlassOpacity provides isLowGlassOpacity,
+                    LocalSheetWhiteAlpha provides (if (isLowGlassOpacity) 1f else alphaRatio.coerceIn(0.40f, 1f))
                 ) {
                     Column(
                         modifier = Modifier
@@ -1007,7 +1023,7 @@ fun SubtitleSelectionPanel(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFFE0F2FE))
+                            .background(sheetWhite(Color(0xFFE0F2FE)))
                             .clickable {
                                 onImportSubtitle()
                                 onDismissRequest()
@@ -1130,9 +1146,9 @@ fun SubtitleSelectionPanel(
                                     } else folderPath
 
                                     val isDark = com.example.ui.theme.isAppInDarkTheme()
-                                    val fileItemBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.50f) else Color(0xFFF8FAFC)
+                                    val fileItemBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.50f) else sheetWhite(Color(0xFFF8FAFC))
                                     val fileItemBorder = if (isDark) Color.White.copy(alpha = 0.18f) else Color(0xFFE2E8F0)
-                                    val iconBadgeBg = if (isDark) Color(0xFF0284C7).copy(alpha = 0.25f) else Color(0xFFE0F2FE)
+                                    val iconBadgeBg = if (isDark) Color(0xFF0284C7).copy(alpha = 0.25f) else sheetWhite(Color(0xFFE0F2FE))
                                     val iconBadgeTint = if (isDark) Color(0xFF38BDF8) else Color(0xFF0284C7)
 
                                     Box(
@@ -2019,7 +2035,7 @@ fun AudioSelectionPanel(
                         .fillMaxWidth()
                         .padding(vertical = 8.dp)
                         .height(1.dp)
-                        .background(if (isLowGlassOpacity) Color(0x20FFFFFF) else Color(0xFFE2E8F0))
+                        .background(if (isLowGlassOpacity) Color(0x20FFFFFF) else sheetWhite(Color(0xFFE2E8F0)))
                 )
             }
 
@@ -2357,7 +2373,7 @@ fun AudioDelayPanel(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else Color(0xFFF1F5F9))
+                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else sheetWhite(Color(0xFFF1F5F9)))
                         .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
                     onStep = {
                         val newMs = (liveDelay[0] - selectedStepMs).coerceIn(-60000L, 60000L)
@@ -2380,7 +2396,7 @@ fun AudioDelayPanel(
                         .weight(1f)
                         .height(44.dp)
                         .clip(RoundedCornerShape(22.dp))
-                        .background(if (isLowGlassOpacity) Color(0x18FFFFFF) else Color(0xFFF8FAFC))
+                        .background(if (isLowGlassOpacity) Color(0x18FFFFFF) else sheetWhite(Color(0xFFF8FAFC)))
                         .border(
                             1.2.dp,
                             if (audioDelayMs != 0L || isDelayFocused) ActiveHighlightColor else (if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1)),
@@ -2433,7 +2449,7 @@ fun AudioDelayPanel(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else Color(0xFFF1F5F9))
+                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else sheetWhite(Color(0xFFF1F5F9)))
                         .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
                     onStep = {
                         val newMs = (liveDelay[0] + selectedStepMs).coerceIn(-60000L, 60000L)
@@ -2690,7 +2706,7 @@ fun SubtitleDelayPanel(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else Color(0xFFF1F5F9))
+                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else sheetWhite(Color(0xFFF1F5F9)))
                         .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
                     onStep = {
                         val newMs = (liveDelay[0] - selectedStepMs).coerceIn(-60000L, 60000L)
@@ -2713,7 +2729,7 @@ fun SubtitleDelayPanel(
                         .weight(1f)
                         .height(44.dp)
                         .clip(RoundedCornerShape(22.dp))
-                        .background(if (isLowGlassOpacity) Color(0x18FFFFFF) else Color(0xFFF8FAFC))
+                        .background(if (isLowGlassOpacity) Color(0x18FFFFFF) else sheetWhite(Color(0xFFF8FAFC)))
                         .border(
                             1.2.dp,
                             if (subtitleDelayMs != 0L || isDelayFocused) ActiveHighlightColor else (if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1)),
@@ -2766,7 +2782,7 @@ fun SubtitleDelayPanel(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else Color(0xFFF1F5F9))
+                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else sheetWhite(Color(0xFFF1F5F9)))
                         .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
                     onStep = {
                         val newMs = (liveDelay[0] + selectedStepMs).coerceIn(-60000L, 60000L)
@@ -3757,7 +3773,7 @@ fun VideoSettingSelectionPanel(
                                 } else if (isLowGlass) {
                                     SolidColor(Color(0x22FFFFFF))
                                 } else {
-                                    SolidColor(Color(0xFFF1F5F9))
+                                    SolidColor(sheetWhite(Color(0xFFF1F5F9)))
                                 }
                             )
                             .border(
@@ -3781,7 +3797,7 @@ fun VideoSettingSelectionPanel(
                             text = preset.displayName,
                             fontSize = 13.5.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
-                            color = if (isSelected) Color.White else NormalItemColor,
+                            color = if (isSelected) Color.White else (if (isLowGlass) NormalItemColor else SheetChipTextColor),
                             textAlign = TextAlign.Center,
                             maxLines = 1
                         )
@@ -4421,7 +4437,7 @@ fun AudioEqualizerPanel(
                                 if (isSelected) {
                                     AccentGradient
                                 } else {
-                                    if (isLowGlassOpacity) SolidColor(Color(0x1AFFFFFF)) else SolidColor(Color(0xFFF1F5F9))
+                                    if (isLowGlassOpacity) SolidColor(Color(0x1AFFFFFF)) else SolidColor(sheetWhite(Color(0xFFF1F5F9)))
                                 }
                             )
                             .border(
@@ -5170,7 +5186,7 @@ private fun PlaylistEpisodeGridCard(
     }
 
     // Slightly see-through so the video/background still shows behind the playing item.
-    val activeCardBg = Color(0xFFE0F2FE).copy(alpha = 0.78f)
+    val activeCardBg = sheetWhite(Color(0xFFE0F2FE))
     val activeBorderColor = Color(0xFF0284C7)
     val normalCardBg = Color(0x0A000000)
     val normalBorderColor = Color(0x14000000)
@@ -5383,7 +5399,7 @@ private fun PlaylistEpisodeRow(
     }
 
     // Slightly see-through so the video/background still shows behind the playing item.
-    val activeCardBg = Color(0xFFE0F2FE).copy(alpha = 0.78f)
+    val activeCardBg = sheetWhite(Color(0xFFE0F2FE))
     val activeBorderColor = Color(0xFF0284C7)
     val normalCardBg = Color(0x0A000000)
     val normalBorderColor = Color(0x14000000)
@@ -5576,7 +5592,7 @@ private fun PlaylistEpisodeRow(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFFE0F2FE))
+                        .background(sheetWhite(Color(0xFFE0F2FE)))
                         .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(12.dp))
                         .padding(horizontal = 10.dp, vertical = 4.dp)
                 ) {
@@ -6580,7 +6596,7 @@ fun SeekbarStyleSelectionCard(
     isDark: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val cardBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.85f) else Color(0xFFF1F5F9)
+    val cardBg = if (isDark) Color(0xFF1E293B).copy(alpha = 0.85f) else sheetWhite(Color(0xFFF1F5F9))
     val cardBorder = if (isDark) Color(0x3338BDF8) else Color(0xFFE2E8F0)
     val dividerColor = if (isDark) Color(0x26FFFFFF) else Color(0xFFE2E8F0)
     val textPrimary = if (isDark) Color(0xFFF8FAFC) else Color(0xFF0F172A)
