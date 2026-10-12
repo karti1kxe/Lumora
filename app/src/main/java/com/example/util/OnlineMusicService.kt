@@ -100,13 +100,14 @@ data class OnlineChannelDetail(
  */
 object OnlineMusicService {
     private const val TAG = "OnlineMusicService"
-    // StreamInfo extraction performs blocking HTTP calls. Coroutine timeouts alone cannot
-    // reliably stop OkHttp's execute()/body.string(), so enforce real socket/call deadlines.
+    // Bound every blocking NewPipe HTTP request. Coroutine timeouts alone cannot reliably
+    // interrupt OkHttp's synchronous execute() while it is blocked in socket I/O.
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(12, TimeUnit.SECONDS)
         .callTimeout(25, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     @Volatile

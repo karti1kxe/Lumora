@@ -85,10 +85,16 @@ data class OnlineVideoSession(
      * afterwards from the Video Quality button.
      */
     fun optionFor(label: String?): OnlineVideoOption? {
-        if (videoOptions.isEmpty()) return null
+        if (videoOptions.isEmpty() && muxedOptions.isEmpty()) return null
         if (label == null || label == AUTO_QUALITY) {
             val target = if (maxHeight >= 2160) 720 else 480
-            return videoOptions.firstOrNull { it.height <= target } ?: videoOptions.last()
+            // Start with one progressive URL containing both picture and sound. Adaptive
+            // video-only streams require a second signed audio URL to succeed as well; if
+            // either request is rejected, users see a black screen while the player waits.
+            return muxedOptions.firstOrNull { it.height <= target }
+                ?: muxedOptions.lastOrNull()
+                ?: videoOptions.firstOrNull { it.height <= target }
+                ?: videoOptions.lastOrNull()
         }
         return videoOptions.firstOrNull { it.label == label } ?: optionFor(AUTO_QUALITY)
     }

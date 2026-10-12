@@ -127,6 +127,10 @@ class MpvPlayerController {
     @Volatile
     var isOnlineStream: Boolean = false
 
+    /** Original watch-page URL used as Referer when opening signed YouTube media URLs. */
+    @Volatile
+    var onlineRefererUrl: String? = null
+
     // True from the moment an online video is tapped until its stream was handed to mpv: the loading spinner
     // must keep turning (and an old video that is still decoding must not hide it).
     @Volatile
@@ -1032,10 +1036,11 @@ class MpvPlayerController {
             // The identity must match the YouTube client that created the link, otherwise googlevideo
             // refuses it (403) and the video would never start.
             set("user-agent", com.example.util.OnlineVideoService.userAgentFor(filePath))
-            // Keep YouTube media requests identified as requests originating from its watch site.
-            // These properties are scoped to online streams; local playback remains untouched.
-            set("referrer", "https://www.youtube.com/")
-            set("http-header-fields", "Origin: https://www.youtube.com")
+            // googlevideo signed media URLs can reject a request that omits the watch-page
+            // referrer. This is a native mpv HTTP option (not a browser CORS header).
+            onlineRefererUrl?.takeIf { it.startsWith("https://") || it.startsWith("http://") }?.let {
+                set("referrer", it)
+            }
             set("cache", "yes")
             set("demuxer-max-bytes", "192MiB")
             set("demuxer-max-back-bytes", "32MiB")
