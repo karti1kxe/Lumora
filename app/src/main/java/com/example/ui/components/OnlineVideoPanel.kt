@@ -109,6 +109,15 @@ fun OnlineTrackResult.toOnlineVideoItem(): VideoItem {
  * - Tapping a video opens the normal video player with the same controls as an offline video.
  * Cards are the very same VideoItemCard / VideoItemGridCard used for videos on the device.
  */
+/**
+ * Keeps the recommendation feed in memory while the user opens a video and navigates back.
+ * The panel may be disposed by navigation, so Compose remember{} alone is not sufficient.
+ */
+private object OnlineVideoFeedMemory {
+    var results: List<OnlineTrackResult> = emptyList()
+    val usedQueries: MutableSet<String> = mutableSetOf()
+}
+
 @Composable
 fun OnlineVideoPanel(
     isDark: Boolean,
@@ -123,7 +132,7 @@ fun OnlineVideoPanel(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var results by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
+    var results by remember { mutableStateOf(OnlineVideoFeedMemory.results) }
     var channelResults by remember { mutableStateOf<List<OnlineChannelResult>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
     var isLoadingMore by remember { mutableStateOf(false) }
@@ -145,8 +154,13 @@ fun OnlineVideoPanel(
     var searchJob by remember { mutableStateOf<Job?>(null) }
 
     val isFeedMode = searchQuery.isBlank() && openedChannel == null
-    val feedUsedQueries = remember { mutableSetOf<String>() }
+    val feedUsedQueries = remember { OnlineVideoFeedMemory.usedQueries }
     val feedToken = remember { intArrayOf(0) }
+
+    // Keep the latest batch available across player navigation/disposal.
+    LaunchedEffect(results, isFeedMode) {
+        if (isFeedMode && results.isNotEmpty()) OnlineVideoFeedMemory.results = results
+    }
 
     fun loadFeed() {
         searchJob?.cancel()
@@ -311,6 +325,10 @@ fun OnlineVideoPanel(
         if (searchQuery.isNotBlank()) {
             delay(350)
             executeSearch(searchQuery)
+        } else if (openedChannel == null && OnlineVideoFeedMemory.results.isNotEmpty()) {
+            // Returning from the player should restore the same feed, not start a new recommendation request.
+            results = OnlineVideoFeedMemory.results
+            isSearching = false
         } else {
             executeSearch("")
         }

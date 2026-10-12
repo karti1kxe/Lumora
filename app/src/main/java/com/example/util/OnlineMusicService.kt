@@ -24,6 +24,7 @@ import org.schabi.newpipe.extractor.playlist.PlaylistInfoItem
 import org.json.JSONObject
 import org.json.JSONArray
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 /**
  * One search result from Online Music search. Distinct from AudioTrackItem on purpose:
@@ -99,7 +100,14 @@ data class OnlineChannelDetail(
  */
 object OnlineMusicService {
     private const val TAG = "OnlineMusicService"
-    private val httpClient = OkHttpClient.Builder().build()
+    // StreamInfo extraction performs blocking HTTP calls. Coroutine timeouts alone cannot
+    // reliably stop OkHttp's execute()/body.string(), so enforce real socket/call deadlines.
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(25, TimeUnit.SECONDS)
+        .build()
 
     @Volatile
     private var initialized = false

@@ -1635,9 +1635,20 @@ fun VideoPlayerScreen(
         val primary = session.optionFor(qualityLabel)
         val candidates = ArrayList<com.example.util.OnlineVideoOption>()
         if (primary != null) candidates.add(primary)
-        session.muxedOptions.firstOrNull { primary == null || it.height <= primary.height }
-            ?.let { m -> if (candidates.none { it.url == m.url }) candidates.add(m) }
-        session.hlsUrl?.let { candidates.add(com.example.util.OnlineVideoOption("HLS", 0, it, 0, "", false)) }
+        // Try every compatible progressive (video+audio) stream, not just the first one.
+        // A single muxed URL can also be expired/blocked, so retaining only one fallback
+        // caused otherwise playable videos to fail without trying the remaining streams.
+        session.muxedOptions
+            .filter { primary == null || it.height <= primary.height }
+            .sortedByDescending { it.height }
+            .forEach { option ->
+                if (candidates.none { it.url == option.url }) candidates.add(option)
+            }
+        session.hlsUrl?.let { hls ->
+            if (candidates.none { it.url == hls }) {
+                candidates.add(com.example.util.OnlineVideoOption("HLS", 0, hls, 0, "", false))
+            }
+        }
 
         if (attempt >= candidates.size) {
             isPlaying = false
