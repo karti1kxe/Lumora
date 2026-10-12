@@ -132,10 +132,37 @@ class MpvPlayerController {
     @Volatile
     private var onlineLoadPending: Boolean = false
 
+    // The online video could not be opened: the spinner must stop instead of turning forever.
+    @Volatile
+    private var onlineFailed: Boolean = false
+
+    /** True once mpv has really opened the current file (and has not dropped it because of an error). */
+    fun isStreamOpen(expectedUrl: String? = null): Boolean = try {
+        val mpv = mpvView?.mpv
+        mpv != null &&
+            mpv.getPropertyBoolean("idle-active") == false &&
+            mpv.getPropertyDouble("time-pos") != null &&
+            sameStreamUrl(mpv.getPropertyString("path"), expectedUrl)
+    } catch (_: Throwable) { false }
+
+    // mpv may report the address slightly differently; the YouTube "itag" identifies the stream reliably.
+    private fun sameStreamUrl(actual: String?, expected: String?): Boolean {
+        if (actual == null || expected == null || actual == expected) return true
+        val a = Regex("[?&]itag=(\\d+)").find(actual)?.groupValues?.get(1)
+        val b = Regex("[?&]itag=(\\d+)").find(expected)?.groupValues?.get(1)
+        return a != null && a == b
+    }
+
+    /** mpv gave up on the file (nothing is loaded any more). */
+    fun isStreamIdle(): Boolean = try {
+        mpvView?.mpv?.getPropertyBoolean("idle-active") == true
+    } catch (_: Throwable) { false }
+
     /** Online video was tapped: show the loading spinner right away while its stream address is being looked up. */
     fun beginOnlineLoading() {
         isOnlineStream = true
         onlineLoadPending = true
+        onlineFailed = false
         _errorMessage.value = null
         _isBuffering.value = true
         try { mpvView?.mpv?.setPropertyBoolean("pause", true) } catch (_: Throwable) {}
@@ -144,6 +171,7 @@ class MpvPlayerController {
     /** Looking up the online stream failed. */
     fun reportOnlineError(message: String) {
         onlineLoadPending = false
+        onlineFailed = true
         _isBuffering.value = false
         _errorMessage.value = message
     }
@@ -798,7 +826,7 @@ class MpvPlayerController {
                                 ?: view.mpv.getPropertyInt("dwidth") ?: 0
                             val frameHeight = view.mpv.getPropertyInt("video-params/dh")
                                 ?: view.mpv.getPropertyInt("dheight") ?: 0
-                            if (posSec >= 0.0 && !onlineLoadPending) {
+                            if (posSec >= 0.0 && !onlineLoadPending && !onlineFailed) {
                                 _isBuffering.value = false
                             }
                         }
@@ -806,7 +834,7 @@ class MpvPlayerController {
                             _durationMs.value = (durSec * 1000.0).toLong()
                         }
                         _isPlaying.value = !paused
-                        if (isOnlineStream && !onlineLoadPending) {
+                        if (isOnlineStream && !onlineLoadPending && !onlineFailed) {
                             // Network video: the spinner follows what mpv really does (waiting for data / no frame yet).
                             val waitingForData = try { view.mpv.getPropertyBoolean("paused-for-cache") == true } catch (_: Throwable) { false }
                             val notStarted = posSec == null || posSec < 0.0
@@ -955,6 +983,7 @@ class MpvPlayerController {
         _errorMessage.value = null
         _isBuffering.value = true
         onlineLoadPending = false
+        onlineFailed = false
         if (currentFilePath != filePath) {
             loadedExternalSubtitles.clear()
             loadedExternalAudios.clear()
@@ -994,16 +1023,20 @@ class MpvPlayerController {
      * network hiccup) and reconnect dropped connections. Only the playing video's own stream is cached,
      * never other tracks of the playlist. Local files keep mpv's tiny default read-ahead.
      */
-    private fun applyStreamCacheOptions(view: VideoPlayerMpvView) {
+    private fun applyStreamCacheOptions(view: VideoPlayerMpvView, filePath: String) {
         try {
             if (isOnlineStream) {
-                view.mpv.setPropertyString("user-agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36")
+                // The identity must match the YouTube client that created the link, otherwise googlevideo
+                // refuses it (403) and the video would never start.
+                view.mpv.setPropertyString("user-agent", com.example.util.OnlineVideoService.userAgentFor(filePath))
                 view.mpv.setPropertyString("cache", "yes")
                 view.mpv.setPropertyString("demuxer-max-bytes", "192MiB")
                 view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
                 view.mpv.setPropertyString("demuxer-readahead-secs", "180")
                 view.mpv.setPropertyString("cache-pause", "yes")
-                view.mpv.setPropertyString("cache-pause-wait", "3")
+                // Starts only after a few seconds are buffered, so the video then plays smoothly.
+                view.mpv.setPropertyString("cache-pause-initial", "yes")
+                view.mpv.setPropertyString("cache-pause-wait", "4")
                 view.mpv.setPropertyString("network-timeout", "20")
                 view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5")
             } else {
@@ -1042,7 +1075,7 @@ class MpvPlayerController {
 
         try {
             val startSec = initialPos / 1000.0
-            applyStreamCacheOptions(view)
+            applyStreamCacheOptions(view, filePath)
             try {
                 // Do not disable native track selection while a new file is opening.
                 // mpv's auto mode is responsible for honoring container/Matroska

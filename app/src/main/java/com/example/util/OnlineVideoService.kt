@@ -67,6 +67,10 @@ data class OnlineVideoSession(
     val audioOptions: List<OnlineAudioOption>,
     val subtitleOptions: List<OnlineSubtitleOption>,
     val related: List<OnlineTrackResult>,
+    /** Progressive streams that already contain audio (used when the adaptive stream cannot be opened). */
+    val muxedOptions: List<OnlineVideoOption> = emptyList(),
+    val hlsUrl: String? = null,
+    val channelUrl: String? = null,
     val resolvedAtMs: Long = System.currentTimeMillis()
 ) {
     val maxHeight: Int get() = videoOptions.maxOfOrNull { it.height } ?: 0
@@ -75,11 +79,16 @@ data class OnlineVideoSession(
     val qualityLabels: List<String>
         get() = if (videoOptions.isEmpty()) emptyList() else listOf(AUTO_QUALITY) + videoOptions.map { it.label }
 
-    /** Auto = best quality up to 1080p (saves data and decodes smoothly on phones). */
+    /**
+     * Auto = starts light so the video opens fast: 480p, or 720p when the video is 4K or better.
+     * (A video that only has lower qualities simply uses its best one.) The user can raise the quality
+     * afterwards from the Video Quality button.
+     */
     fun optionFor(label: String?): OnlineVideoOption? {
         if (videoOptions.isEmpty()) return null
         if (label == null || label == AUTO_QUALITY) {
-            return videoOptions.firstOrNull { it.height <= 1080 } ?: videoOptions.last()
+            val target = if (maxHeight >= 2160) 720 else 480
+            return videoOptions.firstOrNull { it.height <= target } ?: videoOptions.last()
         }
         return videoOptions.firstOrNull { it.label == label } ?: optionFor(AUTO_QUALITY)
     }
@@ -104,6 +113,33 @@ private fun Any.callBool(name: String): Boolean =
 object OnlineVideoService {
     private const val TAG = "OnlineVideoService"
     private const val SESSION_TTL_MS = 20 * 60 * 1000L
+
+    /** Reason of the last failed lookup (shown to the user, helps to find out what went wrong). */
+    @Volatile
+    var lastError: String? = null
+
+    /** Which YouTube client produced a stream URL ("WEB", "ANDROID", "IOS"...). */
+    fun clientOf(url: String): String =
+        Regex("[?&]c=([A-Za-z_]+)").find(url)?.groupValues?.get(1)?.uppercase(Locale.ROOT) ?: "WEB"
+
+    /**
+     * googlevideo answers 403 (so the video never starts) when the player identifies itself differently
+     * from the client that created the link, so mpv must use the matching User-Agent.
+     */
+    fun userAgentFor(url: String): String {
+        fun fromExtractor(method: String): String? = try {
+            val cls = Class.forName("org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper")
+            val loc = Class.forName("org.schabi.newpipe.extractor.localization.Localization")
+            cls.getMethod(method, loc).invoke(null, null as Any?) as? String
+        } catch (_: Throwable) { null }
+        return when (clientOf(url)) {
+            "ANDROID" -> fromExtractor("getAndroidUserAgent")
+                ?: "com.google.android.youtube/19.28.35 (Linux; U; Android 14; GB) gzip"
+            "IOS" -> fromExtractor("getIosUserAgent")
+                ?: "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"
+            else -> "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+        }
+    }
 
     private val sessionCache = ConcurrentHashMap<String, OnlineVideoSession>()
     private val maxHeightCache = ConcurrentHashMap<String, Int>()
@@ -148,9 +184,15 @@ object OnlineVideoService {
                 return@withContext cached
             }
             try {
+                lastError = null
                 OnlineMusicService.ensureNewPipeReady()
                 val target = videoUrl.replace("music.youtube.com", "www.youtube.com")
-                val info = StreamInfo.getInfo(ServiceList.YouTube, target)
+                val infoJob = async { StreamInfo.getInfo(ServiceList.YouTube, target) }
+                val info = kotlinx.coroutines.withTimeoutOrNull(30_000L) { infoJob.await() }
+                    ?: run {
+                        infoJob.cancel()
+                        throw java.io.IOException("Timed out while loading the video (30 s)")
+                    }
 
                 // ---- Picture qualities -------------------------------------------------------
                 val adaptive = HashMap<Int, Pair<OnlineVideoOption, Int>>()
@@ -267,13 +309,19 @@ object OnlineVideoService {
                     videoOptions = options,
                     audioOptions = audioOptions,
                     subtitleOptions = subtitleOptions.take(24),
-                    related = related
+                    related = related,
+                    muxedOptions = muxedByHeight.values.map { it.first }.sortedByDescending { it.height },
+                    hlsUrl = try { info.hlsUrl?.takeIf { it.isNotBlank() } } catch (_: Throwable) { null },
+                    channelUrl = try { info.uploaderUrl?.takeIf { it.isNotBlank() } } catch (_: Throwable) { null }
                 )
                 if (session.maxHeight > 0) maxHeightCache[videoUrl] = session.maxHeight
                 sessionCache[videoUrl] = session
                 session
-            } catch (e: Exception) {
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
                 Log.e(TAG, "resolveSession('$videoUrl') failed: ${e.message}", e)
+                lastError = (e.javaClass.simpleName + ": " + (e.message ?: "")).take(160)
                 null
             }
         }
@@ -292,13 +340,14 @@ object OnlineVideoHistory {
     private const val MAX_ITEMS = 80
 
     @Synchronized
-    fun record(context: Context, url: String, title: String, channel: String) {
+    fun record(context: Context, url: String, title: String, channel: String, channelUrl: String? = null) {
         try {
             val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val old = JSONArray(prefs.getString(KEY, "[]") ?: "[]")
             val out = JSONArray()
             val first = JSONObject()
                 .put("url", url).put("title", title).put("channel", channel)
+                .put("channelUrl", channelUrl ?: "")
                 .put("ts", System.currentTimeMillis())
             out.put(first)
             for (i in 0 until old.length()) {
@@ -328,20 +377,44 @@ object OnlineVideoHistory {
         return scores.entries.sortedByDescending { it.value }.take(limit).map { it.key }
     }
 
+    /** (channel name, channel page) of the most watched channels, best first. */
+    fun topChannelPages(context: Context, limit: Int): List<Pair<String, String>> {
+        val scores = LinkedHashMap<String, Double>()
+        val urls = HashMap<String, String>()
+        load(context).forEachIndexed { index, o ->
+            val ch = o.optString("channel").trim()
+            val cu = o.optString("channelUrl").trim()
+            if (ch.isNotEmpty() && cu.isNotEmpty()) {
+                urls[ch] = cu
+                scores[ch] = (scores[ch] ?: 0.0) + 1.0 + (MAX_ITEMS - index).coerceAtLeast(0) / MAX_ITEMS.toDouble()
+            }
+        }
+        return scores.entries.sortedByDescending { it.value }.take(limit).map { it.key to (urls[it.key] ?: "") }
+    }
+
+    fun recentUrls(context: Context, limit: Int): List<String> =
+        load(context).take(limit).map { it.optString("url") }.filter { it.isNotBlank() }
+
     fun recentTitles(context: Context, limit: Int): List<String> =
         load(context).take(limit).map { it.optString("title") }.filter { it.isNotBlank() }
 }
 
 /**
- * Endless "Recommended for you" feed for online videos: ~65% like what the user watches (their channels and
- * the topics of recently watched videos), ~35% discovery from other topics. Videos only, no audio-only content.
+ * "Recommended for you" feed that behaves like the YouTube home page. Every batch mixes several sources:
+ *  - related videos of what the user watched last (YouTube's own "up next" suggestions),
+ *  - the newest videos of the channels the user watches most,
+ *  - searches built from the topics of recently watched videos,
+ *  - discovery topics (also the whole feed for a brand-new user).
+ * Already watched videos are left out, and the same channel is never repeated back-to-back.
  */
 object OnlineVideoRecommender {
     private val discoveryTopics = listOf(
-        "trending videos today", "best anime episodes", "new movie trailers", "full documentary",
-        "technology review", "gaming highlights", "official music video", "comedy sketches",
-        "easy cooking recipes", "travel vlog 4k", "science explained", "sports highlights",
-        "short film", "podcast clips", "nature 4k", "stand up comedy"
+        "trending videos today", "most viewed this week", "viral videos", "best anime episodes",
+        "new movie trailers", "full documentary", "technology review", "gaming highlights",
+        "official music video", "comedy sketches", "easy cooking recipes", "travel vlog 4k",
+        "science explained", "sports highlights", "short film", "podcast clips", "nature 4k",
+        "stand up comedy", "latest news today", "diy projects", "street food", "motivational speech",
+        "bollywood trailers", "hindi web series", "cricket highlights"
     )
 
     private fun keywordQuery(title: String): String {
@@ -350,15 +423,31 @@ object OnlineVideoRecommender {
         return words.take(4).joinToString(" ")
     }
 
-    private fun mix(similar: List<OnlineTrackResult>, discovery: List<OnlineTrackResult>): List<OnlineTrackResult> {
-        val out = ArrayList<OnlineTrackResult>(similar.size + discovery.size)
-        var si = 0
-        var di = 0
-        var i = 0
-        while (si < similar.size || di < discovery.size) {
-            val takeDiscovery = (i % 3 == 2 && di < discovery.size) || si >= similar.size
-            if (takeDiscovery) out.add(discovery[di++]) else out.add(similar[si++])
-            i++
+    /** Takes from the sources in a fixed YouTube-like rhythm until all are used up. */
+    private fun interleave(sources: List<List<OnlineTrackResult>>): List<OnlineTrackResult> {
+        // index into `sources`: 0 related, 1 channels, 2 keywords, 3 discovery
+        val pattern = intArrayOf(0, 1, 0, 2, 3, 1, 0, 3, 2, 1)
+        val pointers = IntArray(sources.size)
+        val out = ArrayList<OnlineTrackResult>()
+        var guard = 0
+        while (sources.indices.any { pointers[it] < sources[it].size } && guard < 10_000) {
+            for (src in pattern) {
+                if (src < sources.size && pointers[src] < sources[src].size) {
+                    out.add(sources[src][pointers[src]++])
+                }
+            }
+            guard++
+        }
+        return out
+    }
+
+    private fun spread(items: List<OnlineTrackResult>): List<OnlineTrackResult> {
+        val pending = items.toMutableList()
+        val out = ArrayList<OnlineTrackResult>(items.size)
+        while (pending.isNotEmpty()) {
+            val lastArtist = out.lastOrNull()?.artist
+            val idx = pending.indexOfFirst { it.artist != lastArtist }.let { if (it < 0) 0 else it }
+            out.add(pending.removeAt(idx))
         }
         return out
     }
@@ -368,24 +457,47 @@ object OnlineVideoRecommender {
         excludeUrls: Set<String>,
         usedQueries: MutableSet<String>
     ): List<OnlineTrackResult> = coroutineScope {
-        val channels = OnlineVideoHistory.topChannels(context, 4)
-        val topics = OnlineVideoHistory.recentTitles(context, 4).map { keywordQuery(it) }
-        val similarQueries = (channels + topics)
-            .filter { it.isNotBlank() && usedQueries.add(it.lowercase(Locale.ROOT)) }
-            .take(2)
+        val exclude = excludeUrls + OnlineVideoHistory.recentUrls(context, 40)
 
-        val freshTopics = discoveryTopics.filter { !usedQueries.contains(it) }.shuffled()
-        val discoveryQueries = freshTopics.take(if (similarQueries.isEmpty()) 3 else 1)
+        val relatedSeeds = OnlineVideoHistory.recentUrls(context, 8)
+            .filter { usedQueries.add("rel:$it") }.take(2)
+        val channelSeeds = OnlineVideoHistory.topChannelPages(context, 8)
+            .filter { it.second.isNotBlank() && usedQueries.add("ch:${it.second}") }.take(2)
+        val keywordQueries = OnlineVideoHistory.recentTitles(context, 6)
+            .map { keywordQuery(it) }
+            .filter { it.isNotBlank() && usedQueries.add(it.lowercase(Locale.ROOT)) }.take(1)
+        val hasPersonalSources = relatedSeeds.isNotEmpty() || channelSeeds.isNotEmpty() || keywordQueries.isNotEmpty()
+        val discoveryQueries = discoveryTopics.filter { !usedQueries.contains(it) }.shuffled()
+            .take(if (hasPersonalSources) 1 else 3)
         discoveryQueries.forEach { usedQueries.add(it) }
 
-        val similarJobs = similarQueries.map { q -> async { try { OnlineMusicService.search(q) } catch (_: Throwable) { emptyList() } } }
-        val discoveryJobs = discoveryQueries.map { q -> async { try { OnlineMusicService.search(q) } catch (_: Throwable) { emptyList() } } }
+        val relatedJobs = relatedSeeds.map { url ->
+            async { try { OnlineVideoService.resolveSession(url)?.related ?: emptyList() } catch (_: Throwable) { emptyList<OnlineTrackResult>() } }
+        }
+        val channelJobs = channelSeeds.map { (_, channelUrl) ->
+            async {
+                try {
+                    OnlineMusicService.fetchChannelDetail(channelUrl)?.initialTracks?.items?.take(8) ?: emptyList()
+                } catch (_: Throwable) { emptyList<OnlineTrackResult>() }
+            }
+        }
+        val keywordJobs = keywordQueries.map { q ->
+            async { try { OnlineMusicService.search(q) } catch (_: Throwable) { emptyList<OnlineTrackResult>() } }
+        }
+        val discoveryJobs = discoveryQueries.map { q ->
+            async { try { OnlineMusicService.search(q) } catch (_: Throwable) { emptyList<OnlineTrackResult>() } }
+        }
 
         fun accept(r: OnlineTrackResult) =
-            r.videoUrl !in excludeUrls && r.title.isNotBlank() && r.durationSec in 61L..14_400L
+            r.videoUrl !in exclude && r.title.isNotBlank() && r.durationSec in 61L..14_400L
 
-        val similar = similarJobs.awaitAll().flatten().filter(::accept).distinctBy { it.videoUrl }
-        val discovery = discoveryJobs.awaitAll().flatten().filter(::accept).distinctBy { it.videoUrl }
-        mix(similar, discovery.filter { d -> similar.none { it.videoUrl == d.videoUrl } })
+        val related = relatedJobs.awaitAll().flatten().filter(::accept)
+        val channels = channelJobs.awaitAll().flatten().filter(::accept)
+        val keywords = keywordJobs.awaitAll().flatten().filter(::accept)
+        val discovery = discoveryJobs.awaitAll().flatten().filter(::accept)
+
+        val seen = HashSet<String>()
+        val merged = interleave(listOf(related, channels, keywords, discovery)).filter { seen.add(it.videoUrl) }
+        spread(merged)
     }
 }
