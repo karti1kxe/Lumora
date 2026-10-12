@@ -141,7 +141,7 @@ class MpvPlayerController {
         val mpv = mpvView?.mpv
         mpv != null &&
             mpv.getPropertyBoolean("idle-active") == false &&
-            mpv.getPropertyDouble("time-pos") != null &&
+            (mpv.getPropertyDouble("time-pos") != null || mpv.getPropertyDouble("duration") != null) &&
             sameStreamUrl(mpv.getPropertyString("path"), expectedUrl)
     } catch (_: Throwable) { false }
 
@@ -1024,25 +1024,27 @@ class MpvPlayerController {
      * never other tracks of the playlist. Local files keep mpv's tiny default read-ahead.
      */
     private fun applyStreamCacheOptions(view: VideoPlayerMpvView, filePath: String) {
-        try {
-            if (isOnlineStream) {
-                // The identity must match the YouTube client that created the link, otherwise googlevideo
-                // refuses it (403) and the video would never start.
-                view.mpv.setPropertyString("user-agent", com.example.util.OnlineVideoService.userAgentFor(filePath))
-                view.mpv.setPropertyString("cache", "yes")
-                view.mpv.setPropertyString("demuxer-max-bytes", "192MiB")
-                view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
-                view.mpv.setPropertyString("demuxer-readahead-secs", "180")
-                view.mpv.setPropertyString("cache-pause", "yes")
-                // Starts only after a few seconds are buffered, so the video then plays smoothly.
-                view.mpv.setPropertyString("cache-pause-initial", "yes")
-                view.mpv.setPropertyString("cache-pause-wait", "4")
-                view.mpv.setPropertyString("network-timeout", "20")
-                view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5")
-            } else {
-                view.mpv.setPropertyString("demuxer-readahead-secs", "1")
-            }
-        } catch (_: Throwable) {}
+        // Every option on its own: one refused option must never stop the others from being applied.
+        fun set(name: String, value: String) {
+            try { view.mpv.setPropertyString(name, value) } catch (_: Throwable) {}
+        }
+        if (isOnlineStream) {
+            // The identity must match the YouTube client that created the link, otherwise googlevideo
+            // refuses it (403) and the video would never start.
+            set("user-agent", com.example.util.OnlineVideoService.userAgentFor(filePath))
+            set("cache", "yes")
+            set("demuxer-max-bytes", "192MiB")
+            set("demuxer-max-back-bytes", "32MiB")
+            set("demuxer-readahead-secs", "180")
+            set("cache-pause", "yes")
+            // Starts only after a few seconds are buffered, so the video then plays smoothly.
+            set("cache-pause-initial", "yes")
+            set("cache-pause-wait", "4")
+            set("network-timeout", "20")
+            set("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5")
+        } else {
+            set("demuxer-readahead-secs", "1")
+        }
     }
 
     private fun loadVideoInternal(filePath: String, startPositionMs: Long = 0L) {
@@ -1076,6 +1078,11 @@ class MpvPlayerController {
         try {
             val startSec = initialPos / 1000.0
             applyStreamCacheOptions(view, filePath)
+            try {
+                // Online: begin downloading AT the wanted second (quality change / resume) instead of at 0:00.
+                // Always cleared for every other file so it can never leak into the next video.
+                view.mpv.setPropertyString("start", if (isOnlineStream && initialPos > 500L) "+$startSec" else "none")
+            } catch (_: Throwable) {}
             try {
                 // Do not disable native track selection while a new file is opening.
                 // mpv's auto mode is responsible for honoring container/Matroska
@@ -1149,7 +1156,10 @@ class MpvPlayerController {
                 if (initialPos > 500L) {
                     val sec = initialPos / 1000.0
                     var confirmed = false
-                    for (attempt in 0..20) {
+                    // A network stream can take many seconds to open; wait for it (up to ~30 s) instead of
+                    // giving up after 2 s and letting the video play from the beginning.
+                    val maxAttempts = if (isOnlineStream) 300 else 20
+                    for (attempt in 0..maxAttempts) {
                         if (confirmed || isReleased) break
                         delay(if (attempt == 0) 50L else 100L)
                         try {
@@ -1161,7 +1171,7 @@ class MpvPlayerController {
                                 isResumeSeekVerified = true
                                 _currentPositionMs.value = realPosMs
                                 _isBuffering.value = false
-                            } else {
+                            } else if (!isOnlineStream || realPosMs >= 0L) {
                                 try {
                                     v.mpv.command("seek", "$sec", "absolute+exact")
                                 } catch (_: Throwable) {
