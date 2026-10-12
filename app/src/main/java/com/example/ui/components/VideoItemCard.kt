@@ -300,17 +300,6 @@ fun VideoItemCard(
                     )
                 }
 
-                if (video.isOnline && !video.channelName.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = listOfNotNull(video.channelName, video.viewCountText).joinToString(" • "),
-                        fontSize = 11.5.sp,
-                        color = if (isDark) DarkTextSecondary else LightTextSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
                 Spacer(modifier = Modifier.height(6.dp))
 
                 // Badges & details row
@@ -616,17 +605,6 @@ fun VideoItemGridCard(
                     maxLines = if (visibleFields.showFullName) 3 else 2,
                     overflow = TextOverflow.Ellipsis,
                     lineHeight = 17.sp
-                )
-            }
-
-            if (video.isOnline && !video.channelName.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = listOfNotNull(video.channelName, video.viewCountText).joinToString(" • "),
-                    fontSize = 11.sp,
-                    color = if (isDark) DarkTextSecondary else LightTextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
                 )
             }
 

@@ -36,53 +36,7 @@ class VideoPlayerMpvView @JvmOverloads constructor(
         })
     }
 
-    /**
-     * mpv's network layer (ffmpeg TLS) has no list of trusted certificate authorities on Android unless the app
-     * supplies one. Without it EVERY https address (all YouTube streams) is refused silently - the video never
-     * starts and no data is downloaded. The list is built once from the phone's own trusted certificates.
-     */
-    private fun prepareCaBundle(): File? {
-        return try {
-            val out = File(context.filesDir, "cacert.pem")
-            val fresh = out.exists() && out.length() > 20_000L &&
-                System.currentTimeMillis() - out.lastModified() < 30L * 24 * 60 * 60 * 1000
-            if (fresh) return out
-            val beginMark = "-----BEGIN CERTIFICATE-----"
-            val endMark = "-----END CERTIFICATE-----"
-            val sb = StringBuilder()
-            for (dirPath in listOf("/apex/com.android.conscrypt/cacerts", "/system/etc/security/cacerts")) {
-                val files = File(dirPath).listFiles() ?: continue
-                for (f in files) {
-                    try {
-                        val text = f.readText()
-                        val begin = text.indexOf(beginMark)
-                        val end = text.indexOf(endMark, begin + 1)
-                        if (begin >= 0 && end > begin) {
-                            sb.append(text, begin, end + endMark.length).append('\n')
-                        }
-                    } catch (_: Throwable) {}
-                }
-            }
-            if (sb.length < 20_000) return null
-            out.writeText(sb.toString())
-            out
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
     override fun initOptions() {
-        // ---- Network (online videos): trusted certificates, no external downloader ----
-        val caBundle = prepareCaBundle()
-        if (caBundle != null) {
-            mpv.setOptionString("tls-ca-file", caBundle.absolutePath)
-            mpv.setOptionString("tls-verify", "yes")
-        } else {
-            // Last resort so that online videos still work on devices where the certificates cannot be read.
-            mpv.setOptionString("tls-verify", "no")
-        }
-        mpv.setOptionString("ytdl", "no")
-
         mpv.setOptionString("profile", "fast")
         mpv.setOptionString("vo", "gpu")
         mpv.setOptionString("gpu-context", "android")
