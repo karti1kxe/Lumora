@@ -1580,12 +1580,13 @@ fun VideoPlayerScreen(
         option: com.example.util.OnlineVideoOption,
         key: String,
         preferredAudioLabel: String?,
-        token: Int
+        token: Int,
+        playUrl: String
     ) {
         coroutineScope.launch {
             // mpv has to have opened THIS stream before tracks can be attached.
             var waited = 0
-            while (!controller.isStreamOpen(option.url) && waited < 200 &&
+            while (!controller.isStreamOpen(playUrl) && waited < 200 &&
                 lastLoadedVideoKey == key && onlineAttemptToken == token
             ) {
                 kotlinx.coroutines.delay(100)
@@ -1602,20 +1603,31 @@ fun VideoPlayerScreen(
                         ?: audios.firstOrNull { it.isOriginal }
                         ?: audios.firstOrNull()
                     if (first != null) {
-                        controller.addExternalAudio(first.url, first.label, first.language, select = true)
+                        controller.addExternalAudio(
+                            com.example.player.OnlineStreamProxy.urlFor(first.url, mime = "audio/mp4"),
+                            first.label, first.language, select = true
+                        )
                     }
                     for (a in audios) {
                         if (a === first) continue
                         if (lastLoadedVideoKey != key || onlineAttemptToken != token) return@withContext
                         kotlinx.coroutines.delay(120)
-                        controller.addExternalAudio(a.url, a.label, a.language, select = false)
+                        controller.addExternalAudio(
+                            com.example.player.OnlineStreamProxy.urlFor(a.url, mime = "audio/mp4"),
+                            a.label, a.language, select = false
+                        )
                     }
                 }
                 for (sub in session.subtitleOptions) {
                     if (lastLoadedVideoKey != key || onlineAttemptToken != token) return@withContext
                     kotlinx.coroutines.delay(100)
                     try {
-                        controller.addExternalSubtitle(sub.url, context, sub.label, select = false)
+                        controller.addExternalSubtitle(
+                            com.example.player.OnlineStreamProxy.urlFor(
+                                sub.url, rangeCapable = false, mime = "text/vtt", suffix = ".vtt"
+                            ),
+                            context, sub.label, select = false
+                        )
                     } catch (_: Throwable) {}
                 }
             }
@@ -1635,20 +1647,9 @@ fun VideoPlayerScreen(
         val primary = session.optionFor(qualityLabel)
         val candidates = ArrayList<com.example.util.OnlineVideoOption>()
         if (primary != null) candidates.add(primary)
-        // Try every compatible progressive (video+audio) stream, not just the first one.
-        // A single muxed URL can also be expired/blocked, so retaining only one fallback
-        // caused otherwise playable videos to fail without trying the remaining streams.
-        session.muxedOptions
-            .filter { primary == null || it.height <= primary.height }
-            .sortedByDescending { it.height }
-            .forEach { option ->
-                if (candidates.none { it.url == option.url }) candidates.add(option)
-            }
-        session.hlsUrl?.let { hls ->
-            if (candidates.none { it.url == hls }) {
-                candidates.add(com.example.util.OnlineVideoOption("HLS", 0, hls, 0, "", false))
-            }
-        }
+        session.muxedOptions.firstOrNull { primary == null || it.height <= primary.height }
+            ?.let { m -> if (candidates.none { it.url == m.url }) candidates.add(m) }
+        session.hlsUrl?.let { candidates.add(com.example.util.OnlineVideoOption("HLS", 0, it, 0, "", false)) }
 
         if (attempt >= candidates.size) {
             isPlaying = false
@@ -1668,10 +1669,13 @@ fun VideoPlayerScreen(
         onlineSession = session
         onlineQuality = qualityLabel ?: com.example.util.OnlineVideoSession.AUTO_QUALITY
         controller.isOnlineStream = true
-        controller.loadVideo(option.url, startPositionMs = startMs)
+        // Like Online Music: the stream is fetched in small Range chunks with OkHttp (through a local proxy)
+        // because YouTube refuses the open-ended requests mpv would send on its own.
+        val playUrl = if (option.height > 0) com.example.player.OnlineStreamProxy.urlFor(option.url, mime = "video/mp4") else option.url
+        controller.loadVideo(playUrl, startPositionMs = startMs)
         controller.play()
         isPlaying = true
-        attachOnlineTracks(session, option, key, preferredAudioLabel, token)
+        attachOnlineTracks(session, option, key, preferredAudioLabel, token, playUrl)
 
         // Watchdog: the stream must open within 15 seconds (or mpv drops it earlier), else try the next way.
         coroutineScope.launch {
@@ -1680,7 +1684,7 @@ fun VideoPlayerScreen(
                 kotlinx.coroutines.delay(250)
                 waitedMs += 250
                 if (lastLoadedVideoKey != key || onlineAttemptToken != token) return@launch
-                if (controller.isStreamOpen(option.url)) return@launch
+                if (controller.isStreamOpen(playUrl)) return@launch
                 if (waitedMs >= 4_000L && controller.isStreamIdle()) break
             }
             if (lastLoadedVideoKey == key && onlineAttemptToken == token) {
