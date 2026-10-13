@@ -408,9 +408,18 @@ class MpvPlayerController {
                 view.mpv.setPropertyString("cache-pause", "yes")
                 view.mpv.setPropertyString("cache-pause-wait", "3")
                 view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=5")
+                // The app-wide "fast" profile renders with bilinear scalers, which makes a chosen 720p/1080p stream look
+                // soft. Online videos get proper scalers so the selected quality is really visible.
+                view.mpv.setPropertyString("scale", "spline36")
+                view.mpv.setPropertyString("dscale", "mitchell")
+                view.mpv.setPropertyString("cscale", "bilinear")
+                view.mpv.setPropertyString("correct-downscaling", "yes")
                 streamingProfileApplied = true
             } else if (streamingProfileApplied) {
                 view.mpv.setPropertyString("cache", "auto")
+                view.mpv.setPropertyString("scale", "bilinear")
+                view.mpv.setPropertyString("dscale", "bilinear")
+                view.mpv.setPropertyString("correct-downscaling", "no")
                 view.mpv.setPropertyString("demuxer-readahead-secs", "1")
                 view.mpv.setPropertyString("cache-pause-wait", "1")
                 streamingProfileApplied = false

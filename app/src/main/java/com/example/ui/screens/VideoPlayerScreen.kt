@@ -84,6 +84,7 @@ import com.example.player.OnlineAudioSource
 import com.example.player.PlayerVideoChapter
 import com.example.util.OnlineVideoPlayback
 import com.example.util.OnlineVideoService
+import com.example.util.OnlineVideoQuality
 import com.example.player.OnlineSkipMarkerService
 import com.example.player.EqualizerPreset
 import com.example.player.TrackAudioConfig
@@ -515,6 +516,8 @@ fun VideoPlayerScreen(
     // ---- Online video (YouTube via NewPipeExtractor): resolved streams of the video that is playing ----
     var onlinePlayback by remember(currentVideo) { mutableStateOf<OnlineVideoPlayback?>(null) }
     var selectedOnlineQuality by remember(currentVideo) { mutableStateOf<String?>(null) }
+    // true = "Auto": quality follows the internet speed (default until the user picks a fixed quality)
+    var onlineAutoMode by remember(currentVideo) { mutableStateOf(false) }
     val onlinePrefs = remember { context.getSharedPreferences("lumora_online_video", android.content.Context.MODE_PRIVATE) }
 
 
@@ -572,7 +575,11 @@ fun VideoPlayerScreen(
             return
         }
         onlinePlayback = pb
-        val q = OnlineVideoService.pickDefaultQuality(pb.qualities, onlinePrefs.getString("quality", null)) ?: return
+        val savedQuality = onlinePrefs.getString("quality", null)
+        val auto = savedQuality == null || savedQuality == OnlineVideoService.AUTO_QUALITY
+        val q = (if (auto) OnlineVideoService.pickAutoQuality(context, pb.qualities) else null)
+            ?: OnlineVideoService.pickDefaultQuality(pb.qualities, if (auto) null else savedQuality) ?: return
+        onlineAutoMode = auto
         selectedOnlineQuality = q.label
         val audios = if (q.isVideoOnly) pb.audios.map { OnlineAudioSource(it.url, it.title, it.language) } else emptyList()
         controller.setOnlineStream(true, audios, 0, onlineChaptersOf(pb))
@@ -2082,19 +2089,79 @@ fun VideoPlayerScreen(
     val isBuffering by controller.isBuffering.collectAsState()
     val bufferedPositionMs by controller.bufferedPositionMs.collectAsState()
 
-    /** Quality switch: same moment, same position, same audio track — the stream is just reloaded in the new quality. */
-    fun switchOnlineQuality(label: String) {
+    /** Loads [q] at the current position (same moment, same audio track) without touching the saved preference. */
+    fun applyOnlineQuality(q: OnlineVideoQuality) {
         val pb = onlinePlayback ?: return
-        val q = pb.qualities.firstOrNull { it.label == label } ?: return
-        if (q.label == selectedOnlineQuality) return
         val pos = controller.currentPositionMs.value
         val audioIdx = controller.currentOnlineAudioIndex()
-        selectedOnlineQuality = label
-        onlinePrefs.edit().putString("quality", label).apply()
+        selectedOnlineQuality = q.label
         val audios = if (q.isVideoOnly) pb.audios.map { OnlineAudioSource(it.url, it.title, it.language) } else emptyList()
         controller.setOnlineStream(true, audios, audioIdx, onlineChaptersOf(pb))
         controller.loadVideo(q.url, pos)
         controller.play()
+    }
+
+    /** Quality menu: "Auto" or a fixed quality. Either way the stream is reloaded at the same second. */
+    fun switchOnlineQuality(label: String) {
+        val pb = onlinePlayback ?: return
+        if (label == OnlineVideoService.AUTO_QUALITY) {
+            onlineAutoMode = true
+            onlinePrefs.edit().putString("quality", OnlineVideoService.AUTO_QUALITY).apply()
+            val target = OnlineVideoService.pickAutoQuality(context, pb.qualities) ?: return
+            if (target.label != selectedOnlineQuality) applyOnlineQuality(target)
+            return
+        }
+        val q = pb.qualities.firstOrNull { it.label == label } ?: return
+        onlineAutoMode = false
+        onlinePrefs.edit().putString("quality", label).apply()
+        if (q.label == selectedOnlineQuality) return
+        applyOnlineQuality(q)
+    }
+
+    // Auto quality: drop a step when playback keeps stalling, climb a step when the read-ahead cache stays full.
+    LaunchedEffect(onlinePlayback, onlineAutoMode) {
+        val pb = onlinePlayback ?: return@LaunchedEffect
+        if (!onlineAutoMode || pb.qualities.size < 2) return@LaunchedEffect
+        var lastSwitchAt = System.currentTimeMillis()
+        var bufferingSince = 0L
+        var healthySince = 0L
+        val failedUp = HashMap<String, Long>()
+        while (true) {
+            delay(1000L)
+            val now = System.currentTimeMillis()
+            val cur = selectedOnlineQuality ?: continue
+            val buffering = controller.isBuffering.value
+            val ahead = controller.bufferedPositionMs.value - controller.currentPositionMs.value
+            if (now - lastSwitchAt < 15000L) { bufferingSince = 0L; healthySince = 0L; continue }
+            if (buffering && ahead < 2000L) {
+                if (bufferingSince == 0L) bufferingSince = now
+                healthySince = 0L
+            } else {
+                bufferingSince = 0L
+            }
+            if (bufferingSince != 0L && now - bufferingSince >= 4000L) {
+                val lower = OnlineVideoService.stepQuality(pb.qualities, cur, up = false)
+                if (lower != null) {
+                    failedUp[cur] = now
+                    applyOnlineQuality(lower)
+                    lastSwitchAt = now
+                }
+                bufferingSince = 0L
+            } else if (!buffering && controller.isPlaying.value && ahead >= 90_000L) {
+                if (healthySince == 0L) healthySince = now
+                if (now - healthySince >= 20_000L) {
+                    val higher = OnlineVideoService.stepQuality(pb.qualities, cur, up = true)
+                    val blockedUntil = higher?.let { failedUp[it.label] }?.let { it + 180_000L } ?: 0L
+                    if (higher != null && now >= blockedUntil) {
+                        applyOnlineQuality(higher)
+                        lastSwitchAt = now
+                    }
+                    healthySince = 0L
+                }
+            } else if (!buffering) {
+                healthySince = 0L
+            }
+        }
     }
 
     val playlistNames = remember(playlist) {
@@ -2903,8 +2970,8 @@ fun VideoPlayerScreen(
             },
             chapters = realChapters,
             bufferedPositionMs = bufferedPositionMs,
-            availableVideoQualities = onlinePlayback?.qualities?.map { it.label } ?: emptyList(),
-            selectedVideoQuality = selectedOnlineQuality,
+            availableVideoQualities = onlinePlayback?.qualities?.map { it.label }?.let { listOf(OnlineVideoService.AUTO_QUALITY) + it } ?: emptyList(),
+            selectedVideoQuality = if (onlineAutoMode) "${OnlineVideoService.AUTO_QUALITY} (${selectedOnlineQuality ?: "…"})" else selectedOnlineQuality,
             onSelectVideoQuality = { label -> switchOnlineQuality(label) },
             showBufferedRange = uiState.playerSettings.showBufferedRange || currentVideo?.isOnline == true,
             thumbFastPreview = uiState.playerSettings.thumbFastPreview,

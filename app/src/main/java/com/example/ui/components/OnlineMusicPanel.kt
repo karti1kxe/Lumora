@@ -3,7 +3,11 @@ package com.example.ui.components
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import com.example.util.OnlineMediaLibrary
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -113,7 +117,8 @@ fun OnlineMusicPanel(
     sortField: SortField = SortField.TITLE,
     sortDirection: SortDirection = SortDirection.ASCENDING,
     onOpenChannel: ((OnlineChannelResult) -> Unit)? = null,
-    onOpenSharedPlaylist: ((com.example.util.OnlinePlaylistDetail) -> Unit)? = null
+    onOpenSharedPlaylist: ((com.example.util.OnlinePlaylistDetail) -> Unit)? = null,
+    glassBlurTransparency: Float = 85f
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -139,6 +144,23 @@ fun OnlineMusicPanel(
 
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
+
+    // ---- swipe (right -> left) quick actions: nothing is selected, the bar just appears at the bottom ----
+    var actionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    if (actionTarget != null) lastActionTarget = actionTarget
+    var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    var watchLaterTracks by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
+    var hiddenVersion by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        OnlineMediaLibrary.attach(context)
+        watchLaterTracks = withContext(Dispatchers.IO) { OnlineMediaLibrary.watchLater(context, OnlineMediaLibrary.KIND_AUDIO) }
+    }
+    val hiddenUrls = remember(hiddenVersion) { OnlineMediaLibrary.notInterestedSet(context, OnlineMediaLibrary.KIND_AUDIO) }
+    BackHandler(enabled = actionTarget != null) { actionTarget = null }
+    LaunchedEffect(listState.isScrollInProgress, gridState.isScrollInProgress) {
+        if (listState.isScrollInProgress || gridState.isScrollInProgress) actionTarget = null
+    }
 
     // Search query tracking with cancellation
     var searchJob by remember { mutableStateOf<Job?>(null) }
@@ -493,6 +515,13 @@ fun OnlineMusicPanel(
         }
     }
 
+    // Watch-later songs are pinned above everything else in the feed; "Not interested" ones never show.
+    val shownTracks = remember(sortedTracks, isFeedMode, watchLaterTracks, hiddenUrls) {
+        val pinned = if (isFeedMode) watchLaterTracks.filter { it.videoUrl !in hiddenUrls } else emptyList()
+        val pinnedUrls = pinned.map { it.videoUrl }.toSet()
+        pinned + sortedTracks.filter { it.videoUrl !in pinnedUrls && it.videoUrl !in hiddenUrls }
+    }
+
     LaunchedEffect(sortedTracks) {
         withContext(Dispatchers.IO) {
             sortedTracks.take(15).forEach { trackResult ->
@@ -589,7 +618,7 @@ fun OnlineMusicPanel(
                                 )
                             }
                         }
-                        items(sortedTracks, key = { it.videoUrl }) { result ->
+                        items(shownTracks, key = { it.videoUrl }) { result ->
                             val baseTrackItem = remember(result, metaUpdateTrigger) { result.toAudioTrackItem() }
                             val isCurrent = currentPlayingTrack?.path == "$ONLINE_TRACK_PATH_PREFIX${result.videoUrl}"
                             val progress = if (isCurrent && baseTrackItem.durationMs > 0) {
@@ -600,14 +629,16 @@ fun OnlineMusicPanel(
                             }
                             val trackItem = if (progress != baseTrackItem.playbackProgress) baseTrackItem.copy(playbackProgress = progress) else baseTrackItem
 
-                            AudioTrackGridCard(
-                                track = trackItem,
-                                isCurrent = isCurrent,
-                                isPlaying = isCurrent && isPlaying,
-                                isDark = isDark,
-                                visibleFields = visibleFields.copy(showExtension = false),
-                                onClick = { playOnlineTrack(result) }
-                            )
+                            Box(Modifier.swipeLeftForActions { actionTarget = result }) {
+                                AudioTrackGridCard(
+                                    track = trackItem,
+                                    isCurrent = isCurrent,
+                                    isPlaying = isCurrent && isPlaying,
+                                    isDark = isDark,
+                                    visibleFields = visibleFields.copy(showExtension = false),
+                                    onClick = { actionTarget = null; playOnlineTrack(result) }
+                                )
+                            }
                         }
                         if (isLoadingMore) {
                             item(span = { GridItemSpan(2) }) {
@@ -641,7 +672,7 @@ fun OnlineMusicPanel(
                                 )
                             }
                         }
-                        items(sortedTracks, key = { it.videoUrl }) { result ->
+                        items(shownTracks, key = { it.videoUrl }) { result ->
                             val baseTrackItem = remember(result, metaUpdateTrigger) { result.toAudioTrackItem() }
                             val isCurrent = currentPlayingTrack?.path == "$ONLINE_TRACK_PATH_PREFIX${result.videoUrl}"
                             val progress = if (isCurrent && baseTrackItem.durationMs > 0) {
@@ -652,14 +683,16 @@ fun OnlineMusicPanel(
                             }
                             val trackItem = if (progress != baseTrackItem.playbackProgress) baseTrackItem.copy(playbackProgress = progress) else baseTrackItem
 
-                            AudioTrackListCard(
-                                track = trackItem,
-                                isCurrent = isCurrent,
-                                isPlaying = isCurrent && isPlaying,
-                                isDark = isDark,
-                                visibleFields = visibleFields.copy(showExtension = false),
-                                onClick = { playOnlineTrack(result) }
-                            )
+                            Box(Modifier.swipeLeftForActions { actionTarget = result }) {
+                                AudioTrackListCard(
+                                    track = trackItem,
+                                    isCurrent = isCurrent,
+                                    isPlaying = isCurrent && isPlaying,
+                                    isDark = isDark,
+                                    visibleFields = visibleFields.copy(showExtension = false),
+                                    onClick = { actionTarget = null; playOnlineTrack(result) }
+                                )
+                            }
                         }
                         if (isLoadingMore) {
                             item {
@@ -677,7 +710,75 @@ fun OnlineMusicPanel(
                 }
             }
         }
+
+        // Swipe toolbar
+        androidx.compose.animation.AnimatedVisibility(
+            visible = actionTarget != null,
+            enter = androidx.compose.animation.slideInVertically { it } + androidx.compose.animation.fadeIn(),
+            exit = androidx.compose.animation.slideOutVertically { it } + androidx.compose.animation.fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 18.dp)
+        ) {
+            val t = actionTarget ?: lastActionTarget
+            if (t != null) {
+                val kind = OnlineMediaLibrary.KIND_AUDIO
+                OnlineQuickActionBar(
+                    isDark = isDark,
+                    alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
+                    isSavedForLater = watchLaterTracks.any { it.videoUrl == t.videoUrl },
+                    onPlayNext = {
+                        val track = t.toAudioTrackItem()
+                        val q = AudioPlaybackManager.queue.value.toMutableList()
+                        q.removeAll { it.path == track.path }
+                        val cur = q.indexOfFirst { it.path == AudioPlaybackManager.currentTrack.value?.path }
+                        if (cur >= 0) q.add(cur + 1, track) else q.add(0, track)
+                        AudioPlaybackManager.updateQueue(q)
+                        Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
+                        actionTarget = null
+                    },
+                    onPlayLast = {
+                        val track = t.toAudioTrackItem()
+                        val q = AudioPlaybackManager.queue.value.toMutableList()
+                        q.removeAll { it.path == track.path }
+                        q.add(track)
+                        AudioPlaybackManager.updateQueue(q)
+                        Toast.makeText(context, "Added to queue: ${t.title}", Toast.LENGTH_SHORT).show()
+                        actionTarget = null
+                    },
+                    onSaveToPlaylist = {
+                        OnlineMediaLibrary.rememberMeta(context, kind, t)
+                        playlistTarget = t
+                        actionTarget = null
+                    },
+                    onWatchLater = {
+                        val saved = OnlineMediaLibrary.toggleWatchLater(context, kind, t)
+                        watchLaterTracks = OnlineMediaLibrary.watchLater(context, kind)
+                        Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
+                        actionTarget = null
+                    },
+                    onNotInterested = {
+                        OnlineMediaLibrary.markNotInterested(context, kind, t.videoUrl)
+                        watchLaterTracks = OnlineMediaLibrary.watchLater(context, kind)
+                        hiddenVersion++
+                        Toast.makeText(context, "Okay, you will see fewer songs like this", Toast.LENGTH_SHORT).show()
+                        actionTarget = null
+                    },
+                    onShare = {
+                        shareOnlineLink(context, t.title, t.videoUrl)
+                        actionTarget = null
+                    }
+                )
+            }
+        }
+
+        playlistTarget?.let { t ->
+            AddToPlaylistDialog(
+                selectedAudioTracks = listOf(t.toAudioTrackItem()),
+                isDark = isDark,
+                glassBlurTransparency = glassBlurTransparency,
+                onDismiss = { playlistTarget = null },
+                onPlaylistUpdated = { playlistTarget = null }
+            )
+        }
     }
 }
 }
-

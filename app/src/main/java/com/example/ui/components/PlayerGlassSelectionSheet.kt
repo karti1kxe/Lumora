@@ -3281,7 +3281,7 @@ fun MoreMenuSelectionPanel(
                         icon = Icons.Outlined.HighQuality,
                         title = "Video Quality",
                         subtitle = "Stream resolution: ${selectedOnlineQuality ?: "Auto"}",
-                        badgeValue = selectedOnlineQuality ?: "Auto",
+                        badgeValue = (selectedOnlineQuality ?: "Auto").substringBefore(" ("),
                         onClick = {
                             onOpenVideoQualityDialog()
                         }
@@ -7116,11 +7116,15 @@ fun VideoQualitySelectionPanel(
             contentPadding = PaddingValues(vertical = 4.dp)
         ) {
             items(qualities) { quality ->
-                val isSelected = quality == selectedQuality
+                val isAuto = quality == "Auto"
+                val isSelected = quality == selectedQuality || (isAuto && selectedQuality?.startsWith("Auto") == true)
                 MenuActionItem(
                     icon = Icons.Outlined.HighQuality,
                     title = quality,
-                    subtitle = if (isSelected) "Active stream quality" else "",
+                    subtitle = if (isAuto) {
+                        if (isSelected) "Follows your internet speed · now ${selectedQuality?.substringAfter("(", "")?.substringBefore(")").orEmpty()}"
+                        else "Follows your internet speed"
+                    } else if (isSelected) "Active stream quality" else "",
                     badgeValue = if (isSelected) "✓" else null,
                     onClick = {
                         onSelectQuality(quality)

@@ -1,6 +1,31 @@
 package com.example.ui.components
 
 import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import com.example.R
+import com.example.ui.theme.AccentGradient
+import com.example.ui.theme.AccentPink
+import com.example.ui.theme.AccentSkyBlue
+import com.example.util.OnlineMediaLibrary
+import com.example.util.OnlineVideoQueue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -66,6 +91,10 @@ object OnlineVideoFeedState {
     var refreshRequest by mutableIntStateOf(0)
     /** True once the user changed Sort & View sorting; until then the feed keeps its recommendation order. */
     var sortTouched by mutableStateOf(false)
+    /** "Watch later" videos: always pinned at the very top of the feed. */
+    var watchLater by mutableStateOf<List<OnlineTrackResult>>(emptyList())
+    /** Bumped whenever the "Not interested" list changes so the visible list is recomputed. */
+    var hiddenVersion by mutableIntStateOf(0)
     var initialized = false
     var lastQuery: String = ""
     var extractor: SearchExtractor? = null
@@ -120,7 +149,8 @@ fun OnlineVideoPanel(
     sortDirection: SortDirection,
     onPlayVideo: (VideoItem, List<VideoItem>) -> Unit,
     onOpenChannel: (OnlineChannelResult) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    glassBlurTransparency: Float = 85f
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -131,6 +161,23 @@ fun OnlineVideoPanel(
     val gridState = rememberLazyGridState(st.gridIndex, st.gridOffset)
     var job by remember { mutableStateOf<Job?>(null) }
     val isFeedMode = searchQuery.isBlank()
+
+    // ---- swipe (right -> left) quick actions: nothing is selected, the bar just appears at the bottom ----
+    var actionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    if (actionTarget != null) lastActionTarget = actionTarget
+    var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    LaunchedEffect(Unit) {
+        OnlineMediaLibrary.attach(context)
+        st.watchLater = withContext(Dispatchers.IO) { OnlineMediaLibrary.watchLater(context, OnlineMediaLibrary.KIND_VIDEO) }
+    }
+    val hidden = remember(st.hiddenVersion) {
+        OnlineMediaLibrary.notInterestedSet(context, OnlineMediaLibrary.KIND_VIDEO)
+    }
+    BackHandler(enabled = actionTarget != null) { actionTarget = null }
+    LaunchedEffect(listState.isScrollInProgress, gridState.isScrollInProgress) {
+        if (listState.isScrollInProgress || gridState.isScrollInProgress) actionTarget = null
+    }
 
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
@@ -331,13 +378,38 @@ fun OnlineVideoPanel(
             else -> st.results
         }
     }
+    // Watch-later videos are pinned above everything else in the recommendation feed; hidden ones never show.
+    val shown = remember(sorted, isFeedMode, st.watchLater, hidden) {
+        val pinned = if (isFeedMode) st.watchLater.filter { it.videoUrl !in hidden } else emptyList()
+        val pinnedUrls = pinned.map { it.videoUrl }.toSet()
+        pinned + sorted.filter { it.videoUrl !in pinnedUrls && it.videoUrl !in hidden }
+    }
     val cardFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false)
 
     fun play(r: OnlineTrackResult) {
         OnlineVideoRecommender.recordOpened(context, r.videoUrl, r.artist)
-        val all = sorted.map { it.toOnlineVideoItem() }
-        val item = all.firstOrNull { it.path == "${OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX}${r.videoUrl}" } ?: r.toOnlineVideoItem()
+        val tappedPath = "${OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX}${r.videoUrl}"
+        var all = shown.map { it.toOnlineVideoItem() }
+        val item = all.firstOrNull { it.path == tappedPath } ?: r.toOnlineVideoItem()
+        // Videos queued with "Play next / Play last" are spliced in right after the one that was tapped.
+        val queued = OnlineVideoQueue.items.filter { it.videoUrl != r.videoUrl }.map { it.toOnlineVideoItem() }
+        if (queued.isNotEmpty()) {
+            val queuedPaths = queued.map { it.path }.toSet()
+            val rest = all.filter { it.path !in queuedPaths }
+            val idx = rest.indexOfFirst { it.path == tappedPath }
+            all = if (idx >= 0) rest.take(idx + 1) + queued + rest.drop(idx + 1) else listOf(item) + queued
+        }
+        OnlineVideoQueue.clear()
         onPlayVideo(item, all)
+    }
+
+    fun playQueue() {
+        val q = OnlineVideoQueue.items.toList()
+        if (q.isEmpty()) return
+        OnlineVideoQueue.clear()
+        OnlineVideoRecommender.recordOpened(context, q.first().videoUrl, q.first().artist)
+        val list = q.map { it.toOnlineVideoItem() }
+        onPlayVideo(list.first(), list)
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -347,7 +419,7 @@ fun OnlineVideoPanel(
                     LumoraExpressiveLoadingIndicator(size = 54.dp, isDark = isDark)
                 }
             }
-            st.results.isEmpty() && st.channelResults.isEmpty() -> {
+            shown.isEmpty() && st.channelResults.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
                         if (searchQuery.isNotBlank()) "No online videos found for \"$searchQuery\". Check your internet connection or try a different search."
@@ -373,9 +445,11 @@ fun OnlineVideoPanel(
                             onOpenChannel(ch)
                         })
                     }
-                    items(sorted, key = { "ov_g_${it.videoUrl}" }) { r ->
+                    items(shown, key = { "ov_g_${it.videoUrl}" }) { r ->
                         val v = remember(r) { r.toOnlineVideoItem() }
-                        VideoItemGridCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { play(r) })
+                        Box(Modifier.swipeLeftForActions { actionTarget = r }) {
+                            VideoItemGridCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { actionTarget = null; play(r) })
+                        }
                     }
                     if (st.isLoadingMore) {
                         item(span = { GridItemSpan(2) }) {
@@ -399,9 +473,11 @@ fun OnlineVideoPanel(
                             onOpenChannel(ch)
                         })
                     }
-                    items(sorted, key = { "ov_l_${it.videoUrl}" }) { r ->
+                    items(shown, key = { "ov_l_${it.videoUrl}" }) { r ->
                         val v = remember(r) { r.toOnlineVideoItem() }
-                        VideoItemCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { play(r) })
+                        Box(Modifier.swipeLeftForActions { actionTarget = r }) {
+                            VideoItemCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { actionTarget = null; play(r) })
+                        }
                     }
                     if (st.isLoadingMore) {
                         item {
@@ -412,6 +488,89 @@ fun OnlineVideoPanel(
                     }
                 }
             }
+        }
+
+        // "Play queue" button while videos are waiting in the queue
+        if (OnlineVideoQueue.items.isNotEmpty() && actionTarget == null) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 18.dp)
+                    .shadow(14.dp, RoundedCornerShape(22.dp), ambientColor = AccentSkyBlue.copy(alpha = 0.4f), spotColor = AccentPink.copy(alpha = 0.5f))
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(AccentGradient)
+                    .clickable { playQueue() }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                StyledIcon(drawableRes = R.drawable.lumora_play_solid, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Play queue (${OnlineVideoQueue.items.size})", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+        }
+
+        // Swipe toolbar
+        AnimatedVisibility(
+            visible = actionTarget != null,
+            enter = slideInVertically { it } + fadeIn(),
+            exit = slideOutVertically { it } + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 18.dp)
+        ) {
+            val t = actionTarget ?: lastActionTarget
+            if (t != null) {
+                val kind = OnlineMediaLibrary.KIND_VIDEO
+                OnlineQuickActionBar(
+                    isDark = isDark,
+                    alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
+                    isSavedForLater = st.watchLater.any { it.videoUrl == t.videoUrl },
+                    onPlayNext = {
+                        OnlineMediaLibrary.rememberMeta(context, kind, t)
+                        OnlineVideoQueue.addNext(t)
+                        Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
+                        actionTarget = null
+                    },
+                    onPlayLast = {
+                        OnlineMediaLibrary.rememberMeta(context, kind, t)
+                        OnlineVideoQueue.addLast(t)
+                        Toast.makeText(context, "Added to the end of the queue", Toast.LENGTH_SHORT).show()
+                        actionTarget = null
+                    },
+                    onSaveToPlaylist = {
+                        OnlineMediaLibrary.rememberMeta(context, kind, t)
+                        playlistTarget = t
+                        actionTarget = null
+                    },
+                    onWatchLater = {
+                        val saved = OnlineMediaLibrary.toggleWatchLater(context, kind, t)
+                        st.watchLater = OnlineMediaLibrary.watchLater(context, kind)
+                        if (saved) { st.listIndex = 0; st.listOffset = 0; st.gridIndex = 0; st.gridOffset = 0 }
+                        Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
+                        actionTarget = null
+                    },
+                    onNotInterested = {
+                        OnlineMediaLibrary.markNotInterested(context, kind, t.videoUrl)
+                        OnlineVideoQueue.remove(t.videoUrl)
+                        st.watchLater = OnlineMediaLibrary.watchLater(context, kind)
+                        st.hiddenVersion++
+                        Toast.makeText(context, "Okay, you will see fewer videos like this", Toast.LENGTH_SHORT).show()
+                        actionTarget = null
+                    },
+                    onShare = {
+                        shareOnlineLink(context, t.title, t.videoUrl)
+                        actionTarget = null
+                    }
+                )
+            }
+        }
+
+        playlistTarget?.let { t ->
+            AddToPlaylistDialog(
+                selectedVideos = listOf(t.toOnlineVideoItem()),
+                isDark = isDark,
+                glassBlurTransparency = glassBlurTransparency,
+                onDismiss = { playlistTarget = null },
+                onPlaylistUpdated = { playlistTarget = null }
+            )
         }
     }
 }

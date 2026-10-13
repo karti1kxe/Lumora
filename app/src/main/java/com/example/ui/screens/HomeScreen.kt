@@ -2013,7 +2013,8 @@ fun HomeScreen(
                             sortField = onlineVideoSortField,
                             sortDirection = onlineVideoSortDirection,
                             onPlayVideo = { video, list -> onPlayVideo(video, list) },
-                            onOpenChannel = { ch -> viewModel?.openChannel(ch, isAudioMode = false) }
+                            onOpenChannel = { ch -> viewModel?.openChannel(ch, isAudioMode = false) },
+                            glassBlurTransparency = uiState.glassBlurTransparency
                         )
                     } else if (isSlashSearchMode) {
                         SlashPlaylistFinderContent(

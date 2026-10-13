@@ -76,6 +76,19 @@ fun SharedPlaylistScreen(
     var showSortAndViewDialog by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var selectedTrackForOptions by remember { mutableStateOf<AudioTrackItem?>(null) }
+    // Swipe (right -> left) quick-action toolbar target; nothing is selected or highlighted.
+    var swipeActionTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
+    var lastSwipeActionTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
+    if (swipeActionTrack != null) lastSwipeActionTrack = swipeActionTrack
+    var playlistSaveTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
+    var swipeHiddenVersion by remember { mutableStateOf(0) }
+    val swipeHiddenUrls = remember(swipeHiddenVersion) {
+        com.example.util.OnlineMediaLibrary.notInterestedSet(context, com.example.util.OnlineMediaLibrary.KIND_AUDIO)
+    }
+    var swipeLaterVersion by remember { mutableStateOf(0) }
+    LaunchedEffect(listState.isScrollInProgress, gridState.isScrollInProgress) {
+        if (listState.isScrollInProgress || gridState.isScrollInProgress) swipeActionTrack = null
+    }
 
     // Search and Sort State
     var isSearchActive by remember { mutableStateOf(false) }
@@ -129,11 +142,14 @@ fun SharedPlaylistScreen(
     }
 
     // Filtered and Sorted tracks according to search and sort/view options
-    val filteredAndSortedTracks = remember(allTrackItems, searchQuery, currentSortField, currentSortDirection) {
+    val filteredAndSortedTracks = remember(allTrackItems, searchQuery, currentSortField, currentSortDirection, swipeHiddenUrls) {
+        val visibleTracks = allTrackItems.filter { t ->
+            t.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX) !in swipeHiddenUrls
+        }
         val filtered = if (searchQuery.isBlank()) {
-            allTrackItems
+            visibleTracks
         } else {
-            allTrackItems.filter {
+            visibleTracks.filter {
                 it.title.contains(searchQuery, ignoreCase = true) ||
                 it.artist.contains(searchQuery, ignoreCase = true)
             }
@@ -182,7 +198,9 @@ fun SharedPlaylistScreen(
     val isFullScreenAudioOpen by AudioPlaybackManager.isFullScreenOpen.collectAsState()
 
     BackHandler {
-        if (isFullScreenAudioOpen) {
+        if (swipeActionTrack != null) {
+            swipeActionTrack = null
+        } else if (isFullScreenAudioOpen) {
             AudioPlaybackManager.collapseToMiniPlayer()
         } else if (isSearchActive) {
             isSearchActive = false
@@ -374,8 +392,8 @@ fun SharedPlaylistScreen(
                             isCurrent = isCurrent,
                             isPlaying = isCurrent && isPlaying,
                             isDark = isDark,
-                            onClick = { playPlaylist(startIndex = index, isShuffle = false) },
-                            onMenuClick = { selectedTrackForOptions = trackItem }
+                            onClick = { swipeActionTrack = null; playPlaylist(startIndex = index, isShuffle = false) },
+                            modifier = Modifier.swipeLeftForActions { swipeActionTrack = trackItem }
                         )
                     }
                 }
@@ -434,9 +452,10 @@ fun SharedPlaylistScreen(
                             isCurrent = isCurrent,
                             isPlaying = isCurrent && isPlaying,
                             isDark = isDark,
-                            onClick = { playPlaylist(startIndex = index, isShuffle = false) },
-                            onMenuClick = { selectedTrackForOptions = trackItem },
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 3.dp)
+                            onClick = { swipeActionTrack = null; playPlaylist(startIndex = index, isShuffle = false) },
+                            modifier = Modifier
+                                .padding(horizontal = 12.dp, vertical = 3.dp)
+                                .swipeLeftForActions { swipeActionTrack = trackItem }
                         )
                     }
                 }
@@ -475,6 +494,78 @@ fun SharedPlaylistScreen(
             contentAlignment = Alignment.Center
         ) {
             PlayGradientLogoIcon(size = 32.dp)
+        }
+
+        // Swipe (right -> left) quick-action toolbar
+        AnimatedVisibility(
+            visible = swipeActionTrack != null,
+            enter = slideInVertically { it } + fadeIn(),
+            exit = slideOutVertically { it } + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = if (currentPlayingTrack != null) 92.dp else 18.dp)
+        ) {
+            val t = swipeActionTrack ?: lastSwipeActionTrack
+            if (t != null) {
+                val kind = com.example.util.OnlineMediaLibrary.KIND_AUDIO
+                val trackUrl = t.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
+                val asResult = com.example.util.OnlineTrackResult(
+                    videoUrl = trackUrl,
+                    title = t.title,
+                    artist = t.artist,
+                    durationSec = t.durationMs / 1000L,
+                    thumbnailUrl = t.thumbnailUrl,
+                    uploadDateEpochMs = t.dateModified.takeIf { it > 0L }
+                )
+                val savedLater = remember(swipeLaterVersion, trackUrl) {
+                    com.example.util.OnlineMediaLibrary.isWatchLater(context, kind, trackUrl)
+                }
+                OnlineQuickActionBar(
+                    isDark = isDark,
+                    alphaRatio = (uiState.glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
+                    isSavedForLater = savedLater,
+                    onPlayNext = {
+                        val q = AudioPlaybackManager.queue.value.toMutableList()
+                        q.removeAll { it.path == t.path }
+                        val cur = q.indexOfFirst { it.path == AudioPlaybackManager.currentTrack.value?.path }
+                        if (cur >= 0) q.add(cur + 1, t) else q.add(0, t)
+                        AudioPlaybackManager.updateQueue(q)
+                        Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
+                        swipeActionTrack = null
+                    },
+                    onPlayLast = {
+                        val q = AudioPlaybackManager.queue.value.toMutableList()
+                        q.removeAll { it.path == t.path }
+                        q.add(t)
+                        AudioPlaybackManager.updateQueue(q)
+                        Toast.makeText(context, "Added to queue: ${t.title}", Toast.LENGTH_SHORT).show()
+                        swipeActionTrack = null
+                    },
+                    onSaveToPlaylist = {
+                        com.example.util.OnlineMediaLibrary.rememberMeta(context, kind, asResult)
+                        playlistSaveTrack = t
+                        swipeActionTrack = null
+                    },
+                    onWatchLater = {
+                        val saved = com.example.util.OnlineMediaLibrary.toggleWatchLater(context, kind, asResult)
+                        swipeLaterVersion++
+                        Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
+                        swipeActionTrack = null
+                    },
+                    onNotInterested = {
+                        com.example.util.OnlineMediaLibrary.markNotInterested(context, kind, trackUrl)
+                        swipeHiddenVersion++
+                        Toast.makeText(context, "Okay, you will see fewer songs like this", Toast.LENGTH_SHORT).show()
+                        swipeActionTrack = null
+                    },
+                    onShare = {
+                        shareOnlineLink(context, t.title, trackUrl)
+                        swipeActionTrack = null
+                    }
+                )
+            }
         }
 
         // Minimized Audio Player Pill (if audio is currently playing)
@@ -573,45 +664,14 @@ fun SharedPlaylistScreen(
         )
     }
 
-    // Track 3-Dot Context Options Dialog
-    if (selectedTrackForOptions != null) {
-        val track = selectedTrackForOptions!!
-        TrackOptionsDialog(
-            track = track,
+    // Save a single swiped track into one of the user's audio playlists
+    playlistSaveTrack?.let { t ->
+        AddToPlaylistDialog(
+            selectedAudioTracks = listOf(t),
             isDark = isDark,
-            onDismiss = { selectedTrackForOptions = null },
-            onPlayNext = {
-                val currentQ = AudioPlaybackManager.queue.value.toMutableList()
-                val curIdx = currentQ.indexOfFirst { it.path == AudioPlaybackManager.currentTrack.value?.path }
-                if (curIdx >= 0) {
-                    currentQ.add(curIdx + 1, track)
-                } else {
-                    currentQ.add(0, track)
-                }
-                AudioPlaybackManager.updateQueue(currentQ)
-                Toast.makeText(context, "Will play next: ${track.title}", Toast.LENGTH_SHORT).show()
-                selectedTrackForOptions = null
-            },
-            onAddToQueue = {
-                val currentQ = AudioPlaybackManager.queue.value.toMutableList()
-                currentQ.add(track)
-                AudioPlaybackManager.updateQueue(currentQ)
-                Toast.makeText(context, "Added to queue: ${track.title}", Toast.LENGTH_SHORT).show()
-                selectedTrackForOptions = null
-            },
-            onSaveToPlaylist = {
-                selectedTrackForOptions = null
-                showSaveDialog = true
-            },
-            onShare = {
-                val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_SUBJECT, track.title)
-                    putExtra(Intent.EXTRA_TEXT, "Listen to '${track.title}' by ${track.artist}: ${track.path}")
-                }
-                context.startActivity(Intent.createChooser(sendIntent, "Share Track"))
-                selectedTrackForOptions = null
-            }
+            glassBlurTransparency = uiState.glassBlurTransparency,
+            onDismiss = { playlistSaveTrack = null },
+            onPlaylistUpdated = { playlistSaveTrack = null }
         )
     }
 
@@ -879,7 +939,6 @@ fun SharedTrackListCard(
     isPlaying: Boolean,
     isDark: Boolean,
     onClick: () -> Unit,
-    onMenuClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val surfaceColor = if (isDark) {
@@ -1053,19 +1112,6 @@ fun SharedTrackListCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-
-            // Right: Three-Dot Menu Button
-            IconButton(
-                onClick = onMenuClick,
-                modifier = Modifier.size(40.dp)
-            ) {
-                Icon(
-                    painter = painterResource(id = R.drawable.lumora_menu_dots),
-                    contentDescription = "Options",
-                    tint = secondaryText,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
         }
     }
 }
@@ -1083,7 +1129,6 @@ fun SharedTrackGridCard(
     isPlaying: Boolean,
     isDark: Boolean,
     onClick: () -> Unit,
-    onMenuClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val surfaceColor = if (isDark) {
@@ -1227,17 +1272,6 @@ fun SharedTrackGridCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(
-                    onClick = onMenuClick,
-                    modifier = Modifier.size(24.dp)
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.lumora_menu_dots),
-                        contentDescription = "Options",
-                        tint = secondaryText,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
             }
 
             Spacer(modifier = Modifier.height(2.dp))

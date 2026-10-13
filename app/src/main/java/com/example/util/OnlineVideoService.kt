@@ -167,6 +167,55 @@ object OnlineVideoService {
         return qualities.firstOrNull { it.height <= 1080 } ?: qualities.last()
     }
 
+    /** Label of the "Auto" entry in the quality list: quality follows the internet speed by itself. */
+    const val AUTO_QUALITY = "Auto"
+
+    /** Rough stream bitrate (kbit/s) of a YouTube video-only stream at [height]. */
+    private fun estimatedKbps(height: Int, fps: Int): Int {
+        val base = when {
+            height >= 2160 -> 16000
+            height >= 1440 -> 9000
+            height >= 1080 -> 4500
+            height >= 720 -> 2500
+            height >= 480 -> 1100
+            height >= 360 -> 650
+            height >= 240 -> 350
+            else -> 180
+        }
+        return if (fps > 30) (base * 1.5).toInt() else base
+    }
+
+    /** 30 fps (or lowest-fps) ladder, best first — the steps Auto moves along. */
+    private fun ladder(qualities: List<OnlineVideoQuality>): List<OnlineVideoQuality> {
+        val l = qualities.filter { it.fps <= 30 }
+        return (if (l.isEmpty()) qualities else l).sortedByDescending { it.height }
+    }
+
+    /** First pick for Auto: the best quality (max 1080p) the current network can sustain. */
+    fun pickAutoQuality(context: android.content.Context, qualities: List<OnlineVideoQuality>): OnlineVideoQuality? {
+        val lad = ladder(qualities)
+        if (lad.isEmpty()) return null
+        val kbps = try {
+            val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            cm.getNetworkCapabilities(cm.activeNetwork)?.linkDownstreamBandwidthKbps ?: 0
+        } catch (_: Throwable) { 0 }
+        if (kbps <= 0) return lad.firstOrNull { it.height <= 480 } ?: lad.last()
+        val usable = kbps * 0.6
+        return lad.firstOrNull { it.height <= 1080 && estimatedKbps(it.height, it.fps) * 1.3 <= usable } ?: lad.last()
+    }
+
+    /** One step down (lower = true) or up along the ladder from [currentLabel]; null at the ends (up is capped at 1080p). */
+    fun stepQuality(qualities: List<OnlineVideoQuality>, currentLabel: String, up: Boolean): OnlineVideoQuality? {
+        val lad = ladder(qualities)
+        val cur = qualities.firstOrNull { it.label == currentLabel } ?: return null
+        var idx = lad.indexOfFirst { it.height == cur.height }
+        if (idx < 0) idx = lad.indexOfFirst { it.height <= cur.height }.let { if (it < 0) lad.lastIndex else it }
+        val target = if (up) lad.getOrNull(idx - 1) else lad.getOrNull(idx + 1)
+        if (target == null) return null
+        if (up && target.height > 1080) return null
+        return target
+    }
+
     /** Highest quality not above [maxHeight] for a "like 720p" request — used when preferred label is missing. */
     fun isLiveOrShort(item: StreamInfoItem): Boolean =
         item.streamType == StreamType.LIVE_STREAM || item.streamType == StreamType.AUDIO_LIVE_STREAM ||

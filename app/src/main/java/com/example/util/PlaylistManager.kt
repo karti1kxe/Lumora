@@ -10,6 +10,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import com.example.ui.components.toOnlineVideoItem
 
 data class CustomPlaylist(
     val id: String = UUID.randomUUID().toString(),
@@ -61,6 +62,7 @@ object PlaylistManager {
 
     @Synchronized
     fun getPlaylists(context: Context): List<CustomPlaylist> {
+        OnlineMediaLibrary.attach(context)
         val prefs = getPrefs(context)
         val jsonStr = prefs.getString(KEY_PLAYLISTS, null) ?: return emptyList()
         val list = mutableListOf<CustomPlaylist>()
@@ -223,6 +225,12 @@ object PlaylistManager {
             val matched = videoMap[path]
             if (matched != null) {
                 result.add(matched)
+            } else if (path.startsWith(com.example.util.OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX)) {
+                // Online video saved through the swipe toolbar: rebuild the card from the stored metadata.
+                val url = com.example.util.OnlineVideoService.toWatchUrl(path)
+                val meta = OnlineMediaLibrary.getMeta(OnlineMediaLibrary.KIND_VIDEO, url)
+                    ?: com.example.util.OnlineTrackResult(videoUrl = url, title = url, artist = "", durationSec = 0L, thumbnailUrl = null)
+                result.add(meta.toOnlineVideoItem())
             } else {
                 val f = File(path)
                 if (f.exists()) {
