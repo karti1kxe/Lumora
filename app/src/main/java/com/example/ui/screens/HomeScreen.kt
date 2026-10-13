@@ -184,7 +184,6 @@ import com.example.ui.components.SortDirection
 import com.example.ui.components.bounceClick
 import com.example.ui.components.InlineRenameField
 import com.example.ui.components.SortField
-import com.example.ui.components.OnlineVideoPanel
 import com.example.ui.components.StoragePermissionDialog
 import com.example.ui.components.VideoItemCard
 import com.example.ui.components.VideoItemGridCard
@@ -296,19 +295,6 @@ private fun findFolderInTree(folders: List<VideoFolder>, id: String, path: Strin
     return null
 }
 
-/** Virtual "Online" folder shown at the top of the video folder list (streams videos from the internet). */
-const val ONLINE_VIDEO_FOLDER_PATH = "online-video://folder"
-
-private val ONLINE_VIDEO_FOLDER = VideoFolder(
-    id = "online_video_folder",
-    name = "Online",
-    path = ONLINE_VIDEO_FOLDER_PATH,
-    videoCount = 0,
-    totalSizeBytes = 0L,
-    newVideosCount = 0,
-    isCustom = true
-)
-
 @Composable
 fun HomeScreen(
     uiState: UiState,
@@ -409,27 +395,18 @@ fun HomeScreen(
         )
     }
 
-    // Dedicated Sort & View state for the "Online" VIDEO folder only (isolated from every other folder).
+    // Dedicated Sort & View Options State for the "Online Video" folder ONLY (isolated from every other folder).
     var onlineVideoSortField by remember {
         val loaded = SettingsPreferencesManager.loadSortField(context, "online_video")
-        mutableStateOf(if (loaded == SortField.DATE || loaded == SortField.TITLE) loaded else SortField.TITLE)
+        mutableStateOf(if (loaded == SortField.DATE || loaded == SortField.TITLE) loaded else SortField.DATE)
     }
     var onlineVideoSortDirection by remember { mutableStateOf(SettingsPreferencesManager.loadSortDirection(context, "online_video")) }
     var onlineVideoLayoutMode by remember { mutableStateOf(SettingsPreferencesManager.loadLayoutMode(context, "online_video")) }
     var onlineVideoVisibleFields by remember {
         val loaded = SettingsPreferencesManager.loadVisibleFields(context, "online_video")
-        mutableStateOf(
-            loaded.copy(
-                showSize = false,
-                showPath = false,
-                showSubtitleIndicator = false,
-                showFramerate = false,
-                showVideoCount = false,
-                showNewBadge = false,
-                showFullName = false
-            )
-        )
+        mutableStateOf(loaded.copy(showSize = false, showPath = false, showSubtitleIndicator = false, showFramerate = false, showVideoCount = false, showNewBadge = false, showFullName = false))
     }
+    val isOnlineVideoOpen = com.example.ui.components.OnlineVideoFeedState.isOpen
 
     val viewMode = homeViewMode
 
@@ -683,6 +660,12 @@ fun HomeScreen(
         popFolder()
     }
 
+    BackHandler(enabled = effectiveSelectedTab == NavigationTab.HOME && isOnlineVideoOpen) {
+        searchQuery = ""
+        isSearchActive = false
+        com.example.ui.components.OnlineVideoFeedState.isOpen = false
+    }
+
     // Helper to clear folder stack
     fun clearFolderStack() {
         folderStack.clear()
@@ -862,8 +845,7 @@ fun HomeScreen(
                             var valid = true
 
                             for (stacked in folderStack) {
-                                val matched = if (stacked.path == ONLINE_VIDEO_FOLDER_PATH) stacked
-                                else findFolderInTree(scanned, stacked.id, stacked.path)
+                                val matched = findFolderInTree(scanned, stacked.id, stacked.path)
                                 if (matched != null) {
                                     newStack.add(matched)
                                 } else {
@@ -1599,14 +1581,13 @@ fun HomeScreen(
                     )
                 } else {
                     val headerTitle = when (effectiveSelectedTab) {
-                        NavigationTab.HOME -> currentFolder?.name ?: AppStrings.getTitle(lang)
+                        NavigationTab.HOME -> if (isOnlineVideoOpen) "Online" else (currentFolder?.name ?: AppStrings.getTitle(lang))
                         NavigationTab.MUSIC -> selectedMusicFolder?.name ?: "Music & Audio"
                         NavigationTab.RECENTS -> selectedRecentsFolder?.name ?: "Recently Played"
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.name ?: "Playlists"
                     }
                     val headerSubtitle = when (effectiveSelectedTab) {
-                        NavigationTab.HOME -> currentFolder?.let { folder ->
-                            if (folder.path == ONLINE_VIDEO_FOLDER_PATH) return@let null
+                        NavigationTab.HOME -> if (isOnlineVideoOpen) null else currentFolder?.let { folder ->
                             val vCount = folder.videos.size
                             val fCount = folder.subFolders.size
                             listOfNotNull(
@@ -1636,7 +1617,13 @@ fun HomeScreen(
                         title = headerTitle,
                         subtitle = headerSubtitle,
                         onBackClick = when (effectiveSelectedTab) {
-                            NavigationTab.HOME -> if (currentFolder != null) {
+                            NavigationTab.HOME -> if (isOnlineVideoOpen) {
+                                {
+                                    searchQuery = ""
+                                    isSearchActive = false
+                                    com.example.ui.components.OnlineVideoFeedState.isOpen = false
+                                }
+                            } else if (currentFolder != null) {
                                 {
                                     searchQuery = ""
                                     isSearchActive = false
@@ -1696,7 +1683,7 @@ fun HomeScreen(
                     )
                 ) {
                     val searchPlaceholder = when (effectiveSelectedTab) {
-                        NavigationTab.HOME -> if (currentFolder?.path == ONLINE_VIDEO_FOLDER_PATH) "Search videos, channels online..." else if (currentFolder != null) "Search in ${currentFolder.name}..." else "Search videos, or /playlist (e.g. /Op Anime)..."
+                        NavigationTab.HOME -> if (isOnlineVideoOpen) "Search videos, channels online..." else if (currentFolder != null) "Search in ${currentFolder.name}..." else "Search videos, or /playlist (e.g. /Op Anime)..."
                         NavigationTab.MUSIC -> if (selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) "Search songs, albums, artists online..." else "Search songs, albums, artists..."
                         NavigationTab.RECENTS -> "Search watch history..."
                         NavigationTab.PLAYLISTS -> "Search playlists..."
@@ -2005,14 +1992,27 @@ fun HomeScreen(
 
                 // 5. Main Content Area with Browser-like Liquid Pull-to-Refresh
                 LiquidPullToRefresh(
-                    isRefreshing = isManualRefreshing,
-                    onRefresh = { reloadFolders(true) },
+                    isRefreshing = if (isOnlineVideoOpen) com.example.ui.components.OnlineVideoFeedState.isRefreshing else isManualRefreshing,
+                    onRefresh = {
+                        if (isOnlineVideoOpen) com.example.ui.components.OnlineVideoFeedState.refreshRequest++ else reloadFolders(true)
+                    },
                     isDark = isDark,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
-                    if (isSlashSearchMode) {
+                    if (isOnlineVideoOpen && effectiveSelectedTab == NavigationTab.HOME) {
+                        com.example.ui.components.OnlineVideoPanel(
+                            isDark = isDark,
+                            searchQuery = searchQuery,
+                            layoutMode = onlineVideoLayoutMode,
+                            visibleFields = onlineVideoVisibleFields,
+                            sortField = onlineVideoSortField,
+                            sortDirection = onlineVideoSortDirection,
+                            onPlayVideo = { video, list -> onPlayVideo(video, list) },
+                            onOpenChannel = { ch -> viewModel?.openChannel(ch, isAudioMode = false) }
+                        )
+                    } else if (isSlashSearchMode) {
                         SlashPlaylistFinderContent(
                             searchQuery = searchQuery,
                             rawSlashTerm = rawSlashTerm,
@@ -2278,15 +2278,12 @@ fun HomeScreen(
                                         verticalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
                                         if (searchQuery.isBlank()) {
-                                            item(key = "online_video_folder_empty") {
+                                            item(contentType = "online_video_folder") {
                                                 OnlineFolderCard(
                                                     isDark = isDark,
+                                                    title = "Online Video",
                                                     subtitle = "Search & stream any video online",
-                                                    onClick = {
-                                                        searchQuery = ""
-                                                        isSearchActive = false
-                                                        pushFolder(ONLINE_VIDEO_FOLDER)
-                                                    }
+                                                    onClick = { com.example.ui.components.OnlineVideoFeedState.isOpen = true }
                                                 )
                                             }
                                         }
@@ -2360,15 +2357,12 @@ fun HomeScreen(
                                         verticalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
                                         if (searchQuery.isBlank()) {
-                                            item(span = { GridItemSpan(2) }, key = "online_video_folder_grid") {
+                                            item(span = { GridItemSpan(2) }, contentType = "online_video_folder") {
                                                 OnlineFolderCard(
                                                     isDark = isDark,
+                                                    title = "Online Video",
                                                     subtitle = "Search & stream any video online",
-                                                    onClick = {
-                                                        searchQuery = ""
-                                                        isSearchActive = false
-                                                        pushFolder(ONLINE_VIDEO_FOLDER)
-                                                    }
+                                                    onClick = { com.example.ui.components.OnlineVideoFeedState.isOpen = true }
                                                 )
                                             }
                                         }
@@ -2405,15 +2399,12 @@ fun HomeScreen(
                                         verticalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
                                         if (searchQuery.isBlank()) {
-                                            item(key = "online_video_folder_list") {
+                                            item(contentType = "online_video_folder") {
                                                 OnlineFolderCard(
                                                     isDark = isDark,
+                                                    title = "Online Video",
                                                     subtitle = "Search & stream any video online",
-                                                    onClick = {
-                                                        searchQuery = ""
-                                                        isSearchActive = false
-                                                        pushFolder(ONLINE_VIDEO_FOLDER)
-                                                    }
+                                                    onClick = { com.example.ui.components.OnlineVideoFeedState.isOpen = true }
                                                 )
                                             }
                                         }
@@ -2446,17 +2437,6 @@ fun HomeScreen(
                                 }
                             }
                         }
-                    } else if (currentFolder.path == ONLINE_VIDEO_FOLDER_PATH) {
-                        // ONLINE VIDEO FOLDER: search / recommendations / streaming with the same video cards.
-                        OnlineVideoPanel(
-                            isDark = isDark,
-                            searchQuery = searchQuery,
-                            layoutMode = onlineVideoLayoutMode,
-                            visibleFields = onlineVideoVisibleFields,
-                            sortField = onlineVideoSortField,
-                            sortDirection = onlineVideoSortDirection,
-                            onPlayVideo = onPlayVideo
-                        )
                     } else {
                         // INSIDE FOLDER VIEW: Subfolders + Videos
                         val isFolderEmpty = displayedSubFolders.isEmpty() && displayedVideos.isEmpty()
@@ -2740,7 +2720,7 @@ fun HomeScreen(
             }
 
             AnimatedVisibility(
-                visible = !isSelectionMode && effectiveSelectedTab == NavigationTab.HOME && currentFolder?.path != ONLINE_VIDEO_FOLDER_PATH,
+                visible = !isSelectionMode && effectiveSelectedTab == NavigationTab.HOME,
                 enter = fadeIn() + scaleIn(),
                 exit = fadeOut() + scaleOut(),
                 modifier = Modifier
@@ -3300,7 +3280,7 @@ fun HomeScreen(
                 }
                 val isOnlineAudioFolder = (effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH)
                 val isOnlineFolder = (effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH)
-                val isOnlineVideoFolder = (effectiveSelectedTab == NavigationTab.HOME && currentFolder?.path == ONLINE_VIDEO_FOLDER_PATH)
+                val isOnlineVideoFolder = (effectiveSelectedTab == NavigationTab.HOME && isOnlineVideoOpen)
                 val isOnlinePlaylist = (effectiveSelectedTab == NavigationTab.PLAYLISTS &&
                     selectedPlaylist?.videoPaths?.any {
                         it.startsWith("http://") || it.startsWith("https://") || it.startsWith(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
@@ -3321,7 +3301,7 @@ fun HomeScreen(
                     isMusicMode = isMusic,
                     isRecentsMode = (effectiveSelectedTab == NavigationTab.RECENTS),
                     isPlaylistMode = (effectiveSelectedTab == NavigationTab.PLAYLISTS),
-                    isOnlineMode = isOnlineFolder,
+                    isOnlineMode = isOnlineFolder || isOnlineVideoFolder,
                     isOnlinePlaylist = isOnlinePlaylist,
                     isOnlineAudioFolder = isOnlineAudioFolder,
                     isOnlineVideoFolder = isOnlineVideoFolder,
@@ -3330,6 +3310,7 @@ fun HomeScreen(
                     onSortFieldChange = { newField ->
                         if (isOnlineVideoFolder) {
                             onlineVideoSortField = newField
+                            com.example.ui.components.OnlineVideoFeedState.sortTouched = true
                             SettingsPreferencesManager.saveSortField(context, newField, "online_video")
                         } else if (isOnlineAudioFolder) {
                             onlineAudioSortField = newField
@@ -3357,6 +3338,7 @@ fun HomeScreen(
                     onSortDirectionChange = { newDir ->
                         if (isOnlineVideoFolder) {
                             onlineVideoSortDirection = newDir
+                            com.example.ui.components.OnlineVideoFeedState.sortTouched = true
                             SettingsPreferencesManager.saveSortDirection(context, newDir, "online_video")
                         } else if (isOnlineAudioFolder) {
                             onlineAudioSortDirection = newDir
@@ -3421,15 +3403,7 @@ fun HomeScreen(
                     },
                     onVisibleFieldsChange = { newFields ->
                         if (isOnlineVideoFolder) {
-                            val sanitizedVideo = newFields.copy(
-                                showSize = false,
-                                showPath = false,
-                                showSubtitleIndicator = false,
-                                showFramerate = false,
-                                showVideoCount = false,
-                                showNewBadge = false,
-                                showFullName = false
-                            )
+                            val sanitizedVideo = newFields.copy(showSize = false, showPath = false, showSubtitleIndicator = false, showFramerate = false, showVideoCount = false, showNewBadge = false, showFullName = false)
                             onlineVideoVisibleFields = sanitizedVideo
                             SettingsPreferencesManager.saveVisibleFields(context, sanitizedVideo, "online_video")
                         } else if (isOnlineAudioFolder) {
@@ -3466,12 +3440,6 @@ fun HomeScreen(
                         }
                     },
                     onDismiss = {
-                        if (isOnlineVideoFolder) {
-                            SettingsPreferencesManager.saveSortField(context, onlineVideoSortField, "online_video")
-                            SettingsPreferencesManager.saveSortDirection(context, onlineVideoSortDirection, "online_video")
-                            SettingsPreferencesManager.saveLayoutMode(context, onlineVideoLayoutMode, "online_video")
-                            SettingsPreferencesManager.saveVisibleFields(context, onlineVideoVisibleFields, "online_video")
-                        }
                         if (isOnlineAudioFolder) {
                             SettingsPreferencesManager.saveSortField(context, onlineAudioSortField, "online_audio")
                             SettingsPreferencesManager.saveSortDirection(context, onlineAudioSortDirection, "online_audio")

@@ -385,7 +385,7 @@ fun SortAndViewOptionsPopup(
                         }
                     )
 
-                    if (!(isOnlineAudioFolder || isOnlineVideoFolder)) {
+                    if (!isOnlineAudioFolder && !isOnlineVideoFolder) {
                         HorizontalDivider(
                             modifier = Modifier.padding(top = 12.dp, bottom = 12.dp),
                             color = dividerColor,
@@ -478,8 +478,50 @@ fun SortAndViewOptionsPopup(
                                 .padding(top = 8.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (isOnlineAudioFolder || isOnlineVideoFolder) {
-                                // ONLINE AUDIO / VIDEO FOLDER:
+                            if (isOnlineVideoFolder) {
+                                // ONLINE VIDEO FOLDER: Thumbnails, Duration, Date, Resolution, Progress Bar
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    FieldChip(
+                                        label = "Thumbnails",
+                                        isActive = visibleFields.showThumbnails,
+                                        modifier = Modifier.weight(1.15f),
+                                        onClick = { onVisibleFieldsChange(visibleFields.copy(showThumbnails = !visibleFields.showThumbnails)) }
+                                    )
+                                    FieldChip(
+                                        label = "Duration",
+                                        isActive = visibleFields.showDuration,
+                                        modifier = Modifier.weight(1.0f),
+                                        onClick = { onVisibleFieldsChange(visibleFields.copy(showDuration = !visibleFields.showDuration)) }
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    FieldChip(
+                                        label = "Date",
+                                        isActive = visibleFields.showDate,
+                                        modifier = Modifier.weight(0.9f),
+                                        onClick = { onVisibleFieldsChange(visibleFields.copy(showDate = !visibleFields.showDate)) }
+                                    )
+                                    FieldChip(
+                                        label = "Resolution",
+                                        isActive = visibleFields.showResolution,
+                                        modifier = Modifier.weight(1.15f),
+                                        onClick = { onVisibleFieldsChange(visibleFields.copy(showResolution = !visibleFields.showResolution)) }
+                                    )
+                                    FieldChip(
+                                        label = "Progress Bar",
+                                        isActive = visibleFields.showProgressBar,
+                                        modifier = Modifier.weight(1.35f),
+                                        onClick = { onVisibleFieldsChange(visibleFields.copy(showProgressBar = !visibleFields.showProgressBar)) }
+                                    )
+                                }
+                            } else if (isOnlineAudioFolder) {
+                                // ONLINE AUDIO FOLDER:
                                 // Keep ONLY: Thumbnails, Duration, Date, Audio Type, Progress Bar (Extension is not offered online)
                                 // COMPLETELY REMOVE: Size, Path, Subtitle Indicator, Framerate, Resolution, Video Count, New Badge, Full Name
                                 Row(
@@ -509,22 +551,12 @@ fun SortAndViewOptionsPopup(
                                         modifier = Modifier.weight(0.9f),
                                         onClick = { onVisibleFieldsChange(visibleFields.copy(showDate = !visibleFields.showDate)) }
                                     )
-                                    if (isOnlineVideoFolder) {
-                                        // Online video: the highest available picture quality (e.g. 4K, 1080p) instead of the audio type.
-                                        FieldChip(
-                                            label = "Resolution",
-                                            isActive = visibleFields.showResolution,
-                                            modifier = Modifier.weight(1.15f),
-                                            onClick = { onVisibleFieldsChange(visibleFields.copy(showResolution = !visibleFields.showResolution)) }
-                                        )
-                                    } else {
-                                        FieldChip(
-                                            label = "Audio Type",
-                                            isActive = visibleFields.showAudioType,
-                                            modifier = Modifier.weight(1.15f),
-                                            onClick = { onVisibleFieldsChange(visibleFields.copy(showAudioType = !visibleFields.showAudioType)) }
-                                        )
-                                    }
+                                    FieldChip(
+                                        label = "Audio Type",
+                                        isActive = visibleFields.showAudioType,
+                                        modifier = Modifier.weight(1.15f),
+                                        onClick = { onVisibleFieldsChange(visibleFields.copy(showAudioType = !visibleFields.showAudioType)) }
+                                    )
                                     FieldChip(
                                         label = "Progress Bar",
                                         isActive = visibleFields.showProgressBar,

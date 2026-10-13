@@ -90,6 +90,7 @@ import com.example.ui.components.LayoutMode
 import com.example.ui.components.ViewMode
 import com.example.ui.components.LumoraExpressiveLoadingIndicator
 import com.example.ui.components.ONLINE_TRACK_PATH_PREFIX
+import com.example.ui.components.toOnlineVideoItem
 import com.example.ui.components.SettingsSheet
 import com.example.ui.components.SortAndViewOptionsPopup
 import com.example.ui.components.SortDirection
@@ -621,6 +622,19 @@ fun ChannelDetailScreen(
                                                 items = sortedTracks,
                                                 key = { "channel_track_grid_${it.videoUrl}" }
                                             ) { track ->
+                                                if (!isAudioMode && onPlayVideo != null) {
+                                                    val vItem = remember(track) { track.toOnlineVideoItem() }
+                                                    com.example.ui.components.VideoItemGridCard(
+                                                        video = vItem,
+                                                        isDark = isDark,
+                                                        visibleFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false),
+                                                        onClick = {
+                                                            com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist)
+                                                            onPlayVideo.invoke(vItem, sortedTracks.map { it.toOnlineVideoItem() })
+                                                        }
+                                                    )
+                                                    return@items
+                                                }
                                                 val trackItem = remember(track) { track.toAudioTrackItem() }
                                                 val isCurrent = currentPlayingTrack?.path == "$ONLINE_TRACK_PATH_PREFIX${track.videoUrl}"
                                                 val progress = if (isCurrent && trackItem.durationMs > 0) {
@@ -659,6 +673,19 @@ fun ChannelDetailScreen(
                                                 items = sortedTracks,
                                                 key = { "channel_track_${it.videoUrl}" }
                                             ) { track ->
+                                                if (!isAudioMode && onPlayVideo != null) {
+                                                    val vItem = remember(track) { track.toOnlineVideoItem() }
+                                                    com.example.ui.components.VideoItemCard(
+                                                        video = vItem,
+                                                        isDark = isDark,
+                                                        visibleFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false),
+                                                        onClick = {
+                                                            com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist)
+                                                            onPlayVideo.invoke(vItem, sortedTracks.map { it.toOnlineVideoItem() })
+                                                        }
+                                                    )
+                                                    return@items
+                                                }
                                                 val trackItem = remember(track) { track.toAudioTrackItem() }
                                                 val isCurrent = currentPlayingTrack?.path == "$ONLINE_TRACK_PATH_PREFIX${track.videoUrl}"
                                                 val progress = if (isCurrent && trackItem.durationMs > 0) {
@@ -707,7 +734,8 @@ fun ChannelDetailScreen(
                         isPlaylistMode = false,
                         isOnlineMode = true,
                         isOnlinePlaylist = false,
-                        isOnlineAudioFolder = true,
+                        isOnlineAudioFolder = isAudioMode,
+                        isOnlineVideoFolder = !isAudioMode,
                         appScale = currentAppScale,
                         glassBlurTransparency = uiState?.glassBlurTransparency ?: 75f,
                         onSortFieldChange = { sortField = it },

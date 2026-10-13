@@ -76,7 +76,7 @@ data class VideoItem(
         get() = displayName.substringAfterLast('.', "MP4").uppercase()
 
     val nameWithoutExtension: String
-        get() = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
+        get() = if (!isOnline && displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
 
     val formattedDate: String
         get() {

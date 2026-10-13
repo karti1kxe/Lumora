@@ -1119,6 +1119,7 @@ fun OnlineFolderCard(
     isDark: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    title: String = "Online",
     subtitle: String = "Search & stream any song online"
 ) {
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
@@ -1153,7 +1154,7 @@ fun OnlineFolderCard(
             Spacer(modifier = Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Online",
+                    text = title,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = primaryText,

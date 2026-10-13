@@ -289,22 +289,25 @@ fun VideoItemCard(
                     )
                 }
 
+                if (video.isOnline) {
+                    val metaLine = listOfNotNull(video.channelName?.takeIf { it.isNotBlank() }, video.viewCountText?.takeIf { it.isNotBlank() }).joinToString(" • ")
+                    if (metaLine.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = metaLine,
+                            fontSize = 11.5.sp,
+                            color = if (isDark) DarkTextSecondary else LightTextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
                 if (visibleFields.showPath && video.path.isNotBlank()) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = video.path,
                         fontSize = 11.sp,
-                        color = if (isDark) DarkTextSecondary else LightTextSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                if (video.isOnline && !video.channelName.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = listOfNotNull(video.channelName, video.viewCountText).joinToString(" • "),
-                        fontSize = 11.5.sp,
                         color = if (isDark) DarkTextSecondary else LightTextSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -320,7 +323,7 @@ fun VideoItemCard(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     // Size Badge
-                    if (visibleFields.showSize) {
+                    if (visibleFields.showSize && !video.isOnline) {
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
@@ -371,7 +374,7 @@ fun VideoItemCard(
                     }
 
                     // Subtitle Badge (e.g. 1ASS, 2ASS, 1SRT, or MSuB if multiple formats exist)
-                    if (visibleFields.showSubtitleIndicator) {
+                    if (visibleFields.showSubtitleIndicator && !video.isOnline) {
                         val subText = resolveSubtitleBadgeText(video.effectiveSubtitleFormats, video.displayName, video.hasSubtitles)
                         if (subText != null) {
                             Box(
@@ -617,17 +620,18 @@ fun VideoItemGridCard(
                     overflow = TextOverflow.Ellipsis,
                     lineHeight = 17.sp
                 )
-            }
-
-            if (video.isOnline && !video.channelName.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = listOfNotNull(video.channelName, video.viewCountText).joinToString(" • "),
-                    fontSize = 11.sp,
-                    color = if (isDark) DarkTextSecondary else LightTextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                if (video.isOnline) {
+                    val metaLine = listOfNotNull(video.channelName?.takeIf { it.isNotBlank() }, video.viewCountText?.takeIf { it.isNotBlank() }).joinToString(" • ")
+                    if (metaLine.isNotEmpty()) {
+                        Text(
+                            text = metaLine,
+                            fontSize = 11.sp,
+                            color = if (isDark) DarkTextSecondary else LightTextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -637,7 +641,7 @@ fun VideoItemGridCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                if (visibleFields.showSize) {
+                if (visibleFields.showSize && !video.isOnline) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
@@ -685,7 +689,7 @@ fun VideoItemGridCard(
                     }
                 }
 
-                if (visibleFields.showSubtitleIndicator) {
+                if (visibleFields.showSubtitleIndicator && !video.isOnline) {
                     val subText = resolveSubtitleBadgeText(video.effectiveSubtitleFormats, video.displayName, video.hasSubtitles)
                     if (subText != null) {
                         Box(
