@@ -514,7 +514,7 @@ fun OnlineVideoPanel(
             visible = actionTarget != null,
             enter = slideInVertically { it } + fadeIn(),
             exit = slideOutVertically { it } + fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 18.dp)
+            modifier = Modifier.align(Alignment.BottomCenter).padding(vertical = 18.dp)
         ) {
             val t = actionTarget ?: lastActionTarget
             if (t != null) {

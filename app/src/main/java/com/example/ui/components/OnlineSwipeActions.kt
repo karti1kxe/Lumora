@@ -16,6 +16,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -124,26 +127,30 @@ fun OnlineQuickActionBar(
             .clip(barShape)
             .background(barBg)
             .border(width = 1.5.dp, brush = AccentGradient, shape = barShape)
-            .padding(horizontal = 4.dp),
+            .padding(horizontal = 0.dp),
         contentAlignment = Alignment.Center
     ) {
+        // Items keep a comfortable fixed width and the row scrolls sideways, so more actions can be added later.
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            QuickActionItem(R.drawable.lumora_next_in_queue, "Play next", Color(0xFF38BDF8), Modifier.weight(1f), onPlayNext)
-            QuickActionItem(R.drawable.lumora_last_in_queue, "Play last", Color(0xFF818CF8), Modifier.weight(1f), onPlayLast)
-            QuickActionItem(R.drawable.lumora_playlist_video, "Playlist", Color(0xFFF472B6), Modifier.weight(1f), onSaveToPlaylist)
+            QuickActionItem(R.drawable.lumora_next_in_queue, "Play next", Color(0xFF38BDF8), Modifier.width(78.dp), onPlayNext)
+            QuickActionItem(R.drawable.lumora_last_in_queue, "Play last", Color(0xFF818CF8), Modifier.width(78.dp), onPlayLast)
+            QuickActionItem(R.drawable.lumora_playlist_video, "Playlist", Color(0xFFF472B6), Modifier.width(78.dp), onSaveToPlaylist)
             QuickActionItem(
                 R.drawable.lumora_watch_later,
                 if (isSavedForLater) "Remove" else "Watch later",
                 Color(0xFFA78BFA),
-                Modifier.weight(1f),
+                Modifier.width(78.dp),
                 onWatchLater
             )
-            QuickActionItem(R.drawable.lumora_block, "Not interested", Color(0xFFEF4444), Modifier.weight(1f), onNotInterested)
-            QuickActionItem(R.drawable.lumora_share, "Share", primaryText, Modifier.weight(1f), onShare)
+            QuickActionItem(R.drawable.lumora_block, "Not interested", Color(0xFFEF4444), Modifier.width(78.dp), onNotInterested)
+            QuickActionItem(R.drawable.lumora_share, "Share", primaryText, Modifier.width(78.dp), onShare)
         }
     }
 }

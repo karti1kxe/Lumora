@@ -716,7 +716,7 @@ fun OnlineMusicPanel(
             visible = actionTarget != null,
             enter = androidx.compose.animation.slideInVertically { it } + androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.slideOutVertically { it } + androidx.compose.animation.fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 18.dp)
+            modifier = Modifier.align(Alignment.BottomCenter).padding(vertical = 18.dp)
         ) {
             val t = actionTarget ?: lastActionTarget
             if (t != null) {
