@@ -1115,7 +1115,12 @@ fun AudioMusicTabContent(
 @OptIn(ExperimentalFoundationApi::class)
 /** Virtual folder card for Online Music — sits above real device folders, never selectable/renameable. */
 @Composable
-fun OnlineFolderCard(isDark: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun OnlineFolderCard(
+    isDark: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    subtitle: String = "Search & stream any song online"
+) {
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
@@ -1156,7 +1161,7 @@ fun OnlineFolderCard(isDark: Boolean, onClick: () -> Unit, modifier: Modifier = 
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "Search & stream any song online",
+                    text = subtitle,
                     fontSize = 12.sp,
                     color = secondaryText,
                     maxLines = 1,

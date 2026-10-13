@@ -24,6 +24,7 @@ import org.schabi.newpipe.extractor.playlist.PlaylistInfoItem
 import org.json.JSONObject
 import org.json.JSONArray
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 /**
  * One search result from Online Music search. Distinct from AudioTrackItem on purpose:
@@ -99,7 +100,15 @@ data class OnlineChannelDetail(
  */
 object OnlineMusicService {
     private const val TAG = "OnlineMusicService"
-    private val httpClient = OkHttpClient.Builder().build()
+    // Bound every blocking NewPipe HTTP request. Coroutine timeouts alone cannot reliably
+    // interrupt OkHttp's synchronous execute() while it is blocked in socket I/O.
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(12, TimeUnit.SECONDS)
+        .callTimeout(25, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
 
     @Volatile
     private var initialized = false
@@ -112,6 +121,9 @@ object OnlineMusicService {
             initialized = true
         }
     }
+
+    /** Lets the online VIDEO service share the same NewPipe initialisation. */
+    fun ensureNewPipeReady() = ensureInit()
 
     /** Minimal NewPipeExtractor Downloader implementation backed by OkHttp. */
     private class OkHttpNewPipeDownloader(private val client: OkHttpClient) : Downloader() {

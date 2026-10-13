@@ -118,6 +118,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.HighQuality
 import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import androidx.compose.material.icons.automirrored.filled.VolumeMute
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
@@ -2096,6 +2097,21 @@ fun VideoPlayerOverlay(
                         onClick = {
                             notifyInteraction()
                             openRootPanel(PlayerPanelType.VIDEO_ZOOM)
+                        }
+                    )
+                }
+                PlayerControlId.VIDEO_QUALITY -> {
+                    // Quality only exists for online videos; for a local file the shortcut explains itself.
+                    FloatingCircleButton(
+                        icon = Icons.Outlined.HighQuality,
+                        contentDescription = "Video Quality",
+                        onClick = {
+                            notifyInteraction()
+                            if (availableVideoQualities.isNotEmpty()) {
+                                openRootPanel(PlayerPanelType.VIDEO_QUALITY)
+                            } else {
+                                notifyAction("Quality is available for online videos")
+                            }
                         }
                     )
                 }

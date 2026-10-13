@@ -508,6 +508,11 @@ fun VideoPlayerScreen(
 
     var lastLoadedVideoKey by remember { mutableStateOf<String?>(null) }
 
+    // Online video (internet stream): the resolved streams of the playing video + the quality the user picked.
+    var onlineSession by remember { mutableStateOf<com.example.util.OnlineVideoSession?>(null) }
+    var onlineQuality by remember { mutableStateOf<String?>(null) }
+    var onlineAttemptToken by remember { mutableIntStateOf(0) }
+
     // Video thumbnail / first frame state
     val thumbnailCacheKey = remember(currentVideo, uiState.thumbnailStrategy, uiState.thumbnailQuality, uiState.thumbnailFallbackSecond) {
         currentVideo?.let { "${it.id}|${it.path}|${uiState.thumbnailStrategy.name}|${uiState.thumbnailQuality.name}" }
@@ -530,7 +535,7 @@ fun VideoPlayerScreen(
     LaunchedEffect(currentVideo) {
         if (currentVideo != null) {
             com.example.util.MediaSeenManager.markSeen(context, currentVideo.path, currentVideo.id)
-            if (thumbnailBitmap == null) {
+            if (thumbnailBitmap == null && !com.example.util.isOnlineVideoPath(currentVideo.path)) {
                 val bmp = loadVideoThumbnail(context, currentVideo.id, currentVideo.uri, currentVideo.path, strategy = uiState.thumbnailStrategy, quality = uiState.thumbnailQuality, fallbackSecond = uiState.thumbnailFallbackSecond)
                 if (bmp != null) {
                     thumbnailBitmap = bmp
@@ -1566,6 +1571,190 @@ fun VideoPlayerScreen(
      * updates index & UI state, loads the target media source into MPV engine,
      * and manages subtitle fonts & chapters consistently.
      */
+    // ---------------------------------------------------------------------------------------------
+    // ONLINE VIDEO: audio languages + subtitles of the stream are added as external tracks, so they show up
+    // in the normal Audio Track / Subtitle Track panels and can be selected like on a local video.
+    // ---------------------------------------------------------------------------------------------
+    fun attachOnlineTracks(
+        session: com.example.util.OnlineVideoSession,
+        option: com.example.util.OnlineVideoOption,
+        key: String,
+        preferredAudioLabel: String?,
+        token: Int
+    ) {
+        coroutineScope.launch {
+            // mpv has to have opened THIS stream before tracks can be attached.
+            var waited = 0
+            while (!controller.isStreamOpen(option.url) && waited < 200 &&
+                lastLoadedVideoKey == key && onlineAttemptToken == token
+            ) {
+                kotlinx.coroutines.delay(100)
+                waited++
+            }
+            if (lastLoadedVideoKey != key || onlineAttemptToken != token || waited >= 200) return@launch
+            withContext(Dispatchers.IO) {
+                if (option.isVideoOnly) {
+                    // Audio made by the same YouTube client as the picture is the one that is guaranteed to open.
+                    val client = com.example.util.OnlineVideoService.clientOf(option.url)
+                    val matching = session.audioOptions.filter { com.example.util.OnlineVideoService.clientOf(it.url) == client }
+                    val audios = (if (matching.isNotEmpty()) matching else session.audioOptions).take(16)
+                    val first = audios.firstOrNull { it.label == preferredAudioLabel }
+                        ?: audios.firstOrNull { it.isOriginal }
+                        ?: audios.firstOrNull()
+                    if (first != null) {
+                        controller.addExternalAudio(first.url, first.label, first.language, select = true)
+                    }
+                    for (a in audios) {
+                        if (a === first) continue
+                        if (lastLoadedVideoKey != key || onlineAttemptToken != token) return@withContext
+                        kotlinx.coroutines.delay(120)
+                        controller.addExternalAudio(a.url, a.label, a.language, select = false)
+                    }
+                }
+                for (sub in session.subtitleOptions) {
+                    if (lastLoadedVideoKey != key || onlineAttemptToken != token) return@withContext
+                    kotlinx.coroutines.delay(100)
+                    try {
+                        controller.addExternalSubtitle(sub.url, context, sub.label, select = false)
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
+    }
+
+    // Opens the video in the chosen quality. If YouTube refuses that stream (it never opens), the next way is
+    // tried automatically (a ready-made picture+sound stream, then HLS) - the user never stares at an endless spinner.
+    fun startOnlineStream(
+        session: com.example.util.OnlineVideoSession,
+        qualityLabel: String?,
+        startMs: Long,
+        key: String,
+        preferredAudioLabel: String?,
+        attempt: Int = 0
+    ) {
+        val primary = session.optionFor(qualityLabel)
+        val candidates = ArrayList<com.example.util.OnlineVideoOption>()
+        if (primary != null) candidates.add(primary)
+        // Try all available progressive (audio + video) URLs, not just one. These are the
+        // most reliable recovery path when an adaptive URL/client combination is rejected.
+        session.muxedOptions
+            .filter { primary == null || primary.height == 0 || it.height <= primary.height }
+            .sortedByDescending { it.height }
+            .forEach { muxed -> if (candidates.none { it.url == muxed.url }) candidates.add(muxed) }
+        session.hlsUrl?.let { hls ->
+            if (candidates.none { it.url == hls }) candidates.add(com.example.util.OnlineVideoOption("HLS", 0, hls, 0, "", false))
+        }
+
+        if (attempt >= candidates.size) {
+            isPlaying = false
+            controller.reportOnlineError("Could not play this video")
+            val tried = candidates.joinToString { "${com.example.util.OnlineVideoService.clientOf(it.url)} ${it.label}" }
+            android.widget.Toast.makeText(
+                context,
+                "Could not play this video (tried: ${if (tried.isBlank()) "no stream" else tried}). Try another quality or video.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val option = candidates[attempt]
+        android.util.Log.i(
+            "OnlineVideoPlayback",
+            "Opening attempt ${attempt + 1}/${candidates.size}: ${option.label}, " +
+                "videoOnly=${option.isVideoOnly}, client=${com.example.util.OnlineVideoService.clientOf(option.url)}, " +
+                "host=${runCatching { android.net.Uri.parse(option.url).host }.getOrNull()}"
+        )
+        onlineAttemptToken += 1
+        val token = onlineAttemptToken
+        onlineSession = session
+        onlineQuality = qualityLabel ?: com.example.util.OnlineVideoSession.AUTO_QUALITY
+        controller.isOnlineStream = true
+        controller.onlineRefererUrl = session.videoUrl
+        controller.loadVideo(option.url, startPositionMs = startMs)
+        controller.play()
+        isPlaying = true
+        attachOnlineTracks(session, option, key, preferredAudioLabel, token)
+
+        // Watchdog: the stream must open within 15 seconds (or mpv drops it earlier), else try the next way.
+        coroutineScope.launch {
+            var waitedMs = 0L
+            while (waitedMs < 15_000L) {
+                kotlinx.coroutines.delay(250)
+                waitedMs += 250
+                if (lastLoadedVideoKey != key || onlineAttemptToken != token) return@launch
+                if (controller.isStreamOpen(option.url)) return@launch
+                if (waitedMs >= 4_000L && controller.isStreamIdle()) break
+            }
+            if (lastLoadedVideoKey == key && onlineAttemptToken == token) {
+                android.util.Log.w("OnlineVideoPlayback", "Stream did not open within ${waitedMs}ms; falling back from ${option.label}")
+                startOnlineStream(session, qualityLabel, startMs, key, preferredAudioLabel, attempt + 1)
+            }
+        }
+    }
+
+    fun startOnlineEpisode(targetVideo: VideoItem, validIndex: Int) {
+        val key = "${targetVideo.id}_${targetVideo.path}_$validIndex"
+        lastLoadedVideoKey = key
+        onlineSession = null
+        onlineQuality = null
+        val url = com.example.util.onlineVideoUrlFromPath(targetVideo.path)
+
+        val savedPos = if (uiState.playerSettings.savePositionOnQuit) {
+            PlaybackHistoryManager.getSavedPosition(
+                context = context,
+                videoId = targetVideo.id,
+                path = targetVideo.path,
+                uriString = targetVideo.uri.toString(),
+                title = targetVideo.displayName
+            )
+        } else 0L
+        val initialPos = if (savedPos > 500L) savedPos else 0L
+        currentPositionMs = initialPos
+        if (targetVideo.durationMs > 0) durationMs = targetVideo.durationMs
+
+        controller.holdSubtitleAutoSelect = false
+        // The spinner starts turning immediately; the stream address is looked up in the background.
+        controller.beginOnlineLoading()
+        isPlaying = true
+
+        coroutineScope.launch {
+            val session = com.example.util.OnlineVideoService.resolveSession(url)
+            if (lastLoadedVideoKey != key) return@launch
+            if (session == null) {
+                isPlaying = false
+                controller.reportOnlineError("Could not load this video")
+                android.widget.Toast.makeText(
+                    context,
+                    "Could not load this video: ${com.example.util.OnlineVideoService.lastError ?: "check your internet connection"}",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+            com.example.util.OnlineVideoHistory.record(
+                context,
+                url,
+                session.title.ifBlank { targetVideo.displayName },
+                session.channel,
+                session.channelUrl
+            )
+            // Starts light and fast (480p, or 720p for 4K videos); the user can raise it with the Video Quality button.
+            startOnlineStream(session, com.example.util.OnlineVideoSession.AUTO_QUALITY, initialPos, key, null)
+        }
+    }
+
+    // User picked another quality: the same video continues from the same second (the spinner turns while it reloads).
+    val onSelectOnlineQuality: (String) -> Unit = { label ->
+        val session = onlineSession
+        val key = lastLoadedVideoKey
+        if (session != null && key != null && label != onlineQuality) {
+            val pos = controller.currentPositionMs.value
+            val activeAudio = controller.audioTracks.value.firstOrNull { it.isSelected }?.title
+            showNotification("Switching to $label…")
+            controller.beginOnlineLoading()
+            startOnlineStream(session, label, pos, key, activeAudio)
+        }
+    }
+
     fun playEpisodeAtIndex(targetIndex: Int) {
         if (currentPlaylist.isEmpty()) return
         val validIndex = targetIndex.coerceIn(0, currentPlaylist.size - 1)
@@ -1604,6 +1793,11 @@ fun VideoPlayerScreen(
             title = targetVideo.displayName,
             durationMs = targetVideo.durationMs
         )
+        if (com.example.util.isOnlineVideoPath(targetVideo.path)) {
+            startOnlineEpisode(targetVideo, validIndex)
+            return
+        }
+        controller.isOnlineStream = false
         val path = getPlayableFilePath(context, targetVideo.uri, targetVideo.path)
 
         // A "stub" MP4 (placeholder clip + unreadable appended data, made for another app's own player)
@@ -1703,6 +1897,11 @@ fun VideoPlayerScreen(
 
     LaunchedEffect(currentVideoIndex, currentPlaylist) {
         val targetVideo = currentPlaylist.getOrNull(currentVideoIndex) ?: video ?: return@LaunchedEffect
+        if (com.example.util.isOnlineVideoPath(targetVideo.path)) {
+            val onlineKey = "${targetVideo.id}_${targetVideo.path}_$currentVideoIndex"
+            if (lastLoadedVideoKey != onlineKey) playEpisodeAtIndex(currentVideoIndex)
+            return@LaunchedEffect
+        }
         val path = getPlayableFilePath(context, targetVideo.uri, targetVideo.path)
         if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://"))) {
             val key = "${targetVideo.id}_${path}_$currentVideoIndex"
@@ -2605,9 +2804,9 @@ fun VideoPlayerScreen(
                 controller.removeAudioTrack(trackId)
                 showNotification("Removed Audio Track")
             },
-            availableVideoQualities = emptyList(),
-            selectedVideoQuality = null,
-            onSelectVideoQuality = {},
+            availableVideoQualities = onlineSession?.qualityLabels ?: emptyList(),
+            selectedVideoQuality = onlineQuality,
+            onSelectVideoQuality = onSelectOnlineQuality,
             selectedSubtitleTrackId = selectedSubtitleTrackId,
             secondarySubtitleTrackId = realSecondarySubtitleTrackId,
             lastTouchedSubtitleTrackId = lastTouchedSubtitleTrackId,
@@ -2836,7 +3035,7 @@ fun VideoPlayerScreen(
             showBufferedRange = uiState.playerSettings.showBufferedRange,
             thumbFastPreview = uiState.playerSettings.thumbFastPreview,
             previewVideoUri = currentVideo?.uri,
-            previewVideoPath = currentVideo?.path,
+            previewVideoPath = currentVideo?.path?.takeUnless { com.example.util.isOnlineVideoPath(it) },
             onSeekToChapter = { chap ->
                 currentPositionMs = chap.timeMs
                 controller.seekToChapter(chap)
