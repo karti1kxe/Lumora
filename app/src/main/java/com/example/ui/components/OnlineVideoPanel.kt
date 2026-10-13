@@ -164,7 +164,9 @@ fun OnlineVideoPanel(
         st.usedQueries.clear()
         job = scope.launch(Dispatchers.IO) {
             val batch = try {
-                OnlineVideoRecommender.fetchFeedBatch(context, emptySet(), st.usedQueries)
+                kotlinx.coroutines.withTimeoutOrNull(20000L) {
+                    OnlineVideoRecommender.fetchFeedBatch(context, emptySet(), st.usedQueries)
+                } ?: emptyList()
             } catch (t: kotlinx.coroutines.CancellationException) {
                 throw t
             } catch (_: Throwable) {
@@ -178,9 +180,10 @@ fun OnlineVideoPanel(
                     }
                     st.initialized = batch.isNotEmpty()
                     st.isSearching = false
-                    st.isRefreshing = false
                     OnlineVideoRecommender.recordShown(context, batch.map { it.videoUrl })
                 }
+                // the pull-to-refresh animation must always end, whatever happened above
+                st.isRefreshing = false
             }
         }
     }
@@ -234,12 +237,14 @@ fun OnlineVideoPanel(
                         st.initialized = true
                         st.isSearching = false
                     }
+                    st.isRefreshing = false
                 }
             } catch (t: kotlinx.coroutines.CancellationException) {
                 throw t
             } catch (_: Throwable) {
                 withContext(Dispatchers.Main) {
                     if (token == st.token) { st.results = emptyList(); st.channelResults = emptyList(); st.isSearching = false }
+                    st.isRefreshing = false
                 }
             }
         }
@@ -283,6 +288,14 @@ fun OnlineVideoPanel(
         if (st.refreshRequest != handledRefresh) {
             handledRefresh = st.refreshRequest
             if (isFeedMode) loadFeed(true) else executeSearch(searchQuery)
+        }
+    }
+
+    // Safety net: the pull-to-refresh indicator can never stay on screen for more than a few seconds.
+    LaunchedEffect(st.isRefreshing) {
+        if (st.isRefreshing) {
+            delay(25000L)
+            st.isRefreshing = false
         }
     }
 

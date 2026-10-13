@@ -77,8 +77,9 @@ fun OnlineChannelResultCard(
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(surfaceColor)
-            .border(1.dp, borderColor, RoundedCornerShape(16.dp))
-            .padding(14.dp),
+            // thin border in the user's selected app gradient (same card shape/size as the video cards)
+            .border(1.5.dp, AccentGradient, RoundedCornerShape(16.dp))
+            .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // Top section: Avatar + Channel Info (tapping opens channel)

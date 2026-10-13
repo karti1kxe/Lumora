@@ -854,14 +854,22 @@ class MpvPlayerController {
                             val frameHeight = view.mpv.getPropertyInt("video-params/dh")
                                 ?: view.mpv.getPropertyInt("dheight") ?: 0
                             if (posSec >= 0.0) {
-                                _isBuffering.value = false
+                                // Online: show the buffering animation while mpv waits for the cache (e.g. after a long
+                                // seek into a region that is not loaded yet) and hide it as soon as playback resumes.
+                                _isBuffering.value = if (onlineStreamMode) {
+                                    (view.mpv.getPropertyBoolean("paused-for-cache") == true) ||
+                                        (view.mpv.getPropertyBoolean("seeking") == true)
+                                } else false
                             }
                         }
                         if (durSec != null && durSec > 0.0) {
                             _durationMs.value = (durSec * 1000.0).toLong()
                         }
                         _isPlaying.value = !paused
-                        if (cacheTimeSec > 0.0 && posSec != null && posSec >= 0.0) {
+                        if (onlineStreamMode && cacheTimeSec > 0.0) {
+                            // demuxer-cache-time is already the absolute end of the cached data
+                            _bufferedPositionMs.value = (cacheTimeSec * 1000.0).toLong().coerceAtLeast(_currentPositionMs.value)
+                        } else if (cacheTimeSec > 0.0 && posSec != null && posSec >= 0.0) {
                             _bufferedPositionMs.value = ((posSec + cacheTimeSec) * 1000.0).toLong().coerceAtLeast(_currentPositionMs.value)
                         } else {
                             _bufferedPositionMs.value = _currentPositionMs.value
@@ -2032,7 +2040,7 @@ class MpvPlayerController {
                         language = if (type == "audio") matchedAudioLang else lang,
                         codec = exposedCodec,
                         isSelected = isTrackSelected,
-                        isExternal = if (type == "sub") isExternalTrack else if (type == "audio") isExternalAudioTrack else isExternal,
+                        isExternal = if (type == "sub") isExternalTrack else if (type == "audio") (isExternalAudioTrack && !onlineStreamMode) else isExternal,
                         originalFilename = if (type == "sub" && isExternalTrack) matchedOriginalName else if (type == "audio" && isExternalAudioTrack) matchedOriginalAudioName else "",
                         isSecondarySelected = (type == "sub" && _secondarySubtitleTrackId.value > 0 && id == _secondarySubtitleTrackId.value),
                         isDefault = isDefault,

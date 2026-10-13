@@ -1994,7 +1994,10 @@ fun HomeScreen(
                 LiquidPullToRefresh(
                     isRefreshing = if (isOnlineVideoOpen) com.example.ui.components.OnlineVideoFeedState.isRefreshing else isManualRefreshing,
                     onRefresh = {
-                        if (isOnlineVideoOpen) com.example.ui.components.OnlineVideoFeedState.refreshRequest++ else reloadFolders(true)
+                        if (isOnlineVideoOpen) {
+                            com.example.ui.components.OnlineVideoFeedState.isRefreshing = true
+                            com.example.ui.components.OnlineVideoFeedState.refreshRequest++
+                        } else reloadFolders(true)
                     },
                     isDark = isDark,
                     modifier = Modifier
@@ -2924,7 +2927,7 @@ fun HomeScreen(
                 }
             }
 
-            val isInsideAnyFolder = currentFolder != null || selectedMusicFolder != null || selectedRecentsFolder != null || selectedPlaylist != null
+            val isInsideAnyFolder = currentFolder != null || isOnlineVideoOpen || selectedMusicFolder != null || selectedRecentsFolder != null || selectedPlaylist != null
 
             // 6. Dynamic Floating Bottom Navigation Bar (Hidden inside folders & playlists or during selection)
             if (!isSelectionMode && !isInsideAnyFolder && activeTabs.isNotEmpty()) {
