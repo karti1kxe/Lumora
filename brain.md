@@ -108,10 +108,10 @@ app/src/main/
 │   │   └── theme/                   # (3 files) Color.kt, Theme.kt, Type.kt — Compose Material theme,
 │   │                                #   built from the project's OWN palette + LTWave-Bold custom font.
 │   │                                #   Never swap in Material's default colors/typography — see Section 7.
-│   └── util/                        # (27 files) file IO, caching, playback/watch history, metadata
+│   └── util/                        # (28 files) file IO, caching, playback/watch history, metadata
 │                                     #   extraction, private vault, playlists, block-lists, MKV muxing
 ├── res/
-│   ├── drawable/            # 130 vector icon XMLs, flat folder (no drawable-nodpi/xxxhdpi split).
+│   ├── drawable/            # 131 vector icon XMLs, flat folder (no drawable-nodpi/xxxhdpi split).
 │   │                        # Every icon here is namespaced `lumora_*.xml` except the 3 launcher-icon
 │   │                        # layer files (ic_launcher_background/foreground/monochrome) and
 │   │                        # ic_abouticon.xml (used by HeaderBar.kt + AboutSettingsPanel.kt).
@@ -250,3 +250,24 @@ table/tree above in the same change. If you're an AI tool and you're not sure
 whether something is dead, grep the whole `app/src/main` tree for its exact
 name before deleting — don't assume unfamiliarity means unused (see Section 4
 for a list of files that look large/complex but are all live).
+
+---
+
+## 9. Sleep Timer (added)
+
+- `util/SleepTimerManager.kt` — one app-wide timer (StateFlows `isActive` / `remainingMs`, event `expired`).
+  It lives outside any screen so it survives leaving the player / minimising audio.
+- UI: `SleepTimerPanel` in `ui/components/PlayerGlassSelectionSheet.kt` (same glass sheet as Audio delay).
+  Opened from the video 3-dot menu (last item, `PlayerPanelType.SLEEP_TIMER`) and from the audio
+  player top bar (moon icon). Works for local + online video and local + online audio.
+- On expiry: `VideoPlayerScreen` runs its normal `exitPlayerNow()` animation; `MainActivity.handleSleepTimerExpired()`
+  stops audio, presses Back until nothing is left (folders -> exit) and finishes the app. If the app is not
+  visible (screen off) it stops playback and closes directly.
+- Icon: `res/drawable/lumora_sleep.xml` (resource names must be lowercase).
+
+## 10. Channel screen (added)
+
+`ChannelDetailScreen.kt` now shows banner (top) -> channel card (gradient border + Subscribe, UI-only) ->
+Home / Videos / Shorts / Playlists / Posts tabs with a sliding gradient indicator.
+`OnlineChannelDetail` gained `bannerUrl` + `isVerified`; `OnlineMusicService.fetchChannelSectionTracks()` loads Shorts.
+NewPipeExtractor has no "Posts" tab, so Posts shows an empty-state message.

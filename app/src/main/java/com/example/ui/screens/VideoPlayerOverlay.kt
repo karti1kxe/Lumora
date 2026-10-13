@@ -47,6 +47,7 @@ import com.example.ui.components.SubtitleDelayPanel
 import com.example.ui.components.SubtitleStylePanel
 import com.example.ui.components.ChapterSelectionPanel
 import com.example.ui.components.MoreMenuSelectionPanel
+import com.example.ui.components.SleepTimerPanel
 import com.example.ui.components.SpeedSelectionPanel
 import com.example.player.TrackAudioConfig
 import com.example.player.AudioChannelMode
@@ -250,6 +251,7 @@ enum class PlayerPanelType {
     SUBTITLE_STYLE,
     AUDIO_TRACK,
     AUDIO_DELAY,
+    SLEEP_TIMER,
     EQUALIZER,
     CHAPTERS,
     MORE_MENU,
@@ -2876,6 +2878,14 @@ fun VideoPlayerOverlay(
                     onDismissRequest = { dismissCurrentPanel() }
                 )
             }
+            PlayerPanelType.SLEEP_TIMER -> {
+                SleepTimerPanel(
+                    isLandscape = isLandscape,
+                    glassBlurTransparency = glassBlurTransparency,
+                    onShowNotification = notifyAction,
+                    onDismissRequest = { dismissCurrentPanel() }
+                )
+            }
             PlayerPanelType.EQUALIZER -> {
                 AudioEqualizerPanel(
                     isLandscape = isLandscape,
@@ -2920,6 +2930,7 @@ fun VideoPlayerOverlay(
                     onOpenAbLoopDialog = { openPanel(PlayerPanelType.AB_LOOP) },
                     onOpenAudioDelay = { openPanel(PlayerPanelType.AUDIO_DELAY) },
                     onOpenEqualizer = { openPanel(PlayerPanelType.EQUALIZER) },
+                    onOpenSleepTimer = { openPanel(PlayerPanelType.SLEEP_TIMER) },
                     aspectRatioMode = aspectRatioMode,
                     onAspectRatioChange = onAspectRatioChange,
                     decoderMode = decoderMode,

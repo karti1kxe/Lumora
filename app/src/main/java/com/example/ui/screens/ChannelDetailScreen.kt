@@ -17,7 +17,16 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.offset
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -147,7 +156,7 @@ fun ChannelDetailScreen(
     var loadError by remember(channel?.channelUrl) { mutableStateOf<String?>(null) }
     var detail by remember(channel?.channelUrl) { mutableStateOf<OnlineChannelDetail?>(null) }
 
-    var selectedSectionId by remember(channel?.channelUrl) { mutableStateOf("videos") }
+    var selectedSectionId by remember(channel?.channelUrl) { mutableStateOf("home") }
 
     // Top Bar UI states
     var isSearchOpen by remember { mutableStateOf(false) }
@@ -167,6 +176,10 @@ fun ChannelDetailScreen(
     }
 
     var tracks by remember(channel?.channelUrl) { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
+    var shortsTracks by remember(channel?.channelUrl) { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
+    var shortsLoaded by remember(channel?.channelUrl) { mutableStateOf(false) }
+    var isLoadingShorts by remember(channel?.channelUrl) { mutableStateOf(false) }
+    var isChannelSubscribed by remember(channel?.channelUrl) { mutableStateOf(false) }
     var nextPage by remember(channel?.channelUrl) { mutableStateOf<Page?>(null) }
     var hasNextPage by remember(channel?.channelUrl) { mutableStateOf(false) }
     var isLoadingMore by remember(channel?.channelUrl) { mutableStateOf(false) }
@@ -218,13 +231,26 @@ fun ChannelDetailScreen(
             tracks = result.initialTracks.items
             nextPage = result.initialTracks.nextPage
             hasNextPage = result.initialTracks.hasNextPage
-            selectedSectionId = result.availableSections.firstOrNull { it.id == "videos" }?.id
-                ?: result.availableSections.firstOrNull()?.id
-                ?: "videos"
         } else {
             loadError = "Unable to load this channel"
         }
         isLoading = false
+    }
+
+    // Shorts tab: loaded lazily the first time it is opened.
+    LaunchedEffect(selectedSectionId, detail) {
+        val info = detail
+        if (selectedSectionId == "shorts" && info != null && !shortsLoaded) {
+            val section = info.availableSections.firstOrNull { it.id == "shorts" }
+            if (section == null) {
+                shortsLoaded = true
+            } else {
+                isLoadingShorts = true
+                shortsTracks = OnlineMusicService.fetchChannelSectionTracks(section)
+                isLoadingShorts = false
+                shortsLoaded = true
+            }
+        }
     }
 
     fun loadMoreTracks() {
@@ -268,7 +294,7 @@ fun ChannelDetailScreen(
 
     LaunchedEffect(shouldLoadMoreList, shouldLoadMoreGrid, selectedSectionId) {
         val shouldLoad = if (layoutMode == LayoutMode.GRID) shouldLoadMoreGrid else shouldLoadMoreList
-        if (shouldLoad && selectedSectionId == "videos" && hasNextPage && !isLoadingMore) {
+        if (shouldLoad && (selectedSectionId == "videos" || selectedSectionId == "home") && hasNextPage && !isLoadingMore) {
             loadMoreTracks()
         }
     }
@@ -351,9 +377,10 @@ fun ChannelDetailScreen(
         )
     }
 
-    val filteredTracks = remember(tracks, searchQuery) {
-        if (searchQuery.isBlank()) tracks
-        else tracks.filter { it.title.contains(searchQuery, ignoreCase = true) }
+    val activeTracks = if (selectedSectionId == "shorts") shortsTracks else tracks
+    val filteredTracks = remember(activeTracks, searchQuery) {
+        if (searchQuery.isBlank()) activeTracks
+        else activeTracks.filter { it.title.contains(searchQuery, ignoreCase = true) }
     }
 
     val sortedTracks = remember(filteredTracks, sortField, sortDirection) {
@@ -393,6 +420,9 @@ fun ChannelDetailScreen(
                 .padding(horizontal = 14.dp)
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
+                // Channel banner at the very top (only when the channel has one)
+                ChannelBanner(bannerUrl = detail?.bannerUrl, isDark = isDark)
+
                 HeaderBar(
                     title = channel?.name ?: "Channel",
                     themeMode = uiState?.themeMode ?: ThemeMode.DARK,
@@ -505,65 +535,37 @@ fun ChannelDetailScreen(
                     else -> {
                         val info = detail
                         Column(modifier = Modifier.fillMaxSize()) {
-                            // Header: avatar, name, metadata, description
-                            ChannelHeader(
+                            // Channel card (same gradient card as the search result) + Subscribe
+                            ChannelProfileCard(
                                 name = info?.name ?: channel?.name ?: "Channel",
                                 avatarUrl = info?.avatarUrl ?: channel?.avatarUrl,
                                 subscriberCountText = info?.subscriberCountText ?: channel?.subscriberCountText,
                                 videoCountText = channel?.videoCountText,
-                                description = info?.description,
+                                description = info?.description ?: channel?.description,
+                                isVerified = info?.isVerified == true,
+                                isSubscribed = isChannelSubscribed,
+                                onSubscribeToggle = { isChannelSubscribed = !isChannelSubscribed },
                                 isDark = isDark
                             )
 
-                            // Section tabs: Tracks, Playlists
-                            val hasPlaylistsTab = info?.playlists?.isNotEmpty() == true
-
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 6.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                // Tracks tab
-                                val isVideosSelected = selectedSectionId == "videos"
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(20.dp))
-                                        .background(if (isVideosSelected) AccentGradient else SolidColor(surfaceColor))
-                                        .border(1.dp, if (isVideosSelected) Color.Transparent else borderColor, RoundedCornerShape(20.dp))
-                                        .clickable { selectedSectionId = "videos" }
-                                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                                ) {
-                                    Text(
-                                        text = "Tracks",
-                                        color = if (isVideosSelected) Color.White else primaryText,
-                                        fontSize = 12.5.sp,
-                                        fontWeight = if (isVideosSelected) FontWeight.Bold else FontWeight.Medium
-                                    )
-                                }
-
-                                // Playlists tab
-                                if (hasPlaylistsTab) {
-                                    val isPlaylistsSelected = selectedSectionId == "playlists"
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(20.dp))
-                                            .background(if (isPlaylistsSelected) AccentGradient else SolidColor(surfaceColor))
-                                            .border(1.dp, if (isPlaylistsSelected) Color.Transparent else borderColor, RoundedCornerShape(20.dp))
-                                            .clickable { selectedSectionId = "playlists" }
-                                            .padding(horizontal = 14.dp, vertical = 7.dp)
-                                    ) {
-                                        Text(
-                                            text = "Playlists",
-                                            color = if (isPlaylistsSelected) Color.White else primaryText,
-                                            fontSize = 12.5.sp,
-                                            fontWeight = if (isPlaylistsSelected) FontWeight.Bold else FontWeight.Medium
-                                        )
-                                    }
-                                }
-                            }
+                            // Tabs: Home | Videos | Shorts | Playlists | Posts (sliding selected indicator)
+                            ChannelTabsRow(
+                                tabs = listOf(
+                                    "home" to "Home",
+                                    "videos" to "Videos",
+                                    "shorts" to "Shorts",
+                                    "playlists" to "Playlists",
+                                    "posts" to "Posts"
+                                ),
+                                selectedId = selectedSectionId,
+                                onSelect = { selectedSectionId = it },
+                                isDark = isDark
+                            )
 
                             when (selectedSectionId) {
+                                "posts" -> {
+                                    EmptySectionMessage("Posts are not available for this channel", primaryText)
+                                }
                                 "playlists" -> {
                                     val playlist = expandedPlaylist
                                     if (playlist != null) {
@@ -602,10 +604,15 @@ fun ChannelDetailScreen(
                                     }
                                 }
                                 else -> {
-                                    // "videos" / "tracks" tab
-                                    if (sortedTracks.isEmpty()) {
+                                    // "home" / "videos" / "shorts" tabs
+                                    if (selectedSectionId == "shorts" && isLoadingShorts) {
+                                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            LumoraExpressiveLoadingIndicator(size = 40.dp, isDark = isDark)
+                                        }
+                                    } else if (sortedTracks.isEmpty()) {
                                         EmptySectionMessage(
                                             if (searchQuery.isNotBlank()) "No tracks matching \"$searchQuery\" in ${channel?.name ?: "channel"}"
+                                            else if (selectedSectionId == "shorts") "No shorts found for this channel"
                                             else "No tracks found for this channel",
                                             primaryText
                                         )
@@ -810,15 +817,46 @@ fun ChannelDetailScreen(
     }
 }
 
+/** Channel banner shown at the very top of the channel screen. Renders nothing if the channel has none. */
 @Composable
-private fun ChannelHeader(
+private fun ChannelBanner(bannerUrl: String?, isDark: Boolean) {
+    if (bannerUrl.isNullOrBlank()) return
+    var bannerBitmap by remember(bannerUrl) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(bannerUrl) {
+        bannerBitmap = loadRemoteAudioThumbnail(bannerUrl, targetSizePx = 1200)
+    }
+    val bmp = bannerBitmap ?: return
+    Image(
+        bitmap = bmp.asImageBitmap(),
+        contentDescription = "Channel banner",
+        contentScale = ContentScale.Crop,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 2.dp)
+            .aspectRatio(16f / 4.2f)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (isDark) Color(0xFF1E293B) else Color(0xFFE2E8F0))
+    )
+}
+
+/**
+ * Channel card used inside the channel screen. Same look as the card in the search results
+ * (glass surface + gradient border + avatar + name/subscribers), with the gradient Subscribe button.
+ * Subscribe is UI-only, exactly like in the search result card.
+ */
+@Composable
+private fun ChannelProfileCard(
     name: String,
     avatarUrl: String?,
     subscriberCountText: String?,
     videoCountText: String?,
     description: String?,
+    isVerified: Boolean,
+    isSubscribed: Boolean,
+    onSubscribeToggle: () -> Unit,
     isDark: Boolean
 ) {
+    val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
 
@@ -828,11 +866,25 @@ private fun ChannelHeader(
             avatarBitmap = loadRemoteAudioThumbnail(avatarUrl, targetSizePx = 240)
         }
     }
+    var descriptionExpanded by remember(name) { mutableStateOf(false) }
 
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(surfaceColor)
+            .border(1.5.dp, AccentGradient, RoundedCornerShape(16.dp))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
             Box(
-                modifier = Modifier.size(56.dp).clip(CircleShape).background(AccentGradient),
+                modifier = Modifier.size(60.dp).clip(CircleShape).background(AccentGradient),
                 contentAlignment = Alignment.Center
             ) {
                 val bmp = avatarBitmap
@@ -840,43 +892,155 @@ private fun ChannelHeader(
                     Image(
                         bitmap = bmp.asImageBitmap(),
                         contentDescription = name,
-                        modifier = Modifier.size(56.dp).clip(CircleShape)
+                        modifier = Modifier.size(60.dp).clip(CircleShape)
                     )
                 } else {
                     Text(
                         text = name.take(1).uppercase(),
                         color = Color.White,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp
+                        fontSize = 22.sp
                     )
                 }
             }
-            Spacer(modifier = Modifier.padding(start = 12.dp))
-            Column {
-                Text(
-                    text = name,
-                    color = primaryText,
-                    fontSize = 16.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                val meta = listOfNotNull(subscriberCountText, videoCountText).joinToString("  •  ")
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = name,
+                        color = primaryText,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isVerified) {
+                        Spacer(modifier = Modifier.width(5.dp))
+                        StyledIcon(
+                            drawableRes = com.example.R.drawable.lumora_check_circle,
+                            contentDescription = "Verified",
+                            tint = primaryText,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+                val meta = listOfNotNull(subscriberCountText, videoCountText).joinToString(" \u2022 ")
                 if (meta.isNotBlank()) {
-                    Text(text = meta, color = secondaryText, fontSize = 12.sp)
+                    Text(
+                        text = meta,
+                        color = secondaryText,
+                        fontSize = 12.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
+
         if (!description.isNullOrBlank()) {
             Text(
                 text = description,
                 color = secondaryText,
-                fontSize = 12.sp,
-                maxLines = 3,
+                fontSize = 12.5.sp,
+                maxLines = if (descriptionExpanded) 12 else 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 8.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { descriptionExpanded = !descriptionExpanded }
             )
         }
+
+        // Subscribe button (system gradient, UI only)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(40.dp)
+                .clip(RoundedCornerShape(50))
+                .background(
+                    if (isSubscribed) SolidColor(if (isDark) Color(0xFF334155) else Color(0xFFE2E8F0))
+                    else AccentGradient
+                )
+                .clickable { onSubscribeToggle() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (isSubscribed) "Subscribed" else "Subscribe",
+                color = if (isSubscribed) primaryText else Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+/**
+ * Home | Videos | Shorts | Playlists | Posts tab row. The gradient underline slides
+ * left/right (animated) to the selected tab.
+ */
+@Composable
+private fun ChannelTabsRow(
+    tabs: List<Pair<String, String>>,
+    selectedId: String,
+    onSelect: (String) -> Unit,
+    isDark: Boolean
+) {
+    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
+    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
+    val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
+    val density = LocalDensity.current
+
+    val tabBounds = remember { mutableStateMapOf<String, Pair<Float, Float>>() }
+    val selectedBounds = tabBounds[selectedId]
+    val indicatorX by animateFloatAsState(
+        targetValue = selectedBounds?.first ?: 0f,
+        animationSpec = tween(300, easing = FastOutSlowInEasing),
+        label = "ChannelTabIndicatorX"
+    )
+    val indicatorWidth by animateFloatAsState(
+        targetValue = selectedBounds?.second ?: 0f,
+        animationSpec = tween(300, easing = FastOutSlowInEasing),
+        label = "ChannelTabIndicatorWidth"
+    )
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+            Row {
+                tabs.forEach { (id, label) ->
+                    val isSelected = id == selectedId
+                    Box(
+                        modifier = Modifier
+                            .onGloballyPositioned { coords ->
+                                tabBounds[id] = coords.positionInParent().x to coords.size.width.toFloat()
+                            }
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onSelect(id) }
+                            .padding(horizontal = 16.dp, vertical = 11.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (isSelected) primaryText else secondaryText,
+                            fontSize = 14.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        )
+                    }
+                }
+            }
+            if (selectedBounds != null) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .offset { IntOffset(indicatorX.roundToInt(), 0) }
+                        .width(with(density) { indicatorWidth.toDp() })
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(AccentGradient)
+                )
+            }
+        }
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(borderColor))
+        Spacer(modifier = Modifier.height(6.dp))
     }
 }
 

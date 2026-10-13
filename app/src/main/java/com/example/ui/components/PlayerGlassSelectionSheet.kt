@@ -173,6 +173,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -2582,6 +2583,218 @@ fun AudioDelayPanel(
 }
 
 /**
+ * 2B-2. SLEEP TIMER PANEL
+ * Same glass sheet / layout as the Audio delay panel (opens on the right side in landscape).
+ * Stepper (- / +) with hold-to-repeat, quick step chips (1m, 3m, 5m, 7m, 10m, 15m, 30m, 1H, 2H),
+ * Start / Cancel button. While a timer runs the centre field shows the live countdown and the
+ * +/- buttons add / remove time directly on the running timer.
+ * Used by the video player (local + online) and the audio player (local + online).
+ */
+@Composable
+fun SleepTimerPanel(
+    isLandscape: Boolean,
+    glassBlurTransparency: Float = 85f,
+    onShowNotification: (String) -> Unit = {},
+    onDismissRequest: () -> Unit
+) {
+    val stepVariants = remember {
+        listOf(
+            60_000L to "1m",
+            180_000L to "3m",
+            300_000L to "5m",
+            420_000L to "7m",
+            600_000L to "10m",
+            900_000L to "15m",
+            1_800_000L to "30m",
+            3_600_000L to "1H",
+            7_200_000L to "2H"
+        )
+    }
+    var selectedStepMs by remember { mutableStateOf(60_000L) }
+
+    val timerActive by com.example.util.SleepTimerManager.isActive.collectAsState()
+    val timerRemainingMs by com.example.util.SleepTimerManager.remainingMs.collectAsState()
+    var pendingMs by remember { mutableStateOf(0L) }
+    // Running value so a held +/- button never works from a stale value between recompositions.
+    val livePending = remember { longArrayOf(0L) }
+    livePending[0] = pendingMs
+
+    val isLowGlassOpacity = glassBlurTransparency < 25f || isAppInDarkTheme()
+    val maxMs = com.example.util.SleepTimerManager.MAX_DURATION_MS
+
+    fun stepBy(deltaMs: Long) {
+        if (com.example.util.SleepTimerManager.isActive.value) {
+            com.example.util.SleepTimerManager.adjust(deltaMs)
+        } else {
+            val newMs = (livePending[0] + deltaMs).coerceIn(0L, maxMs)
+            livePending[0] = newMs
+            pendingMs = newMs
+        }
+    }
+
+    PlayerGlassModalSheet(
+        panelKey = "sleep_timer",
+        isLandscape = isLandscape,
+        openOnRightSide = true,
+        heightFraction = 0.52f,
+        glassBlurTransparency = glassBlurTransparency,
+        onDismissRequest = onDismissRequest,
+        headerStartContent = {
+            Text(
+                text = "Sleep timer",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = LocalSheetNormalTextColor.current
+            )
+        },
+        headerEndContent = {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .cardBounceClick(scaleDown = 0.90f) {
+                        com.example.util.SleepTimerManager.cancel()
+                        pendingMs = 0L
+                        livePending[0] = 0L
+                        onShowNotification("Sleep timer reset")
+                    }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "Reset",
+                    fontSize = 14.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (timerActive || pendingMs != 0L) ActiveHighlightColor else LocalSheetSecondaryTextColor.current
+                )
+            }
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // 1. Stepper: - [ value ] +
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                HoldRepeatStepButton(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else sheetWhite(Color(0xFFF1F5F9)))
+                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
+                    onStep = { stepBy(-selectedStepMs) }
+                ) {
+                    StyledIcon(
+                        imageVector = Icons.Outlined.Remove,
+                        contentDescription = "Decrease time",
+                        tint = LocalSheetNormalTextColor.current,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(if (isLowGlassOpacity) Color(0x18FFFFFF) else sheetWhite(Color(0xFFF8FAFC)))
+                        .border(
+                            1.2.dp,
+                            if (timerActive || pendingMs != 0L) ActiveHighlightColor else (if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1)),
+                            RoundedCornerShape(22.dp)
+                        )
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (timerActive) com.example.util.SleepTimerManager.formatCountdown(timerRemainingMs)
+                        else com.example.util.SleepTimerManager.formatDuration(pendingMs),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        color = if (timerActive || pendingMs != 0L) ActiveHighlightColor else LocalSheetNormalTextColor.current
+                    )
+                }
+
+                HoldRepeatStepButton(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(if (isLowGlassOpacity) Color(0x28FFFFFF) else sheetWhite(Color(0xFFF1F5F9)))
+                        .border(1.dp, if (isLowGlassOpacity) Color(0x40FFFFFF) else Color(0xFFCBD5E1), CircleShape),
+                    onStep = { stepBy(selectedStepMs) }
+                ) {
+                    StyledIcon(
+                        imageVector = Icons.Outlined.Add,
+                        contentDescription = "Increase time",
+                        tint = LocalSheetNormalTextColor.current,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            // 2. Step chips: how much one tap (or hold) on + / - changes
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                stepVariants.forEach { (stepMs, label) ->
+                    GlassPresetChip(
+                        label = label,
+                        isSelected = selectedStepMs == stepMs,
+                        onClick = { selectedStepMs = stepMs }
+                    )
+                }
+            }
+
+            Text(
+                text = "When the timer ends, the video/audio stops, the player closes, the app steps back out of the folder and closes.",
+                fontSize = 12.sp,
+                color = LocalSheetSecondaryTextColor.current
+            )
+
+            // 3. Start / Cancel
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(AccentGradient)
+                    .cardBounceClick(scaleDown = 0.95f) {
+                        if (timerActive) {
+                            com.example.util.SleepTimerManager.cancel()
+                            onShowNotification("Sleep timer cancelled")
+                        } else if (pendingMs > 0L) {
+                            com.example.util.SleepTimerManager.start(pendingMs)
+                            onShowNotification("Sleep timer set: ${com.example.util.SleepTimerManager.formatDuration(pendingMs)}")
+                            onDismissRequest()
+                        } else {
+                            onShowNotification("Choose a time first")
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (timerActive) "Cancel timer" else "Start timer",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+    }
+}
+
+/**
  * 2C. DEDICATED SUBTITLE DELAY PANEL
  * Synchronizes subtitle timing with video playback.
  * Opens from bottom in portrait (center) and bottom in landscape (right side, anchored to bottom area).
@@ -3017,10 +3230,13 @@ fun MoreMenuSelectionPanel(
     selectedOnlineQuality: String? = null,
     onOpenAudioDelay: (() -> Unit)? = null,
     onOpenEqualizer: (() -> Unit)? = null,
+    onOpenSleepTimer: (() -> Unit)? = null,
     isLandscape: Boolean,
     glassBlurTransparency: Float = 85f,
     onDismissRequest: () -> Unit
 ) {
+    val sleepTimerActive by com.example.util.SleepTimerManager.isActive.collectAsState()
+    val sleepTimerRemainingMs by com.example.util.SleepTimerManager.remainingMs.collectAsState()
     PlayerGlassModalSheet(
         panelKey = "more_menu",
         isLandscape = isLandscape,
@@ -3291,6 +3507,22 @@ fun MoreMenuSelectionPanel(
                         onToggleOrientation()
                     }
                 )
+            }
+
+            // 12. Sleep Timer (always the last item)
+            if (onOpenSleepTimer != null) {
+                item {
+                    MenuActionItem(
+                        iconRes = com.example.R.drawable.lumora_sleep,
+                        title = "Sleep timer",
+                        subtitle = if (sleepTimerActive) "Closes in ${com.example.util.SleepTimerManager.formatCountdown(sleepTimerRemainingMs)}" else "Stop playback & close the app after a set time",
+                        badgeValue = if (sleepTimerActive) com.example.util.SleepTimerManager.formatCountdown(sleepTimerRemainingMs) else null,
+                        isActive = sleepTimerActive,
+                        onClick = {
+                            onOpenSleepTimer()
+                        }
+                    )
+                }
             }
         }
     }

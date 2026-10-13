@@ -62,6 +62,8 @@ import com.example.ui.state.VideoOpeningAnimation
 import com.example.ui.state.ScreenNavigationStyle
 import com.example.ui.theme.VideoPlayerTheme
 import com.example.util.PipModeState
+import com.example.util.SleepTimerManager
+import kotlinx.coroutines.delay
 
 enum class Screen {
     HOME, PLAYER, CHANNEL_DETAIL, SHARED_PLAYLIST
@@ -177,6 +179,10 @@ class MainActivity : ComponentActivity() {
             registerReceiver(pipBroadcastReceiver, filter)
         }
         handleIncomingIntent(intent)
+        // Sleep timer: runs for the whole life of the Activity (video, audio, online or offline).
+        lifecycleScope.launch {
+            SleepTimerManager.expired.collect { handleSleepTimerExpired() }
+        }
         setContent {
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
             val currentScreen by viewModel.currentScreenState.collectAsStateWithLifecycle()
@@ -414,6 +420,54 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Sleep timer reached zero. Closes everything the way the user would by hand:
+     * audio stops, the video player leaves with its own exit animation (VideoPlayerScreen),
+     * then the app steps back through the folders/screens with the normal Back animation and
+     * finally closes. If the screen is off / app not visible there is nothing to animate, so the
+     * app is just closed directly (playback is stopped first).
+     */
+    private fun handleSleepTimerExpired() {
+        lifecycleScope.launch {
+            try {
+                if (com.example.player.AudioPlaybackManager.currentTrack.value != null) {
+                    com.example.player.AudioPlaybackManager.closeAndStop(applicationContext)
+                }
+            } catch (_: Throwable) {}
+
+            val visible = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+            if (!visible) {
+                finishAndRemoveTask()
+                return@launch
+            }
+
+            if (viewModel.currentScreenState.value == Screen.PLAYER) {
+                // VideoPlayerScreen plays its exit animation and then calls viewModel.exitPlayer().
+                val startedAt = System.currentTimeMillis()
+                while (viewModel.currentScreenState.value == Screen.PLAYER &&
+                    System.currentTimeMillis() - startedAt < 5000L
+                ) {
+                    delay(100L)
+                }
+                if (viewModel.currentScreenState.value == Screen.PLAYER) {
+                    viewModel.exitPlayer()
+                }
+                delay(550L)
+            } else {
+                delay(350L)
+            }
+
+            // Press "Back" until nothing is left to go back to (folders -> tab -> exit).
+            var presses = 0
+            while (!isFinishing && presses < 12) {
+                onBackPressedDispatcher.onBackPressed()
+                presses++
+                delay(450L)
+            }
+            if (!isFinishing) finishAndRemoveTask()
         }
     }
 

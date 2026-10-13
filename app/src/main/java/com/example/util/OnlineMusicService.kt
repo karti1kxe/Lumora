@@ -79,7 +79,9 @@ data class OnlineChannelDetail(
     val description: String?,
     val availableSections: List<OnlineChannelSection>,
     val initialTracks: OnlineChannelTrackPage,
-    val playlists: List<OnlineChannelPlaylist>
+    val playlists: List<OnlineChannelPlaylist>,
+    val bannerUrl: String? = null,
+    val isVerified: Boolean = false
 )
 
 /**
@@ -590,6 +592,9 @@ object OnlineMusicService {
                         playlistsTab = tab
                         sections.add(OnlineChannelSection("playlists", "Playlists", tab))
                     }
+                    filters.contains("shorts") -> {
+                        sections.add(OnlineChannelSection("shorts", "Shorts", tab))
+                    }
                 }
             }
 
@@ -634,6 +639,8 @@ object OnlineMusicService {
             val subCount = try { info.subscriberCount } catch (_: Throwable) { -1L }
             val avatar = try { extractBestThumbnailUrl(info.avatars, null) } catch (_: Throwable) { null }
             val desc = try { info.description?.takeIf { it.isNotBlank() } } catch (_: Throwable) { null }
+            val banner = try { extractBestThumbnailUrl(info.banners, null) } catch (_: Throwable) { null }
+            val verified = try { info.isVerified } catch (_: Throwable) { false }
 
             OnlineChannelDetail(
                 channelUrl = channelUrl,
@@ -644,11 +651,26 @@ object OnlineMusicService {
                 description = desc,
                 availableSections = sections,
                 initialTracks = initialTracks,
-                playlists = playlists
+                playlists = playlists,
+                bannerUrl = banner,
+                isVerified = verified
             )
         } catch (e: Exception) {
             Log.e(TAG, "fetchChannelDetail failed for $channelUrl: ${e.message}", e)
             null
+        }
+    }
+
+    /** First page of any channel tab (used by the Shorts tab). Shorts may report no duration, so none are dropped. */
+    suspend fun fetchChannelSectionTracks(section: OnlineChannelSection): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
+        try {
+            ensureInit()
+            val tabExtractor = ServiceList.YouTube.getChannelTabExtractor(section.linkHandler)
+            tabExtractor.fetchPage()
+            tabExtractor.initialPage.items.filterIsInstance<StreamInfoItem>().map { it.toOnlineTrackResult() }
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchChannelSectionTracks failed: ${e.message}", e)
+            emptyList()
         }
     }
 

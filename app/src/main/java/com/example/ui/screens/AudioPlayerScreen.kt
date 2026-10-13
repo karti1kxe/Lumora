@@ -165,6 +165,7 @@ import com.example.player.EqualizerPreset
 import com.example.ui.components.AddToPlaylistDialog
 import com.example.ui.components.AudioEqualizerPanel
 import com.example.ui.components.AudioTrackThumbnail
+import com.example.ui.components.SleepTimerPanel
 import com.example.ui.components.InteractiveAudioScrubber
 import com.example.ui.components.StyledIcon
 import com.example.ui.components.SubtitleFileTreeDialog
@@ -209,6 +210,8 @@ fun AudioPlayerScreen(
     val isShuffle by AudioPlaybackManager.isShuffle.collectAsState()
     val repeatMode by AudioPlaybackManager.repeatMode.collectAsState()
     val playbackSpeed by AudioPlaybackManager.playbackSpeed.collectAsState()
+    val sleepTimerActive by com.example.util.SleepTimerManager.isActive.collectAsState()
+    val sleepTimerRemainingMs by com.example.util.SleepTimerManager.remainingMs.collectAsState()
 
     // A-B Loop states
     val loopPointA by AudioPlaybackManager.loopPointA.collectAsState()
@@ -232,6 +235,7 @@ fun AudioPlayerScreen(
     var showABLoopSheet by remember { mutableStateOf(false) }
     var showABControlsBar by remember { mutableStateOf(false) }
     var showEqualizerSheet by remember { mutableStateOf(false) }
+    var showSleepTimerSheet by remember { mutableStateOf(false) }
     var showAddToPlaylistDialog by remember { mutableStateOf(false) }
     var statusToastMessage by remember { mutableStateOf<String?>(null) }
 
@@ -334,6 +338,7 @@ fun AudioPlayerScreen(
             showLyricsSheet -> showLyricsSheet = false
             showABLoopSheet -> showABLoopSheet = false
             showEqualizerSheet -> showEqualizerSheet = false
+            showSleepTimerSheet -> showSleepTimerSheet = false
             showAddToPlaylistDialog -> showAddToPlaylistDialog = false
             else -> onCollapse()
         }
@@ -492,6 +497,14 @@ fun AudioPlayerScreen(
                                 color = secondaryText
                             )
                         }
+                        if (sleepTimerActive) {
+                            Text(
+                                text = "Sleep in ${com.example.util.SleepTimerManager.formatCountdown(sleepTimerRemainingMs)}",
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = AccentSkyBlue
+                            )
+                        }
                     }
 
                     // Right Side Actions: Notification Permission toggle + Info Button
@@ -516,6 +529,28 @@ fun AudioPlayerScreen(
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
+                        }
+
+                        // Sleep Timer Button (works for offline + online audio)
+                        Box(
+                            modifier = Modifier
+                                .testTag("audio_player_sleep_timer_button")
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (sleepTimerActive) AccentSkyBlue.copy(alpha = 0.15f)
+                                    else if (isDark) Color(0xFF1E293B).copy(alpha = 0.7f) else Color(0xFFE2E8F0).copy(alpha = 0.85f)
+                                )
+                                .border(1.dp, if (sleepTimerActive) AccentSkyBlue.copy(alpha = 0.5f) else borderColor, CircleShape)
+                                .clickable { showSleepTimerSheet = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            StyledIcon(
+                                drawableRes = R.drawable.lumora_sleep,
+                                contentDescription = "Sleep timer",
+                                tint = if (sleepTimerActive) AccentSkyBlue else primaryText,
+                                modifier = Modifier.size(22.dp)
+                            )
                         }
 
                         // Info Button
@@ -2574,6 +2609,18 @@ fun AudioPlayerScreen(
                     statusToastMessage = msg
                 },
                 onDismissRequest = { showEqualizerSheet = false }
+            )
+        }
+
+        // 7. SLEEP TIMER PANEL (same glass panel as the video player's sleep timer)
+        if (showSleepTimerSheet) {
+            SleepTimerPanel(
+                isLandscape = false,
+                glassBlurTransparency = glassBlurTransparency,
+                onShowNotification = { msg ->
+                    statusToastMessage = msg
+                },
+                onDismissRequest = { showSleepTimerSheet = false }
             )
         }
     }

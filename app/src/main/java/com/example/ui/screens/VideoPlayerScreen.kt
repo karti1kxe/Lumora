@@ -1917,6 +1917,21 @@ fun VideoPlayerScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val latestCurrentVideo by rememberUpdatedState(currentVideo)
     val latestIsPlaying by rememberUpdatedState(isPlaying)
+
+    // Sleep timer finished while the video player is open: close it with the normal exit
+    // animation (freeze-frame + portrait + back). MainActivity then steps back out of the
+    // folder and closes the app. If the screen is off / the app is in the background there is
+    // no UI to animate, so just stop playback (MainActivity closes the app directly).
+    LaunchedEffect(Unit) {
+        com.example.util.SleepTimerManager.expired.collect {
+            if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                showNotification("Sleep timer ended")
+                exitPlayerNow()
+            } else {
+                controller.pause()
+            }
+        }
+    }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
