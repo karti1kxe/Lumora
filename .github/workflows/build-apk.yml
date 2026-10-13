@@ -76,6 +76,7 @@ jobs:
       - name: Setup Gradle (with caching)
         uses: gradle/actions/setup-gradle@v6
         with:
+          gradle-version: 9.8.1
           cache-read-only: false
 
       - name: Choose build command (project wrapper if present)
@@ -86,7 +87,7 @@ jobs:
             echo "Project ka apna gradlew mil gaya — usi version se build karenge (zyada stable)."
           else
             echo "GRADLE_CMD=gradle" >> "$GITHUB_ENV"
-            echo "gradlew nahi mila — system Gradle 9.3.1 se build hoga."
+            echo "gradlew nahi mila — system Gradle 9.8.1 se build hoga."
           fi
 
       - name: Increase Gradle memory headroom (avoid OOM kills)

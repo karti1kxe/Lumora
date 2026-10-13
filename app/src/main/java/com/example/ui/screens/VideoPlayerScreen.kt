@@ -2663,9 +2663,6 @@ fun VideoPlayerScreen(
                 controller.removeAudioTrack(trackId)
                 showNotification("Removed Audio Track")
             },
-            availableVideoQualities = emptyList(),
-            selectedVideoQuality = null,
-            onSelectVideoQuality = {},
             selectedSubtitleTrackId = selectedSubtitleTrackId,
             secondarySubtitleTrackId = realSecondarySubtitleTrackId,
             lastTouchedSubtitleTrackId = lastTouchedSubtitleTrackId,
