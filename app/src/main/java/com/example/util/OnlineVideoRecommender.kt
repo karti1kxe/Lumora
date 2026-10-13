@@ -23,6 +23,10 @@ object OnlineVideoRecommender {
     private const val KEY_SEARCHED = "searched_channels"    // JSON array, most recent first
     private const val KEY_SHOWN = "shown_counts"            // JSON object: url -> times shown
     private const val KEY_OPENED = "opened_urls"            // JSON array
+    private const val KEY_COMPLETED = "completed_urls"      // JSON array: videos watched to the end
+    private const val MAX_COMPLETED = 3000
+    private const val SUBSCRIBED_QUOTA = 6                  // max videos from subscribed channels per feed batch
+    private const val SUBSCRIBED_CHANNELS_PER_BATCH = 12
     private const val MAX_SHOWN = 800
     private const val IGNORE_AFTER = 3
 
@@ -55,6 +59,35 @@ object OnlineVideoRecommender {
             .putString(KEY_WATCHED, watched.toString())
             .apply()
     }
+
+    // In-memory copy of the completed list so playback ticks can call recordCompleted() cheaply.
+    @Volatile private var completedCache: MutableSet<String>? = null
+
+    private fun completedSet(c: Context): MutableSet<String> {
+        completedCache?.let { return it }
+        return synchronized(this) {
+            completedCache ?: run {
+                val arr = readArr(c, KEY_COMPLETED)
+                val set = LinkedHashSet<String>()
+                for (i in 0 until arr.length()) set.add(arr.optString(i))
+                completedCache = set
+                set
+            }
+        }
+    }
+
+    /** Marks an online video as watched to the end; it is not recommended again afterwards. */
+    fun recordCompleted(c: Context, videoUrl: String) {
+        if (videoUrl.isBlank()) return
+        synchronized(this) {
+            val set = completedSet(c)
+            if (!set.add(videoUrl)) return
+            while (set.size > MAX_COMPLETED) set.remove(set.first())
+            prefs(c).edit().putString(KEY_COMPLETED, JSONArray(set.toList()).toString()).apply()
+        }
+    }
+
+    fun isCompleted(c: Context, videoUrl: String): Boolean = videoUrl in completedSet(c)
 
     @Synchronized
     fun recordChannelSearch(c: Context, channelName: String) {
@@ -117,6 +150,7 @@ object OnlineVideoRecommender {
             r.videoUrl.isNotBlank() && r.title.isNotBlank() &&
                 r.videoUrl !in excludeUrls &&
                 r.durationSec >= 60L && r.durationSec <= 4 * 3600L &&
+                !isCompleted(context, r.videoUrl) &&
                 !(shown.optInt(r.videoUrl, 0) >= IGNORE_AFTER && r.videoUrl !in opened)
 
         // per query: drop bad ones, cap each channel to 2 so one channel cannot flood a query's results
@@ -130,12 +164,52 @@ object OnlineVideoRecommender {
             }
         }
 
+        val subscribed = fetchSubscribedUploads(context, excludeUrls)
+        val subscribedUrls = subscribed.map { it.videoUrl }.toSet()
+
         val similar = OnlineRecommendationMixer.roundRobin(clean(similarRaw)).distinctBy { it.videoUrl }
+            .filter { it.videoUrl !in subscribedUrls }
         val discovery = OnlineRecommendationMixer.roundRobin(clean(discoveryRaw)).distinctBy { it.videoUrl }
-        val mixed = if (favs.isEmpty()) discovery.take(total)
-        else OnlineRecommendationMixer.mix(similar = similar, discovery = discovery, total = total)
-        spreadChannels(mixed.distinctBy { it.videoUrl })
+            .filter { it.videoUrl !in subscribedUrls }
+        val rest = (total - subscribed.size).coerceAtLeast(0)
+        val mixed = if (favs.isEmpty()) discovery.take(rest)
+        else OnlineRecommendationMixer.mix(similar = similar, discovery = discovery, total = rest)
+        // New uploads of subscribed channels go first, the personalised / discovery mix follows.
+        spreadChannels((subscribed + mixed).distinctBy { it.videoUrl })
     }
+
+    /**
+     * Newest uploads of the channels the user subscribed to. Videos already finished are skipped, as are videos
+     * that are already on screen ([excludeUrls]). Returns at most [SUBSCRIBED_QUOTA] videos, newest first.
+     */
+    private suspend fun fetchSubscribedUploads(context: Context, excludeUrls: Set<String>): List<OnlineTrackResult> =
+        coroutineScope {
+            val channels = SubscribedChannelsManager.getAll(context).take(SUBSCRIBED_CHANNELS_PER_BATCH)
+            if (channels.isEmpty()) return@coroutineScope emptyList()
+            val perChannel = channels.map { ch ->
+                async(Dispatchers.IO) {
+                    try {
+                        OnlineMusicService.fetchChannelLatestVideos(ch.channelUrl, 4)
+                            .map { if (it.artist.isBlank()) it.copy(artist = ch.name) else it }
+                            .filter {
+                                it.videoUrl.isNotBlank() && it.title.isNotBlank() &&
+                                    it.videoUrl !in excludeUrls &&
+                                    it.durationSec >= 60L && it.durationSec <= 4 * 3600L &&
+                                    !isCompleted(context, it.videoUrl)
+                            }
+                            .take(2)
+                    } catch (t: kotlinx.coroutines.CancellationException) {
+                        throw t
+                    } catch (_: Throwable) {
+                        emptyList<OnlineTrackResult>()
+                    }
+                }
+            }.awaitAll()
+            perChannel.flatten()
+                .distinctBy { it.videoUrl }
+                .sortedByDescending { it.uploadDateEpochMs ?: 0L }
+                .take(SUBSCRIBED_QUOTA)
+        }
 
     /** Re-orders so the same channel is never shown twice in a row (and rarely close together). */
     fun spreadChannels(items: List<OnlineTrackResult>): List<OnlineTrackResult> {

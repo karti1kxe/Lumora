@@ -183,6 +183,13 @@ object PlaybackHistoryManager {
             safePos.coerceAtLeast(0L)
         }
 
+        // An online video watched to the end must not be recommended again in the Online feed.
+        if (isFinished && path.startsWith(OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX)) {
+            try {
+                OnlineVideoRecommender.recordCompleted(context, OnlineVideoService.toWatchUrl(path))
+            } catch (_: Throwable) {}
+        }
+
         // Protection against spurious 0L ticks overwriting valid resume position (> 1000ms) during initialization or rapid exit
         if (finalPos <= 1000L && !isFinished) {
             val existingPos = getSavedPosition(context, videoId, path, uriString, title)

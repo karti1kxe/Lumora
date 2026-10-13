@@ -47,7 +47,7 @@ import com.example.util.OnlineChannelResult
 
 /**
  * YouTube channel result card shown when a search query matches a creator/channel.
- * Features the channel avatar, title, subscriber info, a system gradient Subscribe button (UI only),
+ * Features the channel avatar, title, subscriber info, a system gradient Subscribe button (saved locally),
  * and a functional View Channel button.
  */
 @Composable
@@ -70,7 +70,11 @@ fun OnlineChannelResultCard(
         }
     }
 
-    var isSubscribed by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    // Saved locally so subscribed channels' new uploads show up in the Online video feed.
+    var isSubscribed by remember(channel.channelUrl) {
+        mutableStateOf(com.example.util.SubscribedChannelsManager.isSubscribed(context, channel.channelUrl))
+    }
 
     Column(
         modifier = modifier
@@ -158,8 +162,10 @@ fun OnlineChannelResultCard(
                     .clip(RoundedCornerShape(50))
                     .background(subBg)
                     .clickable {
-                        // UI-only toggle
                         isSubscribed = !isSubscribed
+                        com.example.util.SubscribedChannelsManager.setSubscribed(
+                            context, channel.channelUrl, channel.name, channel.avatarUrl, isSubscribed
+                        )
                     },
                 contentAlignment = Alignment.Center
             ) {

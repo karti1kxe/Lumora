@@ -332,13 +332,13 @@ fun AudioPlayerScreen(
     // Intercept system back button to smoothly close secondary bottom sheets first, or collapse to Mini Player
     BackHandler(enabled = true) {
         when {
+            showSleepTimerSheet -> showSleepTimerSheet = false
             showInfoSheet -> showInfoSheet = false
             showQueueSheet -> showQueueSheet = false
             showSpeedSheet -> showSpeedSheet = false
             showLyricsSheet -> showLyricsSheet = false
             showABLoopSheet -> showABLoopSheet = false
             showEqualizerSheet -> showEqualizerSheet = false
-            showSleepTimerSheet -> showSleepTimerSheet = false
             showAddToPlaylistDialog -> showAddToPlaylistDialog = false
             else -> onCollapse()
         }
@@ -529,28 +529,6 @@ fun AudioPlayerScreen(
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
-                        }
-
-                        // Sleep Timer Button (works for offline + online audio)
-                        Box(
-                            modifier = Modifier
-                                .testTag("audio_player_sleep_timer_button")
-                                .size(42.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (sleepTimerActive) AccentSkyBlue.copy(alpha = 0.15f)
-                                    else if (isDark) Color(0xFF1E293B).copy(alpha = 0.7f) else Color(0xFFE2E8F0).copy(alpha = 0.85f)
-                                )
-                                .border(1.dp, if (sleepTimerActive) AccentSkyBlue.copy(alpha = 0.5f) else borderColor, CircleShape)
-                                .clickable { showSleepTimerSheet = true },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            StyledIcon(
-                                drawableRes = R.drawable.lumora_sleep,
-                                contentDescription = "Sleep timer",
-                                tint = if (sleepTimerActive) AccentSkyBlue else primaryText,
-                                modifier = Modifier.size(22.dp)
-                            )
                         }
 
                         // Info Button
@@ -1687,8 +1665,25 @@ fun AudioPlayerScreen(
                             text = "Up Next • ${queue.size} ${if (queue.size == 1) "track" else "tracks"}",
                             fontSize = 16.5.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = primaryText
+                            color = primaryText,
+                            modifier = Modifier.weight(1f)
                         )
+                        // Sleep Timer (works for offline + online audio) - sits at the right end of "Up Next"
+                        Box(
+                            modifier = Modifier
+                                .testTag("audio_player_sleep_timer_button")
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .clickable { showSleepTimerSheet = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            StyledIcon(
+                                drawableRes = R.drawable.lumora_sleep,
+                                contentDescription = "Sleep timer",
+                                tint = if (sleepTimerActive) AccentSkyBlue else primaryText,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))

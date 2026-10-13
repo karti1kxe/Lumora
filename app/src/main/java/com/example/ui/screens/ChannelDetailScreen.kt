@@ -179,7 +179,17 @@ fun ChannelDetailScreen(
     var shortsTracks by remember(channel?.channelUrl) { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
     var shortsLoaded by remember(channel?.channelUrl) { mutableStateOf(false) }
     var isLoadingShorts by remember(channel?.channelUrl) { mutableStateOf(false) }
-    var isChannelSubscribed by remember(channel?.channelUrl) { mutableStateOf(false) }
+    var isChannelSubscribed by remember(channel?.channelUrl) {
+        mutableStateOf(channel?.channelUrl?.let { com.example.util.SubscribedChannelsManager.isSubscribed(context, it) } == true)
+    }
+    // Total uploaded videos ("128 videos"), counted in the background once the channel is on screen.
+    var videoCountText by remember(channel?.channelUrl) { mutableStateOf<String?>(null) }
+    LaunchedEffect(channel?.channelUrl) {
+        val url = channel?.channelUrl
+        if (!url.isNullOrBlank()) {
+            videoCountText = OnlineMusicService.fetchChannelVideoCountText(url)
+        }
+    }
     var nextPage by remember(channel?.channelUrl) { mutableStateOf<Page?>(null) }
     var hasNextPage by remember(channel?.channelUrl) { mutableStateOf(false) }
     var isLoadingMore by remember(channel?.channelUrl) { mutableStateOf(false) }
@@ -420,9 +430,6 @@ fun ChannelDetailScreen(
                 .padding(horizontal = 14.dp)
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Channel banner at the very top (only when the channel has one)
-                ChannelBanner(bannerUrl = detail?.bannerUrl, isDark = isDark)
-
                 HeaderBar(
                     title = channel?.name ?: "Channel",
                     themeMode = uiState?.themeMode ?: ThemeMode.DARK,
@@ -540,11 +547,23 @@ fun ChannelDetailScreen(
                                 name = info?.name ?: channel?.name ?: "Channel",
                                 avatarUrl = info?.avatarUrl ?: channel?.avatarUrl,
                                 subscriberCountText = info?.subscriberCountText ?: channel?.subscriberCountText,
-                                videoCountText = channel?.videoCountText,
+                                videoCountText = videoCountText,
+                                bannerUrl = info?.bannerUrl,
                                 description = info?.description ?: channel?.description,
                                 isVerified = info?.isVerified == true,
                                 isSubscribed = isChannelSubscribed,
-                                onSubscribeToggle = { isChannelSubscribed = !isChannelSubscribed },
+                                onSubscribeToggle = {
+                                    isChannelSubscribed = !isChannelSubscribed
+                                    channel?.channelUrl?.let { url ->
+                                        com.example.util.SubscribedChannelsManager.setSubscribed(
+                                            context,
+                                            url,
+                                            info?.name ?: channel?.name ?: "Channel",
+                                            info?.avatarUrl ?: channel?.avatarUrl,
+                                            isChannelSubscribed
+                                        )
+                                    }
+                                },
                                 isDark = isDark
                             )
 
@@ -817,28 +836,6 @@ fun ChannelDetailScreen(
     }
 }
 
-/** Channel banner shown at the very top of the channel screen. Renders nothing if the channel has none. */
-@Composable
-private fun ChannelBanner(bannerUrl: String?, isDark: Boolean) {
-    if (bannerUrl.isNullOrBlank()) return
-    var bannerBitmap by remember(bannerUrl) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(bannerUrl) {
-        bannerBitmap = loadRemoteAudioThumbnail(bannerUrl, targetSizePx = 1200)
-    }
-    val bmp = bannerBitmap ?: return
-    Image(
-        bitmap = bmp.asImageBitmap(),
-        contentDescription = "Channel banner",
-        contentScale = ContentScale.Crop,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 6.dp, bottom = 2.dp)
-            .aspectRatio(16f / 4.2f)
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (isDark) Color(0xFF1E293B) else Color(0xFFE2E8F0))
-    )
-}
-
 /**
  * Channel card used inside the channel screen. Same look as the card in the search results
  * (glass surface + gradient border + avatar + name/subscribers), with the gradient Subscribe button.
@@ -850,6 +847,7 @@ private fun ChannelProfileCard(
     avatarUrl: String?,
     subscriberCountText: String?,
     videoCountText: String?,
+    bannerUrl: String?,
     description: String?,
     isVerified: Boolean,
     isSubscribed: Boolean,
@@ -868,6 +866,13 @@ private fun ChannelProfileCard(
     }
     var descriptionExpanded by remember(name) { mutableStateOf(false) }
 
+    var bannerBitmap by remember(bannerUrl) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(bannerUrl) {
+        if (!bannerUrl.isNullOrBlank()) {
+            bannerBitmap = loadRemoteAudioThumbnail(bannerUrl, targetSizePx = 1200)
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -875,101 +880,121 @@ private fun ChannelProfileCard(
             .clip(RoundedCornerShape(16.dp))
             .background(surfaceColor)
             .border(1.5.dp, AccentGradient, RoundedCornerShape(16.dp))
-            .padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(1.5.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        // Channel banner: first thing inside the card (above avatar / name). Nothing is drawn if the channel has none.
+        val banner = bannerBitmap
+        if (banner != null) {
+            Image(
+                bitmap = banner.asImageBitmap(),
+                contentDescription = "Channel banner",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 4.2f)
+                    .clip(RoundedCornerShape(topStart = 14.5.dp, topEnd = 14.5.dp))
+                    .background(if (isDark) Color(0xFF1E293B) else Color(0xFFE2E8F0))
+            )
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Box(
-                modifier = Modifier.size(60.dp).clip(CircleShape).background(AccentGradient),
-                contentAlignment = Alignment.Center
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                val bmp = avatarBitmap
-                if (bmp != null) {
-                    Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = name,
-                        modifier = Modifier.size(60.dp).clip(CircleShape)
-                    )
-                } else {
-                    Text(
-                        text = name.take(1).uppercase(),
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 22.sp
-                    )
-                }
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = name,
-                        color = primaryText,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    if (isVerified) {
-                        Spacer(modifier = Modifier.width(5.dp))
-                        StyledIcon(
-                            drawableRes = com.example.R.drawable.lumora_check_circle,
-                            contentDescription = "Verified",
-                            tint = primaryText,
-                            modifier = Modifier.size(16.dp)
+                Box(
+                    modifier = Modifier.size(60.dp).clip(CircleShape).background(AccentGradient),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val bmp = avatarBitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = name,
+                            modifier = Modifier.size(60.dp).clip(CircleShape)
+                        )
+                    } else {
+                        Text(
+                            text = name.take(1).uppercase(),
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 22.sp
                         )
                     }
                 }
-                val meta = listOfNotNull(subscriberCountText, videoCountText).joinToString(" \u2022 ")
-                if (meta.isNotBlank()) {
-                    Text(
-                        text = meta,
-                        color = secondaryText,
-                        fontSize = 12.5.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = name,
+                            color = primaryText,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (isVerified) {
+                            Spacer(modifier = Modifier.width(5.dp))
+                            StyledIcon(
+                                drawableRes = com.example.R.drawable.lumora_check_circle,
+                                contentDescription = "Verified",
+                                tint = primaryText,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                    val meta = listOfNotNull(subscriberCountText, videoCountText).joinToString(" \u2022 ")
+                    if (meta.isNotBlank()) {
+                        Text(
+                            text = meta,
+                            color = secondaryText,
+                            fontSize = 12.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
-        }
 
-        if (!description.isNullOrBlank()) {
-            Text(
-                text = description,
-                color = secondaryText,
-                fontSize = 12.5.sp,
-                maxLines = if (descriptionExpanded) 12 else 1,
-                overflow = TextOverflow.Ellipsis,
+            if (!description.isNullOrBlank()) {
+                Text(
+                    text = description,
+                    color = secondaryText,
+                    fontSize = 12.5.sp,
+                    maxLines = if (descriptionExpanded) 12 else 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { descriptionExpanded = !descriptionExpanded }
+                )
+            }
+
+            // Subscribe button (system gradient, UI only)
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable { descriptionExpanded = !descriptionExpanded }
-            )
-        }
-
-        // Subscribe button (system gradient, UI only)
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(40.dp)
-                .clip(RoundedCornerShape(50))
-                .background(
-                    if (isSubscribed) SolidColor(if (isDark) Color(0xFF334155) else Color(0xFFE2E8F0))
-                    else AccentGradient
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        if (isSubscribed) SolidColor(if (isDark) Color(0xFF334155) else Color(0xFFE2E8F0))
+                        else AccentGradient
+                    )
+                    .clickable { onSubscribeToggle() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (isSubscribed) "Subscribed" else "Subscribe",
+                    color = if (isSubscribed) primaryText else Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
                 )
-                .clickable { onSubscribeToggle() },
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = if (isSubscribed) "Subscribed" else "Subscribe",
-                color = if (isSubscribed) primaryText else Color.White,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold
-            )
+            }
         }
     }
 }

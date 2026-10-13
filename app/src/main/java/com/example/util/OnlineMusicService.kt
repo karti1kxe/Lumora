@@ -2,6 +2,7 @@ package com.example.util
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request as OkRequest
@@ -691,6 +692,80 @@ object OnlineMusicService {
         } catch (e: Exception) {
             Log.e(TAG, "fetchNextChannelTrackPage failed: ${e.message}", e)
             OnlineChannelTrackPage(emptyList(), null, false)
+        }
+    }
+
+    // ---------- Channel helpers used by Subscribe / recommendations / video count ----------
+    private val latestVideosCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<OnlineTrackResult>>>()
+    private val videoCountCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private const val LATEST_VIDEOS_TTL_MS = 10 * 60 * 1000L
+
+    private fun findVideosTab(info: org.schabi.newpipe.extractor.channel.ChannelExtractor): ListLinkHandler? {
+        val tabs = try { info.tabs ?: emptyList() } catch (_: Throwable) { emptyList() }
+        return tabs.firstOrNull { tab ->
+            try { tab.contentFilters.contains(ChannelTabs.VIDEOS) } catch (_: Throwable) { false }
+        }
+    }
+
+    /** Newest uploads of a channel (first page of its Videos tab). Cached for a few minutes. */
+    suspend fun fetchChannelLatestVideos(channelUrl: String, limit: Int = 4): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
+        latestVideosCache[channelUrl]?.let { (t, v) ->
+            if (System.currentTimeMillis() - t < LATEST_VIDEOS_TTL_MS) return@withContext v.take(limit)
+        }
+        try {
+            ensureInit()
+            val service = ServiceList.YouTube
+            val info = service.getChannelExtractor(channelUrl)
+            info.fetchPage()
+            val handler = findVideosTab(info) ?: return@withContext emptyList<OnlineTrackResult>()
+            val tabExtractor = service.getChannelTabExtractor(handler)
+            tabExtractor.fetchPage()
+            val items = tabExtractor.initialPage.items.filterIsInstance<StreamInfoItem>()
+                .filter { it.duration > 0L }
+                .take(8)
+                .map { it.toOnlineTrackResult() }
+            latestVideosCache[channelUrl] = System.currentTimeMillis() to items
+            items.take(limit)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.e(TAG, "fetchChannelLatestVideos failed for $channelUrl: ${e.message}", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Total number of videos a channel has uploaded, as display text ("128 videos", "1.2K videos").
+     * NewPipeExtractor has no "video count" field for a channel, so the Videos tab is paged through in the
+     * background. At most [maxPages] pages are read; a longer channel is shown as "1.8K+ videos".
+     */
+    suspend fun fetchChannelVideoCountText(channelUrl: String, maxPages: Int = 60): String? = withContext(Dispatchers.IO) {
+        videoCountCache[channelUrl]?.let { return@withContext it }
+        try {
+            ensureInit()
+            val service = ServiceList.YouTube
+            val info = service.getChannelExtractor(channelUrl)
+            info.fetchPage()
+            val handler = findVideosTab(info) ?: return@withContext null
+            val tabExtractor = service.getChannelTabExtractor(handler)
+            tabExtractor.fetchPage()
+            var page = tabExtractor.initialPage
+            var total = page.items.count { it is StreamInfoItem && it.duration > 0L }
+            var pages = 1
+            var complete = true
+            while (page.hasNextPage()) {
+                if (pages >= maxPages) { complete = false; break }
+                ensureActive()
+                page = tabExtractor.getPage(page.nextPage)
+                total += page.items.count { it is StreamInfoItem && it.duration > 0L }
+                pages++
+            }
+            val text = "${formatCount(total.toLong())}${if (complete) "" else "+"} ${if (total == 1 && complete) "video" else "videos"}"
+            videoCountCache[channelUrl] = text
+            text
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.e(TAG, "fetchChannelVideoCountText failed for $channelUrl: ${e.message}", e)
+            null
         }
     }
 
