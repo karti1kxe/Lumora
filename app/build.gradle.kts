@@ -93,9 +93,13 @@ android {
   packaging {
     resources {
       excludes += "/META-INF/{AL2.0,LGPL2.1}"
+      excludes += listOf("META-INF/DEPENDENCIES", "META-INF/INDEX.LIST", "META-INF/LICENSE*", "META-INF/NOTICE*", "META-INF/*.kotlin_module.bak")
     }
     jniLibs {
       pickFirsts += "**/libc++_shared.so"
+      // youtubedl-android runs its bundled python/yt-dlp binaries from the native-lib directory,
+      // so the .so files must be extracted at install time.
+      useLegacyPackaging = true
     }
   }
 }
@@ -154,6 +158,8 @@ dependencies {
   // implementation(libs.retrofit)
   implementation(libs.androidx.media)
   implementation(libs.mpv.android.lib)
+  // yt-dlp for Android (Network tab): resolves YouTube and the other sites yt-dlp supports to playable stream URLs.
+  implementation(libs.youtubedl.android.library)
   // media3-exoplayer / media3-ui removed: not used anywhere in the code — the app
   // plays everything through mpv-android-lib. Keeping them only added unused APK
   // weight and a second, unused player stack.

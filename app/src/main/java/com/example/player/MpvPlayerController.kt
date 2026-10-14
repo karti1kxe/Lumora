@@ -313,6 +313,8 @@ class MpvPlayerController {
     @Volatile private var lastLiveReconnectAt = 0L
     @Volatile private var isRetryLoad = false
     @Volatile private var streamOptionsApplied = false
+    /** Headers (User-Agent / Referer / ...) a Network-tab link needs; set after [setOnlineStream], cleared by it. */
+    @Volatile private var networkRequestOptions: StreamRequestOptions.Options? = null
     /** True when the previously opened file was a live/IPTV stream (its last frame must not linger on the next channel). */
     @Volatile private var lastLoadWasDirect = false
 
@@ -397,6 +399,7 @@ class MpvPlayerController {
         chapters: List<PlayerVideoChapter>? = null
     ) {
         directStreamMode = false
+        networkRequestOptions = null
         onlineStreamMode = enabled
         onlineAudioSources = if (enabled) audios else emptyList()
         onlineAudioSelectedIndex = selectedAudioIndex.coerceIn(0, (audios.size - 1).coerceAtLeast(0))
@@ -418,8 +421,20 @@ class MpvPlayerController {
     }
 
     /** Applies the stream's own User-Agent / referrer / headers (and clears them again for the next, different file). */
+    /** Network tab: remember the HTTP headers the resolved link needs (call after [setOnlineStream], before [loadVideo]). */
+    fun setNetworkRequestHeaders(headers: Map<String, String>) {
+        if (headers.isEmpty()) { networkRequestOptions = null; return }
+        val ua = headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value?.takeIf { it.isNotBlank() }
+        val ref = headers.entries.firstOrNull { it.key.equals("Referer", true) || it.key.equals("Referrer", true) }?.value?.takeIf { it.isNotBlank() }
+        val fields = headers.entries
+            .filter { !it.key.equals("User-Agent", true) && !it.key.equals("Referer", true) && !it.key.equals("Referrer", true) && it.key.isNotBlank() && it.value.isNotBlank() }
+            .joinToString(",") { "${it.key}: ${it.value.replace(",", "%2C")}" }
+            .takeIf { it.isNotBlank() }
+        networkRequestOptions = if (ua == null && ref == null && fields == null) null else StreamRequestOptions.Options(ua, ref, fields)
+    }
+
     private fun applyStreamRequestOptions(view: VideoPlayerMpvView, filePath: String) {
-        val options = if (directStreamMode) StreamRequestOptions.forUrl(filePath) else null
+        val options = networkRequestOptions ?: if (directStreamMode) StreamRequestOptions.forUrl(filePath) else null
         if (options == null && !streamOptionsApplied) return
         try {
             if (options?.userAgent != null) view.mpv.setPropertyString("user-agent", options.userAgent)

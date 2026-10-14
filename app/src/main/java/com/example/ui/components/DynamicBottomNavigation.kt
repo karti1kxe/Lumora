@@ -73,7 +73,8 @@ enum class NavigationTab(
     HOME("home", R.drawable.lumora_video_library, R.drawable.lumora_video_library),
     MUSIC("music", R.drawable.lumora_music_library, R.drawable.lumora_music_library),
     RECENTS("recents", R.drawable.lumora_recent, R.drawable.lumora_recent),
-    PLAYLISTS("playlists", R.drawable.lumora_playlist_video, R.drawable.lumora_playlist_video);
+    PLAYLISTS("playlists", R.drawable.lumora_playlist_video, R.drawable.lumora_playlist_video),
+    NETWORK("network", R.drawable.lumora_network, R.drawable.lumora_network);
 
     fun getTitle(lang: AppLanguage = AppLanguage.ENGLISH): String = when (this) {
         HOME -> when (lang) {
@@ -96,6 +97,11 @@ enum class NavigationTab(
             AppLanguage.HINGLISH -> "Playlists"
             AppLanguage.HINDI -> "प्लेलिस्ट"
         }
+        NETWORK -> when (lang) {
+            AppLanguage.ENGLISH -> "Network"
+            AppLanguage.HINGLISH -> "Network"
+            AppLanguage.HINDI -> "नेटवर्क"
+        }
     }
 }
 
@@ -114,18 +120,20 @@ fun DynamicBottomNavigation(
     showMusicTab: Boolean,
     showRecentsTab: Boolean,
     showPlaylistsTab: Boolean,
+    showNetworkTab: Boolean = false,
     isDark: Boolean,
     glassBlurTransparency: Float = 75f,
     tabNavigationStyle: TabNavigationStyle = TabNavigationStyle.DEFAULT,
     lang: AppLanguage = AppLanguage.ENGLISH,
     modifier: Modifier = Modifier
 ) {
-    val activeTabs = remember(showHomeTab, showMusicTab, showRecentsTab, showPlaylistsTab) {
+    val activeTabs = remember(showHomeTab, showMusicTab, showRecentsTab, showPlaylistsTab, showNetworkTab) {
         val list = mutableListOf<NavigationTab>()
         if (showHomeTab) list.add(NavigationTab.HOME)
         if (showMusicTab) list.add(NavigationTab.MUSIC)
         if (showRecentsTab) list.add(NavigationTab.RECENTS)
         if (showPlaylistsTab) list.add(NavigationTab.PLAYLISTS)
+        if (showNetworkTab) list.add(NavigationTab.NETWORK)
         list
     }
 

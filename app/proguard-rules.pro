@@ -33,3 +33,10 @@
 -keep class com.example.player.AudioSettings** { *; }
 -keep class com.example.player.Track** { *; }
 
+
+# yt-dlp for Android (Network tab)
+-keep class com.yausername.youtubedl_android.** { *; }
+-dontwarn com.yausername.youtubedl_android.**
+-keep class com.fasterxml.jackson.** { *; }
+-dontwarn com.fasterxml.jackson.**
+-dontwarn org.apache.commons.io.**

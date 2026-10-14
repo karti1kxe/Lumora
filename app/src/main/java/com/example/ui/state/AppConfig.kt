@@ -234,6 +234,8 @@ data class UiState(
     val showMusicTab: Boolean = true,
     val showRecentsTab: Boolean = true,
     val showPlaylistsTab: Boolean = true,
+    /** Optional "Network" bottom tab (play a pasted link). Off by default. */
+    val showNetworkTab: Boolean = false,
 
     // Animations
     val controlsAnimationStyle: ControlsAnimationStyle = ControlsAnimationStyle.DEFAULT,
@@ -328,6 +330,7 @@ object SettingsPreferencesManager {
     private const val KEY_SHOW_MUSIC_TAB = "key_show_music_tab"
     private const val KEY_SHOW_RECENTS_TAB = "key_show_recents_tab"
     private const val KEY_SHOW_PLAYLISTS_TAB = "key_show_playlists_tab"
+    private const val KEY_SHOW_NETWORK_TAB = "key_show_network_tab"
 
     // Animations Keys
     private const val KEY_CONTROLS_ANIMATION_STYLE = "key_controls_animation_style"
@@ -512,6 +515,7 @@ object SettingsPreferencesManager {
         val showMusicTab = prefs.getBoolean(KEY_SHOW_MUSIC_TAB, true)
         val showRecentsTab = prefs.getBoolean(KEY_SHOW_RECENTS_TAB, true)
         val showPlaylistsTab = prefs.getBoolean(KEY_SHOW_PLAYLISTS_TAB, true)
+        val showNetworkTab = prefs.getBoolean(KEY_SHOW_NETWORK_TAB, false)
 
         // Animations
         val ctrlAnimStr = prefs.getString(KEY_CONTROLS_ANIMATION_STYLE, ControlsAnimationStyle.DEFAULT.name) ?: ControlsAnimationStyle.DEFAULT.name
@@ -617,6 +621,7 @@ object SettingsPreferencesManager {
             showMusicTab = showMusicTab,
             showRecentsTab = showRecentsTab,
             showPlaylistsTab = showPlaylistsTab,
+            showNetworkTab = showNetworkTab,
 
             // Animations
             controlsAnimationStyle = controlsAnimationStyle,
@@ -764,6 +769,7 @@ object SettingsPreferencesManager {
             .putBoolean(KEY_SHOW_MUSIC_TAB, state.showMusicTab)
             .putBoolean(KEY_SHOW_RECENTS_TAB, state.showRecentsTab)
             .putBoolean(KEY_SHOW_PLAYLISTS_TAB, state.showPlaylistsTab)
+            .putBoolean(KEY_SHOW_NETWORK_TAB, state.showNetworkTab)
 
             // Animations
             .putString(KEY_CONTROLS_ANIMATION_STYLE, state.controlsAnimationStyle.name)
@@ -1372,6 +1378,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setShowRecentsTab(show: Boolean) {
         val newState = _uiState.value.copy(showRecentsTab = show)
+        _uiState.value = newState
+        SettingsPreferencesManager.saveSettings(appContext, newState)
+    }
+
+    fun setShowNetworkTab(show: Boolean) {
+        val newState = _uiState.value.copy(showNetworkTab = show)
         _uiState.value = newState
         SettingsPreferencesManager.saveSettings(appContext, newState)
     }

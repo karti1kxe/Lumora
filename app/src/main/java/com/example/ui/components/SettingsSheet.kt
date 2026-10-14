@@ -277,6 +277,7 @@ fun SettingsSheet(
     onShowMusicTabChange: (Boolean) -> Unit = {},
     onShowRecentsTabChange: (Boolean) -> Unit = {},
     onShowPlaylistsTabChange: (Boolean) -> Unit = {},
+    onShowNetworkTabChange: (Boolean) -> Unit = {},
     onControlsAnimationStyleChange: (ControlsAnimationStyle) -> Unit = {},
     onVideoOpeningAnimationChange: (VideoOpeningAnimation) -> Unit = {},
     onScreenNavigationStyleChange: (ScreenNavigationStyle) -> Unit = {},
@@ -1551,6 +1552,19 @@ fun SettingsSheet(
                                     primaryText = primaryText,
                                     secondaryText = secondaryText,
                                     onChange = onShowPlaylistsTabChange
+                                )
+
+                                Spacer(modifier = Modifier.height(10.dp))
+                                HorizontalDivider(color = borderColor)
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                PlayerSwitchRow(
+                                    title = "Network Tab",
+                                    description = "Paste a link (YouTube and other supported sites, or a direct video URL) and play it in the player",
+                                    checked = uiState.showNetworkTab,
+                                    primaryText = primaryText,
+                                    secondaryText = secondaryText,
+                                    onChange = onShowNetworkTabChange
                                 )
                             }
                         }

@@ -588,6 +588,31 @@ fun VideoPlayerScreen(
         controller.play()
     }
 
+    /**
+     * A link pasted in the Network tab: resolved with yt-dlp (the Network tab already resolved it, so this is normally an
+     * instant cache hit) and then played by the SAME mpv player and controls as every other video.
+     */
+    suspend fun startNetworkPlayback(pageUrl: String, startMs: Long, key: String) {
+        controller.setOnlineStream(true)
+        val stream = com.example.util.NetworkStreamResolver.resolve(context, pageUrl)
+        if (lastLoadedVideoKey != key) return
+        if (stream == null) {
+            Toast.makeText(context, "Could not play this link. Check the link and your internet connection.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val separateAudio = stream.audioUrl
+        if (separateAudio != null) {
+            controller.setOnlineStream(true, listOf(OnlineAudioSource(separateAudio, "Audio", "")), 0, null)
+        } else {
+            controller.setOnlineStream(true)
+            // plain media links and live streams: same handling as imported IPTV channels
+            if (stream.isDirect) controller.setDirectStream(true)
+        }
+        controller.setNetworkRequestHeaders(stream.headers)
+        controller.loadVideo(stream.videoUrl, startMs)
+        controller.play()
+    }
+
     val onStartTranslate: (Int) -> Unit = { sourceTrackId ->
         if (translationStatusByTrackId[sourceTrackId] is TrackTranslationStatus.Translating) {
             // Already running translation for this track
@@ -1744,6 +1769,9 @@ fun VideoPlayerScreen(
                     controller.setDirectStream(true)
                     controller.loadVideo(path, startPositionMs = initialPos)
                     controller.play()
+                } else if (targetVideo.isNetworkStream) {
+                    onlinePlayback = null
+                    startNetworkPlayback(path, initialPos, key)
                 } else if (targetVideo.isOnline) {
                     startOnlinePlayback(path, initialPos, key)
                 } else {

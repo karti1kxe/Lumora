@@ -48,7 +48,9 @@ data class VideoItem(
     val channelName: String? = null,
     val viewCountText: String? = null,
     /** An imported M3U/IPTV stream: [path] is the real stream URL that mpv opens directly (no YouTube resolving). */
-    val isDirectStream: Boolean = false
+    val isDirectStream: Boolean = false,
+    /** A link pasted in the Network tab: [path] is the page/media URL, resolved with yt-dlp right before playback. */
+    val isNetworkStream: Boolean = false
 ) {
     val formattedSize: String
         get() = formatFileSize(sizeBytes)

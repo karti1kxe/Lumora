@@ -300,6 +300,7 @@ object LumoraSettingsXmlManager {
         writeSetting("showMusicTab", state.showMusicTab)
         writeSetting("showRecentsTab", state.showRecentsTab)
         writeSetting("showPlaylistsTab", state.showPlaylistsTab)
+        writeSetting("showNetworkTab", state.showNetworkTab)
         writeSetting("controlsAnimationStyle", state.controlsAnimationStyle.name)
         writeSetting("videoOpeningAnimation", state.videoOpeningAnimation.name)
         writeSetting("screenNavigationStyle", state.screenNavigationStyle.name)
@@ -689,6 +690,7 @@ object LumoraSettingsXmlManager {
                 val showMusicTab = getBool("showMusicTab", currentUiState.showMusicTab)
                 val showRecentsTab = getBool("showRecentsTab", currentUiState.showRecentsTab)
                 val showPlaylistsTab = getBool("showPlaylistsTab", currentUiState.showPlaylistsTab)
+                val showNetworkTab = getBool("showNetworkTab", currentUiState.showNetworkTab)
                 val controlsAnimationStyle = runCatching { ControlsAnimationStyle.valueOf(getStr("controlsAnimationStyle", currentUiState.controlsAnimationStyle.name)) }.getOrDefault(currentUiState.controlsAnimationStyle)
                 val videoOpeningAnimation = runCatching { VideoOpeningAnimation.valueOf(getStr("videoOpeningAnimation", currentUiState.videoOpeningAnimation.name)) }.getOrDefault(currentUiState.videoOpeningAnimation)
                 val screenNavigationStyle = runCatching { ScreenNavigationStyle.valueOf(getStr("screenNavigationStyle", currentUiState.screenNavigationStyle.name)) }.getOrDefault(currentUiState.screenNavigationStyle)
@@ -764,6 +766,7 @@ object LumoraSettingsXmlManager {
                     showMusicTab = showMusicTab,
                     showRecentsTab = showRecentsTab,
                     showPlaylistsTab = showPlaylistsTab,
+                    showNetworkTab = showNetworkTab,
                     controlsAnimationStyle = controlsAnimationStyle,
                     videoOpeningAnimation = videoOpeningAnimation,
                     screenNavigationStyle = screenNavigationStyle,

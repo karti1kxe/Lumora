@@ -344,13 +344,15 @@ fun HomeScreen(
         uiState.showHomeTab,
         uiState.showMusicTab,
         uiState.showRecentsTab,
-        uiState.showPlaylistsTab
+        uiState.showPlaylistsTab,
+        uiState.showNetworkTab
     ) {
         val list = mutableListOf<NavigationTab>()
         if (uiState.showHomeTab) list.add(NavigationTab.HOME)
         if (uiState.showMusicTab) list.add(NavigationTab.MUSIC)
         if (uiState.showRecentsTab) list.add(NavigationTab.RECENTS)
         if (uiState.showPlaylistsTab) list.add(NavigationTab.PLAYLISTS)
+        if (uiState.showNetworkTab) list.add(NavigationTab.NETWORK)
         list
     }
 
@@ -547,6 +549,7 @@ fun HomeScreen(
         NavigationTab.HOME -> currentFolder != null || homeViewMode == ViewMode.LIBRARY
         NavigationTab.MUSIC -> isInsideMusicFolder || musicViewMode == ViewMode.LIBRARY
         NavigationTab.RECENTS -> isInsideRecentsFolder || recentsViewMode == ViewMode.LIBRARY
+        NavigationTab.NETWORK -> false
         NavigationTab.PLAYLISTS -> isInsidePlaylistDetail
     }
 
@@ -554,24 +557,28 @@ fun HomeScreen(
         NavigationTab.HOME -> homeFolderSortField
         NavigationTab.MUSIC -> musicFolderSortField
         NavigationTab.RECENTS -> recentsFolderSortField
+        NavigationTab.NETWORK -> playlistsFolderSortField
         NavigationTab.PLAYLISTS -> playlistsFolderSortField
     }
     val activeFolderSortDirection = when (effectiveSelectedTab) {
         NavigationTab.HOME -> homeFolderSortDirection
         NavigationTab.MUSIC -> musicFolderSortDirection
         NavigationTab.RECENTS -> recentsFolderSortDirection
+        NavigationTab.NETWORK -> playlistsFolderSortDirection
         NavigationTab.PLAYLISTS -> playlistsFolderSortDirection
     }
     val activeFolderLayoutMode = when (effectiveSelectedTab) {
         NavigationTab.HOME -> homeFolderLayoutMode
         NavigationTab.MUSIC -> musicFolderLayoutMode
         NavigationTab.RECENTS -> recentsFolderLayoutMode
+        NavigationTab.NETWORK -> playlistsFolderLayoutMode
         NavigationTab.PLAYLISTS -> playlistsFolderLayoutMode
     }
     val activeFolderVisibleFields = when (effectiveSelectedTab) {
         NavigationTab.HOME -> homeFolderVisibleFields
         NavigationTab.MUSIC -> musicFolderVisibleFields
         NavigationTab.RECENTS -> recentsFolderVisibleFields
+        NavigationTab.NETWORK -> playlistsFolderVisibleFields
         NavigationTab.PLAYLISTS -> playlistsFolderVisibleFields
     }
 
@@ -579,24 +586,28 @@ fun HomeScreen(
         NavigationTab.HOME -> homeContentSortField
         NavigationTab.MUSIC -> musicContentSortField
         NavigationTab.RECENTS -> recentsContentSortField
+        NavigationTab.NETWORK -> playlistsContentSortField
         NavigationTab.PLAYLISTS -> playlistsContentSortField
     }
     val activeContentSortDirection = when (effectiveSelectedTab) {
         NavigationTab.HOME -> homeContentSortDirection
         NavigationTab.MUSIC -> musicContentSortDirection
         NavigationTab.RECENTS -> recentsContentSortDirection
+        NavigationTab.NETWORK -> playlistsContentSortDirection
         NavigationTab.PLAYLISTS -> playlistsContentSortDirection
     }
     val activeContentLayoutMode = when (effectiveSelectedTab) {
         NavigationTab.HOME -> homeContentLayoutMode
         NavigationTab.MUSIC -> musicContentLayoutMode
         NavigationTab.RECENTS -> recentsContentLayoutMode
+        NavigationTab.NETWORK -> playlistsContentLayoutMode
         NavigationTab.PLAYLISTS -> playlistsContentLayoutMode
     }
     val activeContentVisibleFields = when (effectiveSelectedTab) {
         NavigationTab.HOME -> homeContentVisibleFields
         NavigationTab.MUSIC -> musicContentVisibleFields
         NavigationTab.RECENTS -> recentsContentVisibleFields
+        NavigationTab.NETWORK -> playlistsContentVisibleFields
         NavigationTab.PLAYLISTS -> playlistsContentVisibleFields
     }
 
@@ -609,6 +620,7 @@ fun HomeScreen(
         NavigationTab.HOME -> homeViewMode
         NavigationTab.MUSIC -> musicViewMode
         NavigationTab.RECENTS -> recentsViewMode
+        NavigationTab.NETWORK -> playlistsViewMode
         NavigationTab.PLAYLISTS -> playlistsViewMode
     }
 
@@ -1603,6 +1615,7 @@ fun HomeScreen(
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Online" else (currentFolder?.name ?: AppStrings.getTitle(lang))
                         NavigationTab.MUSIC -> selectedMusicFolder?.name ?: "Music & Audio"
                         NavigationTab.RECENTS -> selectedRecentsFolder?.name ?: "Recently Played"
+                        NavigationTab.NETWORK -> "Network"
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.name ?: "Playlists"
                     }
                     val headerSubtitle = when (effectiveSelectedTab) {
@@ -1625,6 +1638,7 @@ fun HomeScreen(
                         NavigationTab.RECENTS -> selectedRecentsFolder?.let {
                             "${it.records.size} video${if (it.records.size != 1) "s" else ""} in folder"
                         } ?: "Resume your watch history"
+                        NavigationTab.NETWORK -> "Play links from the internet"
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.let {
                             val count = it.videoPaths.size
                             val type = if (it.isAudio) "Audio" else "Video"
@@ -1657,6 +1671,7 @@ fun HomeScreen(
                                 }
                             } else null
                             NavigationTab.RECENTS -> if (selectedRecentsFolder != null) { { selectedRecentsFolder = null } } else null
+                            NavigationTab.NETWORK -> null
                             NavigationTab.PLAYLISTS -> if (selectedPlaylist != null) {
                                 {
                                     searchQuery = ""
@@ -1705,6 +1720,7 @@ fun HomeScreen(
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Search videos, channels online..." else if (currentFolder != null) "Search in ${currentFolder.name}..." else "Search videos, or /playlist (e.g. /Op Anime)..."
                         NavigationTab.MUSIC -> if (selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) "Search songs, albums, artists online..." else "Search songs, albums, artists..."
                         NavigationTab.RECENTS -> "Search watch history..."
+                        NavigationTab.NETWORK -> "Enter stream URL..."
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.let { "Search in ${it.name}..." } ?: "Search playlists..."
                     }
                     Box(
@@ -1871,6 +1887,13 @@ fun HomeScreen(
                             onFolderStateChange = { isInside ->
                                 isInsideRecentsFolder = isInside
                             },
+                            onPlayVideo = onPlayVideo,
+                            modifier = Modifier.fillMaxWidth().weight(1f)
+                        )
+                    }
+                    NavigationTab.NETWORK -> {
+                        NetworkTabContent(
+                            isDark = isDark,
                             onPlayVideo = onPlayVideo,
                             modifier = Modifier.fillMaxWidth().weight(1f)
                         )
@@ -2951,6 +2974,7 @@ fun HomeScreen(
                     showMusicTab = uiState.showMusicTab,
                     showRecentsTab = uiState.showRecentsTab,
                     showPlaylistsTab = uiState.showPlaylistsTab,
+                    showNetworkTab = uiState.showNetworkTab,
                     isDark = isDark,
                     glassBlurTransparency = uiState.glassBlurTransparency,
                     tabNavigationStyle = uiState.tabNavigationStyle,
@@ -3292,6 +3316,7 @@ fun HomeScreen(
                     NavigationTab.HOME -> currentFolder != null || activeViewMode == ViewMode.LIBRARY
                     NavigationTab.MUSIC -> isInsideMusicFolder || activeViewMode == ViewMode.LIBRARY
                     NavigationTab.RECENTS -> isInsideRecentsFolder || activeViewMode == ViewMode.LIBRARY
+                    NavigationTab.NETWORK -> false
                     NavigationTab.PLAYLISTS -> isInsidePlaylistDetail
                 }
                 val isOnlineAudioFolder = (effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH)
@@ -3342,6 +3367,7 @@ fun HomeScreen(
                                 NavigationTab.RECENTS -> {
                                     if (isCurrentInsideFolder) recentsContentSortField = newField else recentsFolderSortField = newField
                                 }
+                                NavigationTab.NETWORK -> {}
                                 NavigationTab.PLAYLISTS -> {
                                     if (isCurrentInsideFolder) playlistsContentSortField = newField else playlistsFolderSortField = newField
                                 }
@@ -3370,6 +3396,7 @@ fun HomeScreen(
                                 NavigationTab.RECENTS -> {
                                     if (isCurrentInsideFolder) recentsContentSortDirection = newDir else recentsFolderSortDirection = newDir
                                 }
+                                NavigationTab.NETWORK -> {}
                                 NavigationTab.PLAYLISTS -> {
                                     if (isCurrentInsideFolder) playlistsContentSortDirection = newDir else playlistsFolderSortDirection = newDir
                                 }
@@ -3385,6 +3412,7 @@ fun HomeScreen(
                                 NavigationTab.HOME -> homeViewMode = newMode
                                 NavigationTab.MUSIC -> musicViewMode = newMode
                                 NavigationTab.RECENTS -> recentsViewMode = newMode
+                                NavigationTab.NETWORK -> {}
                                 NavigationTab.PLAYLISTS -> playlistsViewMode = newMode
                             }
                             SettingsPreferencesManager.saveViewMode(context, newMode, effectiveSelectedTab.id)
@@ -3408,6 +3436,7 @@ fun HomeScreen(
                                 NavigationTab.RECENTS -> {
                                     if (isCurrentInsideFolder) recentsContentLayoutMode = newLayout else recentsFolderLayoutMode = newLayout
                                 }
+                                NavigationTab.NETWORK -> {}
                                 NavigationTab.PLAYLISTS -> {
                                     if (isCurrentInsideFolder) playlistsContentLayoutMode = newLayout else playlistsFolderLayoutMode = newLayout
                                 }
@@ -3446,6 +3475,7 @@ fun HomeScreen(
                                 NavigationTab.RECENTS -> {
                                     if (isCurrentInsideFolder) recentsContentVisibleFields = newFields else recentsFolderVisibleFields = newFields
                                 }
+                                NavigationTab.NETWORK -> {}
                                 NavigationTab.PLAYLISTS -> {
                                     if (isCurrentInsideFolder) playlistsContentVisibleFields = newFields else playlistsFolderVisibleFields = newFields
                                 }
@@ -3555,6 +3585,7 @@ fun HomeScreen(
                     onShowMusicTabChange = { viewModel?.setShowMusicTab(it) },
                     onShowRecentsTabChange = { viewModel?.setShowRecentsTab(it) },
                     onShowPlaylistsTabChange = { viewModel?.setShowPlaylistsTab(it) },
+                    onShowNetworkTabChange = { viewModel?.setShowNetworkTab(it) },
                     onControlsAnimationStyleChange = { viewModel?.setControlsAnimationStyle(it) },
                     onVideoOpeningAnimationChange = { viewModel?.setVideoOpeningAnimation(it) },
                     onScreenNavigationStyleChange = { viewModel?.setScreenNavigationStyle(it) },
