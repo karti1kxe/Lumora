@@ -1,6 +1,8 @@
 package com.example.ui.components
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -185,6 +187,8 @@ private fun RevealActionButton(
 
 /**
  * YouTube-channel style text tabs (selected = bold dark text + gradient underline, others muted).
+ * The underline is ONE shared bar that glides to the selected tab like liquid: the edge that leads the move
+ * travels faster than the trailing edge, so the bar stretches and then settles (no sudden jump).
  */
 @Composable
 fun PlaylistFilterTabs(
@@ -197,6 +201,31 @@ fun PlaylistFilterTabs(
     val selectedColor = if (isDark) Color.White else Color(0xFF0F172A)
     val mutedColor = if (isDark) Color(0xFF94A3B8) else Color(0xFF64748B)
     val lineColor = if (isDark) Color(0xFF334155) else Color(0xFFE2E8F0)
+    val density = LocalDensity.current
+
+    // x / width of every tab inside the Row (px)
+    val tabBounds = remember { androidx.compose.runtime.mutableStateMapOf<Int, Pair<Float, Float>>() }
+    val sel = tabBounds[selectedIndex]
+    val targetLeft = sel?.first ?: 0f
+    val targetRight = (sel?.first ?: 0f) + (sel?.second ?: 0f)
+
+    val lastIndex = remember { intArrayOf(selectedIndex) }
+    val movingRight = selectedIndex >= lastIndex[0]
+    androidx.compose.runtime.SideEffect { lastIndex[0] = selectedIndex }
+
+    val fastSpec = tween<Float>(durationMillis = 230, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+    val slowSpec = tween<Float>(durationMillis = 420, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+    val leftEdge by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = targetLeft,
+        animationSpec = if (movingRight) slowSpec else fastSpec,
+        label = "PlaylistTabLeft"
+    )
+    val rightEdge by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = targetRight,
+        animationSpec = if (movingRight) fastSpec else slowSpec,
+        label = "PlaylistTabRight"
+    )
+
     Box(modifier = modifier.fillMaxWidth()) {
         Box(
             modifier = Modifier
@@ -209,9 +238,17 @@ fun PlaylistFilterTabs(
         Row(horizontalArrangement = Arrangement.spacedBy(26.dp)) {
             tabs.forEachIndexed { i, label ->
                 val selected = i == selectedIndex
+                val textColor by androidx.compose.animation.animateColorAsState(
+                    targetValue = if (selected) selectedColor else mutedColor,
+                    animationSpec = tween(260),
+                    label = "PlaylistTabText"
+                )
                 Column(
                     modifier = Modifier
                         .width(IntrinsicSize.Max)
+                        .onGloballyPositioned { coords ->
+                            tabBounds[i] = coords.positionInParent().x to coords.size.width.toFloat()
+                        }
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
@@ -222,21 +259,23 @@ fun PlaylistFilterTabs(
                         text = label,
                         fontSize = 16.sp,
                         fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Bold,
-                        color = if (selected) selectedColor else mutedColor,
+                        color = textColor,
                         modifier = Modifier.padding(top = 6.dp, bottom = 8.dp)
                     )
-                    Box(
-                        modifier = Modifier
-                            .height(3.dp)
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(
-                                if (selected) AccentGradient
-                                else Brush.linearGradient(listOf(Color.Transparent, Color.Transparent))
-                            )
-                    )
+                    Box(modifier = Modifier.height(3.dp).fillMaxWidth())
                 }
             }
+        }
+        if (sel != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .offset { IntOffset(leftEdge.roundToInt(), 0) }
+                    .width(with(density) { (rightEdge - leftEdge).coerceAtLeast(0f).toDp() })
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(AccentGradient)
+            )
         }
     }
 }

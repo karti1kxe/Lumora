@@ -51,14 +51,17 @@ fun AddToPlaylistDialog(
     isDark: Boolean = true,
     glassBlurTransparency: Float = 85f,
     onDismiss: () -> Unit,
-    onPlaylistUpdated: () -> Unit = {}
+    onPlaylistUpdated: () -> Unit = {},
+    /** Move mode (used inside a playlist folder): this playlist is hidden from the list and the items are removed from it after they were added to the chosen playlist(s). */
+    moveFromPlaylistId: String? = null
 ) {
     val context = LocalContext.current
     val isAudio = selectedAudioTracks.isNotEmpty()
     var playlists by remember {
         mutableStateOf(
-            if (isAudio) PlaylistManager.getPlaylists(context).filter { it.isAudio }
-            else PlaylistManager.getPlaylists(context).filter { !it.isAudio }
+            (if (isAudio) PlaylistManager.getPlaylists(context).filter { it.isAudio }
+            else PlaylistManager.getPlaylists(context).filter { !it.isAudio })
+                .filter { it.id != moveFromPlaylistId }
         )
     }
     var showCreateDialog by remember { mutableStateOf(false) }
@@ -494,9 +497,12 @@ fun AddToPlaylistDialog(
                             selectedPlaylistIds.forEach { id ->
                                 PlaylistManager.addVideosToPlaylist(context, id, pathsToAdd)
                             }
+                            if (moveFromPlaylistId != null) {
+                                pathsToAdd.forEach { PlaylistManager.removeVideoFromPlaylist(context, moveFromPlaylistId, it) }
+                            }
                             Toast.makeText(
                                 context,
-                                "Added to ${selectedPlaylistIds.size} ${if (isAudio) "audio " else ""}playlist(s)",
+                                "${if (moveFromPlaylistId != null) "Moved" else "Added"} to ${selectedPlaylistIds.size} ${if (isAudio) "audio " else ""}playlist(s)",
                                 Toast.LENGTH_SHORT
                             ).show()
                             onPlaylistUpdated()
@@ -602,11 +608,11 @@ fun AddToPlaylistDialog(
                                         name = trimmed,
                                         mediaType = if (isAudio) "AUDIO" else "VIDEO"
                                     )
-                                    playlists = if (isAudio) {
+                                    playlists = (if (isAudio) {
                                         PlaylistManager.getPlaylists(context).filter { it.isAudio }
                                     } else {
                                         PlaylistManager.getPlaylists(context).filter { !it.isAudio }
-                                    }
+                                    }).filter { it.id != moveFromPlaylistId }
                                     selectedPlaylistIds.add(newPl.id)
                                     newPlaylistTitle = ""
                                     showCreateDialog = false

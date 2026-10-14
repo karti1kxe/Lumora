@@ -54,6 +54,7 @@ import com.example.ui.components.hasVideoPermission
 import com.example.ui.components.hasAllFilesAccess
 import com.example.ui.components.openAllFilesAccessSettings
 import com.example.ui.screens.HomeScreen
+import com.example.ui.components.toOnlineVideoItem
 import com.example.ui.screens.VideoItem
 import com.example.ui.screens.VideoPlayerScreen
 import com.example.ui.state.AppViewModel
@@ -588,6 +589,15 @@ class MainActivity : ComponentActivity() {
 
         val extractedUrl = com.example.util.OnlineMusicService.extractUrlFromText(sharedText)
         if (extractedUrl != null && com.example.util.OnlineMusicService.isMusicPlaylistOrTrackUrl(extractedUrl)) {
+            // A single shared video / song (not a playlist): YouTube Music -> music player, YouTube -> online video player.
+            val sharedVideoId = com.example.util.OnlineMusicService.extractVideoId(extractedUrl)
+            if (sharedVideoId != null) {
+                // The same Intent object is handed to a re-created Activity (rotation / theme change): play a share only once.
+                if (intent.getBooleanExtra("lumora_share_handled", false)) return
+                intent.putExtra("lumora_share_handled", true)
+                handleSharedSingleMedia(extractedUrl, sharedVideoId)
+                return
+            }
             lifecycleScope.launch(Dispatchers.IO) {
                 withContext(Dispatchers.Main) {
                     android.widget.Toast.makeText(applicationContext, "Loading shared playlist...", android.widget.Toast.LENGTH_SHORT).show()
@@ -643,6 +653,108 @@ class MainActivity : ComponentActivity() {
                     android.util.Log.e("MainActivity", "Failed to resolve incoming media URI: $targetUri", e)
                 }
             }
+        }
+    }
+
+    /**
+     * One video / song shared from YouTube or YouTube Music.
+     * - YouTube Music link  -> opens in the music (audio) player, with related songs queued after it.
+     * - YouTube link        -> plays as an online video in the normal video player.
+     */
+    private fun handleSharedSingleMedia(url: String, videoId: String) {
+        val watchUrl = com.example.util.OnlineMusicService.canonicalWatchUrl(videoId)
+        val isMusic = com.example.util.OnlineMusicService.isYouTubeMusicUrl(url)
+        lifecycleScope.launch {
+            android.widget.Toast.makeText(
+                applicationContext,
+                if (isMusic) "Loading shared song..." else "Loading shared video...",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            val meta = withContext(Dispatchers.IO) {
+                com.example.util.OnlineMusicService.fetchSingleVideoInfo(watchUrl)
+            }
+            val result = meta ?: com.example.util.OnlineTrackResult(
+                videoUrl = watchUrl, title = watchUrl, artist = "", durationSec = 0L, thumbnailUrl = null
+            )
+            if (isMusic) playSharedSong(result) else playSharedVideo(result)
+        }
+    }
+
+    private fun playSharedVideo(result: com.example.util.OnlineTrackResult) {
+        try {
+            com.example.util.OnlineVideoRecommender.recordOpened(applicationContext, result.videoUrl, result.artist)
+        } catch (_: Throwable) {}
+        val item = result.toOnlineVideoItem()
+        viewModel.startPlaying(item, listOf(item))
+    }
+
+    private fun playSharedSong(result: com.example.util.OnlineTrackResult) {
+        val stableId = -(kotlin.math.abs(result.videoUrl.hashCode().toLong()))
+        val track = com.example.ui.screens.AudioTrackItem(
+            id = stableId,
+            uri = Uri.EMPTY,
+            title = result.title,
+            artist = result.artist.ifBlank { "YouTube Music" },
+            album = "Online Music",
+            durationMs = result.durationSec * 1000L,
+            path = "${com.example.ui.components.ONLINE_TRACK_PATH_PREFIX}${result.videoUrl}",
+            sizeBytes = 0L,
+            format = "STREAM",
+            audioType = "Stereo",
+            hasLyrics = false,
+            lyricsText = "",
+            thumbnailUrl = result.thumbnailUrl
+        )
+        // The audio full-screen player lives on Home / Channel screens: leave the video player first.
+        if (viewModel.currentScreenState.value == Screen.PLAYER) viewModel.exitPlayer()
+        com.example.player.AudioPlaybackManager.openFullScreen()
+        com.example.player.AudioPlaybackManager.playTrack(applicationContext, track, listOf(track))
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            launch {
+                try {
+                    val lyrics = com.example.util.LyricsFetcher.fetch(result.title, result.artist, result.durationSec)
+                    val fullLyrics = lyrics?.syncedLyrics ?: lyrics?.plainLyrics
+                    if (!fullLyrics.isNullOrBlank()) {
+                        withContext(Dispatchers.Main) {
+                            com.example.player.AudioPlaybackManager.setLyricsForCurrentTrack(fullLyrics)
+                        }
+                    }
+                } catch (_: Throwable) {}
+            }
+            try {
+                val related = com.example.util.OnlineMusicService.resolveStreamWithRelated(result.videoUrl).relatedTracks
+                    .filter { it.videoUrl != result.videoUrl && it.title.isNotBlank() }
+                    .distinctBy { it.videoUrl }
+                    .take(15)
+                val relatedItems = related.map { item ->
+                    com.example.ui.screens.AudioTrackItem(
+                        id = -(kotlin.math.abs(item.videoUrl.hashCode().toLong())),
+                        uri = Uri.EMPTY,
+                        title = item.title,
+                        artist = item.artist,
+                        album = "Online Music",
+                        durationMs = item.durationSec * 1000L,
+                        path = "${com.example.ui.components.ONLINE_TRACK_PATH_PREFIX}${item.videoUrl}",
+                        sizeBytes = 0L,
+                        format = "STREAM",
+                        audioType = "Stereo",
+                        thumbnailUrl = item.thumbnailUrl
+                    )
+                }
+                if (relatedItems.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        val currentQ = com.example.player.AudioPlaybackManager.queue.value
+                        val existingIds = currentQ.map { it.id }.toSet()
+                        val toAdd = relatedItems.filter { it.id !in existingIds }
+                        if (toAdd.isNotEmpty() &&
+                            com.example.player.AudioPlaybackManager.currentTrack.value?.id == stableId
+                        ) {
+                            com.example.player.AudioPlaybackManager.updateQueue(currentQ + toAdd)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {}
         }
     }
 

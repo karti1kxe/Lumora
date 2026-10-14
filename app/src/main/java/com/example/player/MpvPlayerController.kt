@@ -309,6 +309,8 @@ class MpvPlayerController {
     @Volatile private var directStreamErrorShown = false
     @Volatile private var directStreamLoadStartedAt = 0L
     @Volatile private var onlineLoadRetries = 0
+    @Volatile private var liveReconnects = 0
+    @Volatile private var lastLiveReconnectAt = 0L
     @Volatile private var isRetryLoad = false
     @Volatile private var streamOptionsApplied = false
 
@@ -464,6 +466,21 @@ class MpvPlayerController {
                 }
                 val eof = view.mpv.getPropertyBoolean("eof-reached") == true
                 if (eof && !directStreamErrorShown) {
+                    // The server closed the connection: quietly reconnect a few times before giving up.
+                    val now = System.currentTimeMillis()
+                    if (now - lastLiveReconnectAt > 60000L) liveReconnects = 0
+                    val retryPath = currentFilePath
+                    if (liveReconnects < 4 && !retryPath.isNullOrBlank()) {
+                        liveReconnects++
+                        lastLiveReconnectAt = now
+                        _isBuffering.value = true
+                        try {
+                            applyStreamRequestOptions(view, retryPath)
+                            view.mpv.command("loadfile", retryPath, "replace")
+                            view.mpv.setPropertyBoolean("pause", false)
+                        } catch (_: Throwable) {}
+                        return
+                    }
                     directStreamErrorShown = true
                     _errorMessage.value = "The live stream ended or the connection was lost."
                 }
@@ -531,8 +548,21 @@ class MpvPlayerController {
                 view.mpv.setPropertyString("demuxer-max-bytes", "200MiB")
                 view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
                 view.mpv.setPropertyString("cache-pause", "yes")
-                view.mpv.setPropertyString("cache-pause-wait", if (directStreamMode) "2" else "3")
-                view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx,5xx,reconnect_at_eof=1,reconnect_delay_max=5,multiple_requests=1")
+                if (directStreamMode) {
+                    // IPTV / M3U live streams. The old profile (2s refill, reconnect_at_eof, keep-alive "multiple_requests",
+                    // reconnect on every 4xx/5xx) made live channels re-buffer again and again: a 2s cushion on a live feed
+                    // runs dry at the first network hiccup, and reconnect_at_eof / multiple_requests make many IPTV servers
+                    // drop or restart the connection. Now: a bigger start cushion, plain reconnect only, no HTTP-error loops.
+                    view.mpv.setPropertyString("cache-pause-wait", "6")
+                    view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=4")
+                    try { view.mpv.setPropertyString("tls-verify", "no") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("stream-buffer-size", "2MiB") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "5") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
+                } else {
+                    view.mpv.setPropertyString("cache-pause-wait", "3")
+                    view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx,5xx,reconnect_at_eof=1,reconnect_delay_max=5,multiple_requests=1")
+                }
                 // The app-wide "fast" profile renders with bilinear scalers, which makes a chosen 720p/1080p stream look
                 // soft. Online videos get proper scalers so the selected quality is really visible.
                 view.mpv.setPropertyString("scale", "spline36")
@@ -1203,6 +1233,7 @@ class MpvPlayerController {
         _liveSeekRange.value = null
         directStreamStarted = false
         directStreamErrorShown = false
+        liveReconnects = 0
         directStreamLoadStartedAt = System.currentTimeMillis()
         if (!isRetryLoad) onlineLoadRetries = 0
         isRetryLoad = false

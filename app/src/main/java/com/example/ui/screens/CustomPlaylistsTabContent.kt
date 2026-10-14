@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.DriveFileMove
 import androidx.compose.material.icons.outlined.DriveFileRenameOutline
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.PlaylistAdd
@@ -97,6 +98,7 @@ import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import com.example.R
 import com.example.ui.components.AddPlaylistFromUrlSheet
+import com.example.ui.components.AddToPlaylistDialog
 import com.example.ui.components.BottomMoveCopyProgressBar
 import com.example.ui.components.CreateEmptyPlaylistSheet
 import com.example.ui.components.PlaylistOptionsSheet
@@ -229,6 +231,8 @@ fun CustomPlaylistsTabContent(
     var renamePlaylistName by remember { mutableStateOf("") }
     var renamePlaylistTargetId by remember { mutableStateOf<String?>(null) }
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    // "Move" inside a playlist folder: opens the same playlist picker the Home screen uses (never a file tree)
+    var showMoveToPlaylistDialog by remember { mutableStateOf(false) }
 
     // Inline Rename States
     var renamingPlaylistId by remember { mutableStateOf<String?>(null) }
@@ -1711,6 +1715,13 @@ fun CustomPlaylistsTabContent(
                                     onClick = { showDeleteConfirmDialog = true }
                                 )
                                 BottomSelectionBarItem(
+                                    icon = Icons.Outlined.DriveFileMove,
+                                    label = "Move",
+                                    tint = Color(0xFF818CF8),
+                                    enabled = selectedVideoPaths.isNotEmpty(),
+                                    onClick = { showMoveToPlaylistDialog = true }
+                                )
+                                BottomSelectionBarItem(
                                     icon = Icons.Outlined.SwapVert,
                                     label = "Arrange",
                                     tint = AccentSkyBlue,
@@ -1776,6 +1787,33 @@ fun CustomPlaylistsTabContent(
         // ==========================================
         // DIALOGS
         // ==========================================
+
+        // Move selected items to another playlist (same picker as Home's "add to playlist")
+        if (showMoveToPlaylistDialog && effectiveSelectedPlaylist != null && selectedVideoPaths.isNotEmpty()) {
+            val movePl = effectiveSelectedPlaylist
+            val movePaths = selectedVideoPaths.toList()
+            val moveVideos = if (movePl.isAudio) emptyList() else
+                PlaylistManager.getVideosForPlaylist(movePl, allLibraryVideos).filter { movePaths.contains(it.path) }
+            val moveTracks = if (movePl.isAudio) movePaths.mapNotNull { pth -> allAudioTracks.firstOrNull { it.path == pth } } else emptyList()
+            if (moveVideos.isEmpty() && moveTracks.isEmpty()) {
+                showMoveToPlaylistDialog = false
+                Toast.makeText(context, "Selected items are not available to move", Toast.LENGTH_SHORT).show()
+            } else {
+                AddToPlaylistDialog(
+                    selectedVideos = moveVideos,
+                    selectedAudioTracks = moveTracks,
+                    isDark = isDark,
+                    glassBlurTransparency = uiState.glassBlurTransparency,
+                    moveFromPlaylistId = movePl.id,
+                    onDismiss = { showMoveToPlaylistDialog = false },
+                    onPlaylistUpdated = {
+                        showMoveToPlaylistDialog = false
+                        selectedVideoPaths.clear()
+                        refreshPlaylists()
+                    }
+                )
+            }
+        }
 
         // Create Playlist Dialog
         if (showCreatePlaylistDialog) {

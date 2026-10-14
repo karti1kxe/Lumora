@@ -859,10 +859,54 @@ object OnlineMusicService {
         return lower.contains("music.youtube.com") ||
                 lower.contains("youtube.com/playlist") ||
                 lower.contains("youtube.com/watch") ||
+                lower.contains("youtube.com/shorts/") ||
                 lower.contains("youtu.be/") ||
                 lower.contains("open.spotify.com") ||
                 lower.contains("spotify.link") ||
                 lower.startsWith("spotify:")
+    }
+
+    /**
+     * Video id of a SINGLE YouTube / YouTube Music video link (watch?v=, youtu.be/, shorts/, embed/, live/),
+     * or null when the link is not a single video (e.g. a pure playlist link, Spotify, ...).
+     */
+    fun extractVideoId(url: String): String? {
+        val u = url.trim()
+        val lower = u.lowercase(Locale.ROOT)
+        if (!lower.contains("youtube.com") && !lower.contains("youtu.be")) return null
+        val patterns = listOf(
+            "youtu\\.be/([A-Za-z0-9_-]{11})",
+            "/(?:shorts|embed|live)/([A-Za-z0-9_-]{11})",
+            "[?&]v=([A-Za-z0-9_-]{11})"
+        )
+        for (p in patterns) {
+            val m = Regex(p, RegexOption.IGNORE_CASE).find(u)
+            if (m != null) return m.groupValues[1]
+        }
+        return null
+    }
+
+    fun isYouTubeMusicUrl(url: String): Boolean = url.lowercase(Locale.ROOT).contains("music.youtube.com")
+
+    fun canonicalWatchUrl(videoId: String): String = "https://www.youtube.com/watch?v=$videoId"
+
+    /** Title / channel / duration / thumbnail of one shared video, used to build the player item. Null when it cannot be read. */
+    suspend fun fetchSingleVideoInfo(watchUrl: String): OnlineTrackResult? = withContext(Dispatchers.IO) {
+        try {
+            ensureInit()
+            val info = StreamInfo.getInfo(ServiceList.YouTube, watchUrl)
+            OnlineTrackResult(
+                videoUrl = watchUrl,
+                title = info.name?.takeIf { it.isNotBlank() } ?: watchUrl,
+                artist = (info.uploaderName ?: "").removeSuffix(" - Topic"),
+                durationSec = info.duration.coerceAtLeast(0L),
+                thumbnailUrl = extractBestThumbnailUrl(info.thumbnails, watchUrl),
+                viewCount = info.viewCount.coerceAtLeast(0L)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchSingleVideoInfo('$watchUrl') failed: ${e.message}", e)
+            null
+        }
     }
 
     /**
