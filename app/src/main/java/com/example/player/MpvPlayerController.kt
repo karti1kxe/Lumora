@@ -313,6 +313,8 @@ class MpvPlayerController {
     @Volatile private var lastLiveReconnectAt = 0L
     @Volatile private var isRetryLoad = false
     @Volatile private var streamOptionsApplied = false
+    /** True when the previously opened file was a live/IPTV stream (its last frame must not linger on the next channel). */
+    @Volatile private var lastLoadWasDirect = false
 
     private val _isBuffering = MutableStateFlow(true)
     val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow()
@@ -429,11 +431,13 @@ class MpvPlayerController {
 
     /** Live detection, seekable window and "stream cannot be played" detection for direct streams. Runs in the poll loop. */
     private fun updateDirectStreamState(view: VideoPlayerMpvView, posSec: Double?, durSec: Double?) {
-        if (posSec != null && posSec >= 0.0) directStreamStarted = true
+        // A position read within the first moments of a load can still belong to the PREVIOUS channel; counting it as
+        // "started" disabled the stuck-stream watchdog, so a channel that never opened just buffered forever.
+        if (posSec != null && posSec >= 0.0 && System.currentTimeMillis() - directStreamLoadStartedAt > 400L) directStreamStarted = true
         if (!directStreamStarted) {
             val waited = System.currentTimeMillis() - directStreamLoadStartedAt
             val idle = try { view.mpv.getPropertyBoolean("idle-active") == true } catch (_: Throwable) { false }
-            if (!directStreamErrorShown && ((idle && waited > 4000L) || waited > 45000L)) {
+            if (!directStreamErrorShown && ((idle && waited > 4000L) || waited > 20000L)) {
                 // Internet can be briefly slow/unstable: silently retry the stream (up to 3 times, spinner stays on)
                 // before telling the user the stream cannot be played.
                 if (onlineLoadRetries < 3) {
@@ -549,19 +553,28 @@ class MpvPlayerController {
                 view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
                 view.mpv.setPropertyString("cache-pause", "yes")
                 if (directStreamMode) {
-                    // IPTV / M3U live streams. The old profile (2s refill, reconnect_at_eof, keep-alive "multiple_requests",
-                    // reconnect on every 4xx/5xx) made live channels re-buffer again and again: a 2s cushion on a live feed
-                    // runs dry at the first network hiccup, and reconnect_at_eof / multiple_requests make many IPTV servers
-                    // drop or restart the connection. Now: a bigger start cushion, plain reconnect only, no HTTP-error loops.
-                    view.mpv.setPropertyString("cache-pause-wait", "6")
+                    // IPTV / M3U live streams: start FAST and keep playing. Start-up time was dominated by a 5 MB /
+                    // 5 s probe (about 10 s of download on a 4 Mbps channel) and by a 120 s read-ahead target; a 6 s
+                    // refill made every hiccup a long freeze. Now: small probe, 30 s read-ahead, 3 s refill,
+                    // plain reconnect only (no HTTP-error loops / keep-alive tricks that many IPTV servers dislike).
+                    view.mpv.setPropertyString("network-timeout", "12")
+                    view.mpv.setPropertyString("cache-secs", "30")
+                    view.mpv.setPropertyString("demuxer-readahead-secs", "30")
+                    view.mpv.setPropertyString("demuxer-max-bytes", "64MiB")
+                    view.mpv.setPropertyString("demuxer-max-back-bytes", "8MiB")
+                    view.mpv.setPropertyString("cache-pause-wait", "3")
                     view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=4")
                     try { view.mpv.setPropertyString("tls-verify", "no") } catch (_: Throwable) {}
-                    try { view.mpv.setPropertyString("stream-buffer-size", "2MiB") } catch (_: Throwable) {}
-                    try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "5") } catch (_: Throwable) {}
-                    try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("stream-buffer-size", "1MiB") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "2") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-probesize", "2000000") } catch (_: Throwable) {}
+                    // HLS channels whose segments use odd file extensions (.jpg/.txt/none) are refused by ffmpeg
+                    // unless extensions are allowed - a common reason why "some channels never play".
+                    try { view.mpv.setPropertyString("demuxer-lavf-o", "allowed_extensions=ALL,fflags=+discardcorrupt") } catch (_: Throwable) {}
                 } else {
                     view.mpv.setPropertyString("cache-pause-wait", "3")
                     view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx,5xx,reconnect_at_eof=1,reconnect_delay_max=5,multiple_requests=1")
+                    try { view.mpv.setPropertyString("demuxer-lavf-o", "") } catch (_: Throwable) {}
                 }
                 // The app-wide "fast" profile renders with bilinear scalers, which makes a chosen 720p/1080p stream look
                 // soft. Online videos get proper scalers so the selected quality is really visible.
@@ -1087,7 +1100,7 @@ class MpvPlayerController {
                             val isHw = hwdec != "no" && hwdec.isNotBlank()
                             _isHwAccelActive.value = isHw
 
-                            if (dropped > lastDroppedFrames && !paused) {
+                            if (dropped > lastDroppedFrames && !paused && !directStreamMode) {
                                 val delta = dropped - lastDroppedFrames
                                 if (delta >= 2) {
                                     view.mpv.setPropertyString("hwdec", if (lastAppliedVfVideoFilter.isNotEmpty()) HwAccelMode.PREFER.mpvValue else "mediacodec")
@@ -1268,6 +1281,22 @@ class MpvPlayerController {
             } catch (_: Throwable) {}
             applyStreamingProfile(view, onlineStreamMode)
             applyStreamRequestOptions(view, filePath)
+            if (directStreamMode || lastLoadWasDirect) {
+                // Channel switch: fully close the previous channel FIRST. This (1) drops its last frame so the new
+                // channel starts from a black screen + buffering spinner, and (2) closes its connection before the
+                // next one opens - many IPTV providers refuse a second connection while the first is still open,
+                // which is why a direct channel change failed but worked after restarting the app.
+                try {
+                    view.mpv.command("stop")
+                    var waitedMs = 0
+                    while (waitedMs < 400 && view.mpv.getPropertyBoolean("idle-active") != true) {
+                        Thread.sleep(10)
+                        waitedMs += 10
+                    }
+                } catch (_: Throwable) {}
+                _bufferedPositionMs.value = 0L
+            }
+            lastLoadWasDirect = directStreamMode
             try {
                 view.mpv.command("loadfile", filePath, "replace")
             } catch (_: Throwable) {
@@ -1279,7 +1308,7 @@ class MpvPlayerController {
             } catch (_: Throwable) {}
 
             try {
-                view.mpv.setPropertyString("hwdec", resolveHwdecValue())
+                view.mpv.setPropertyString("hwdec", resolveHwdecValue().let { if (directStreamMode && it == "mediacodec") "mediacodec,mediacodec-copy" else it })
                 view.mpv.setPropertyString("framedrop", "vo")
                 view.mpv.setPropertyDouble("speed", _playbackSpeed.value.coerceIn(0.25, 4.0))
                 view.mpv.setPropertyBoolean("pause", false)

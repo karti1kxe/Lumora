@@ -5012,14 +5012,34 @@ fun PlaylistSelectionPanel(
 
         if (isGridView) {
             // GRID VIEW MODE (4-boxes grid layout)
+            val gridColumns = if (isLandscape) 3 else 2
+            val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState(
+                initialFirstVisibleItemIndex = (currentIndex - 1).coerceIn(0, (effectiveCount - 1).coerceAtLeast(0))
+            )
+            var gridHeightPx by remember { mutableFloatStateOf(0f) }
+            val gridDensity = LocalDensity.current
+            val gridCardEstimatePx = with(gridDensity) { 150.dp.toPx() }
+            val gridRows = (effectiveCount + gridColumns - 1) / gridColumns
+            val gridNeedsRoom = gridHeightPx > 0f && gridRows * gridCardEstimatePx > gridHeightPx
+            val gridBottomPadding = if (gridNeedsRoom) {
+                with(gridDensity) { (gridHeightPx - gridCardEstimatePx).coerceAtLeast(0f).toDp() }
+            } else 0.dp
+            // Keep the playing item at the top of the grid (see the list view for the reasoning).
+            LaunchedEffect(gridNeedsRoom) {
+                if (effectiveCount > 0) {
+                    gridState.scrollToItem((currentIndex - 1).coerceIn(0, effectiveCount - 1))
+                }
+            }
             LazyVerticalGrid(
-                columns = GridCells.Fixed(if (isLandscape) 3 else 2),
+                columns = GridCells.Fixed(gridColumns),
+                state = gridState,
                 modifier = Modifier
                     .weight(1f, fill = false)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .onGloballyPositioned { gridHeightPx = it.size.height.toFloat() },
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(vertical = 4.dp)
+                contentPadding = PaddingValues(top = 4.dp, bottom = 4.dp + gridBottomPadding)
             ) {
                 if (playlistItems.isNotEmpty()) {
                     itemsIndexed(playlistItems, key = { idx, item -> "${item.id}_${item.path}_$idx" }) { idx, item ->
@@ -5069,7 +5089,12 @@ fun PlaylistSelectionPanel(
             }
         } else {
             // LIST VIEW MODE with Smooth Multi-Item Continuous Drag-to-Reorder Support matching ControlLayoutEditor
-            val playlistListState = rememberLazyListState()
+            val playlistListState = rememberLazyListState(
+                initialFirstVisibleItemIndex = (currentIndex - 1).coerceIn(
+                    0,
+                    (if (playlistItems.isNotEmpty()) playlistItems.size else playlistVideos.size).let { (it - 1).coerceAtLeast(0) }
+                )
+            )
             var playlistCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
             var playlistHeightPx by remember { mutableFloatStateOf(0f) }
             var dragPointerYInList by remember { mutableFloatStateOf(-1f) }
@@ -5114,6 +5139,20 @@ fun PlaylistSelectionPanel(
             }
 
             val effectiveHeight = if (measuredItemHeightPx > 0f) measuredItemHeightPx else with(density) { 70.dp.toPx() }
+
+            // Open the list with the item that is playing NOW at the top (the items before it stay above, out of view).
+            // The list gets extra room under its last item only when it is longer than the panel, so even the very
+            // last item can really scroll up to the top; short lists are left as they are.
+            val needsTopAlignRoom = playlistHeightPx > 0f && itemsCount * effectiveHeight > playlistHeightPx
+            val topAlignBottomPadding = if (needsTopAlignRoom) {
+                with(density) { (playlistHeightPx - effectiveHeight).coerceAtLeast(0f).toDp() }
+            } else 0.dp
+            LaunchedEffect(needsTopAlignRoom, measuredItemHeightPx > 0f) {
+                // Not keyed on currentIndex on purpose: a drag-reorder must never make the list jump.
+                if (itemsCount > 0 && draggingIndex == null) {
+                    playlistListState.scrollToItem((currentIndex - 1).coerceIn(0, itemsCount - 1))
+                }
+            }
             val fromIndex = draggingIndex ?: -1
             val hoverIndex = if (fromIndex != -1) {
                 val pointerY = dragPointerYInList
@@ -5167,7 +5206,7 @@ fun PlaylistSelectionPanel(
                     state = playlistListState,
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp)
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 4.dp + topAlignBottomPadding)
                 ) {
                 if (playlistItems.isNotEmpty()) {
                     itemsIndexed(playlistItems, key = { _, item -> item.id }) { idx, item ->
