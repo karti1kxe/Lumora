@@ -644,38 +644,6 @@ fun CustomPlaylistsTabContent(
             ) {
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Online Playlist indicator banner
-                if (pl.isOnlineFolder) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isDark) Color(0xFF064E3B).copy(alpha = 0.35f) else Color(0xFFD1FAE5).copy(alpha = 0.65f))
-                            .border(1.dp, if (isDark) Color(0xFF10B981).copy(alpha = 0.5f) else Color(0xFF059669).copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp, vertical = 7.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            StyledIcon(
-                                imageVector = Icons.Filled.Cloud,
-                                contentDescription = null,
-                                tint = if (isDark) Color(0xFF34D399) else Color(0xFF059669),
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Online Playlist • Audio streams over the internet",
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (isDark) Color(0xFF6EE7B7) else Color(0xFF065F46)
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-
                 // Media Items in Playlist — reuse the exact Home/Audio list cards so every
                 // configured field (thumbnail, extension/format, size, resolution, fps,
                 // subtitles, audio type, date, path, duration and progress) stays consistent.
@@ -1864,6 +1832,7 @@ fun PlaylistCard(
             ModernFolderIcon(
                 isCustom = true,
                 newCount = playlist.videoPaths.size,
+                showBadge = false,
                 showNewBadge = false,
                 isDark = isDark,
                 isSelected = isSelected,
@@ -1894,23 +1863,6 @@ fun PlaylistCard(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        if (playlist.isOnlineFolder) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (isDark) Color(0xFF064E3B).copy(alpha = 0.85f) else Color(0xFFD1FAE5))
-                                    .border(1.dp, if (isDark) Color(0xFF10B981).copy(alpha = 0.6f) else Color(0xFF059669).copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-                                    .padding(horizontal = 5.dp, vertical = 1.5.dp)
-                            ) {
-                                Text(
-                                    text = "ONLINE",
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isDark) Color(0xFF34D399) else Color(0xFF065F46)
-                                )
-                            }
-                        }
                     }
                 }
                 if (visibleFields.showPath) {
@@ -1928,30 +1880,6 @@ fun PlaylistCard(
                     val resolution = playlistVideos.map { it.resolution }.firstOrNull { it.isNotBlank() } ?: ""
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (visibleFields.showVideoCount) {
-                            Box(
-                                modifier = Modifier.clip(RoundedCornerShape(8.dp))
-                                    .background(if (isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9))
-                                    .border(1.dp, if (isDark) Color(0xFF334155) else Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 8.dp, vertical = 3.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    StyledIcon(
-                                        imageVector = if (playlist.isAudio) Icons.Filled.MusicNote else Icons.Outlined.Movie,
-                                        contentDescription = null,
-                                        tint = AccentSkyBlue,
-                                        modifier = Modifier.size(11.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = if (playlist.isAudio) "${playlist.videoPaths.size} Audio" else "${playlist.videoPaths.size} Videos",
-                                        fontSize = 10.5.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = primaryText
-                                    )
-                                }
-                            }
-                        }
                         // Permanent Online Field for Online Playlist folders:
                         if (playlist.isOnlineFolder) {
                             Box(
@@ -1973,6 +1901,30 @@ fun PlaylistCard(
                                         fontSize = 10.5.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = if (isDark) Color(0xFF34D399) else Color(0xFF065F46)
+                                    )
+                                }
+                            }
+                        }
+                        if (visibleFields.showVideoCount) {
+                            Box(
+                                modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                    .background(if (isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9))
+                                    .border(1.dp, if (isDark) Color(0xFF334155) else Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    StyledIcon(
+                                        imageVector = if (playlist.isAudio) Icons.Filled.MusicNote else Icons.Outlined.Movie,
+                                        contentDescription = null,
+                                        tint = AccentSkyBlue,
+                                        modifier = Modifier.size(11.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (playlist.isAudio) "${playlist.videoPaths.size} Audio" else "${playlist.videoPaths.size} Videos",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = primaryText
                                     )
                                 }
                             }

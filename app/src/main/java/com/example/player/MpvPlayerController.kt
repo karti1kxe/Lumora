@@ -308,6 +308,8 @@ class MpvPlayerController {
     @Volatile private var directStreamStarted = false
     @Volatile private var directStreamErrorShown = false
     @Volatile private var directStreamLoadStartedAt = 0L
+    @Volatile private var onlineLoadRetries = 0
+    @Volatile private var isRetryLoad = false
     @Volatile private var streamOptionsApplied = false
 
     private val _isBuffering = MutableStateFlow(true)
@@ -429,7 +431,23 @@ class MpvPlayerController {
         if (!directStreamStarted) {
             val waited = System.currentTimeMillis() - directStreamLoadStartedAt
             val idle = try { view.mpv.getPropertyBoolean("idle-active") == true } catch (_: Throwable) { false }
-            if (!directStreamErrorShown && ((idle && waited > 3000L) || waited > 40000L)) {
+            if (!directStreamErrorShown && ((idle && waited > 4000L) || waited > 45000L)) {
+                // Internet can be briefly slow/unstable: silently retry the stream (up to 3 times, spinner stays on)
+                // before telling the user the stream cannot be played.
+                if (onlineLoadRetries < 3) {
+                    onlineLoadRetries++
+                    val retryPath = currentFilePath
+                    if (!retryPath.isNullOrBlank()) {
+                        _isBuffering.value = true
+                        directStreamLoadStartedAt = System.currentTimeMillis()
+                        try {
+                            applyStreamRequestOptions(view, retryPath)
+                            view.mpv.command("loadfile", retryPath, "replace")
+                            view.mpv.setPropertyBoolean("pause", false)
+                        } catch (_: Throwable) {}
+                        return
+                    }
+                }
                 directStreamErrorShown = true
                 _isBuffering.value = false
                 _errorMessage.value = "This stream could not be played. It may be offline, expired, blocked or in an unsupported format."
@@ -500,15 +518,21 @@ class MpvPlayerController {
     private fun applyStreamingProfile(view: VideoPlayerMpvView, online: Boolean) {
         try {
             if (online) {
-                view.mpv.setPropertyString("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0")
+                view.mpv.setPropertyString(
+                    "user-agent",
+                    if (directStreamMode) "VLC/3.0.20 LibVLC/3.0.20"
+                    else "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
+                )
+                try { view.mpv.setPropertyString("network-timeout", "30") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("cache-pause-initial", "no") } catch (_: Throwable) {}
                 view.mpv.setPropertyString("cache", "yes")
                 view.mpv.setPropertyString("cache-secs", "120")
                 view.mpv.setPropertyString("demuxer-readahead-secs", "120")
                 view.mpv.setPropertyString("demuxer-max-bytes", "200MiB")
                 view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
                 view.mpv.setPropertyString("cache-pause", "yes")
-                view.mpv.setPropertyString("cache-pause-wait", "3")
-                view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=5")
+                view.mpv.setPropertyString("cache-pause-wait", if (directStreamMode) "2" else "3")
+                view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx,5xx,reconnect_at_eof=1,reconnect_delay_max=5,multiple_requests=1")
                 // The app-wide "fast" profile renders with bilinear scalers, which makes a chosen 720p/1080p stream look
                 // soft. Online videos get proper scalers so the selected quality is really visible.
                 view.mpv.setPropertyString("scale", "spline36")
@@ -974,6 +998,11 @@ class MpvPlayerController {
                                 } else false
                             }
                         }
+                        if (onlineStreamMode && (posSec == null || posSec < 0.0) && !directStreamErrorShown) {
+                            // The stream has not delivered its first frame yet: keep the buffering animation visible
+                            // instead of a silent black screen.
+                            _isBuffering.value = true
+                        }
                         if (durSec != null && durSec > 0.0) {
                             _durationMs.value = (durSec * 1000.0).toLong()
                         }
@@ -1175,6 +1204,8 @@ class MpvPlayerController {
         directStreamStarted = false
         directStreamErrorShown = false
         directStreamLoadStartedAt = System.currentTimeMillis()
+        if (!isRetryLoad) onlineLoadRetries = 0
+        isRetryLoad = false
         _subtitleTracks.value = emptyList()
         resetAdvancedAssBindings()
         lastAppliedNativeAssOverride = null
@@ -1286,7 +1317,7 @@ class MpvPlayerController {
                                 confirmed = true
                                 isResumeSeekVerified = true
                                 _currentPositionMs.value = realPosMs
-                                _isBuffering.value = false
+                                if (!onlineStreamMode) _isBuffering.value = false
                             } else {
                                 try {
                                     v.mpv.command("seek", "$sec", "absolute+exact")
@@ -1305,7 +1336,9 @@ class MpvPlayerController {
                     val v = mpvView ?: return@launch
                     v.mpv.setPropertyBoolean("pause", false)
                     _isPlaying.value = true
-                    _isBuffering.value = false
+                    // Streams keep showing the buffering animation until mpv really has a picture;
+                    // the poll loop clears it.
+                    if (!onlineStreamMode) _isBuffering.value = false
                 } catch (_: Throwable) {}
 
             }

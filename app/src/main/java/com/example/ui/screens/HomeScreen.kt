@@ -2840,6 +2840,49 @@ fun HomeScreen(
                 }
             }
 
+            // PLAYLISTS (inside a video playlist / M3U folder): Recent button that jumps straight to the video or
+            // channel that was watched last in THIS folder, from the exact second it was left at.
+            AnimatedVisibility(
+                visible = !isSelectionMode && effectiveSelectedTab == NavigationTab.PLAYLISTS &&
+                    selectedPlaylist != null && selectedPlaylist?.isAudio == false,
+                enter = fadeIn() + scaleIn(),
+                exit = fadeOut() + scaleOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
+                    .padding(end = 20.dp, bottom = fabBottomPadding)
+            ) {
+                val fabShape = RoundedCornerShape(20.dp)
+                Box(
+                    modifier = Modifier
+                        .size(60.dp)
+                        .shadow(18.dp, fabShape, ambientColor = com.example.ui.theme.AccentSkyBlue.copy(alpha = 0.50f), spotColor = com.example.ui.theme.AccentPink.copy(alpha = 0.60f))
+                        .clip(fabShape)
+                        .background(if (isDark) Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f))) else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.95f), Color(0xFFF1F5F9).copy(alpha = 0.95f))))
+                        .border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape)
+                        .bounceClick(scaleDown = 0.88f) {
+                            val pl = selectedPlaylist ?: return@bounceClick
+                            coroutineScope.launch(Dispatchers.IO) {
+                                val source = com.example.util.PlaylistManager.getVideosForPlaylist(pl, allLibraryVideos)
+                                var target: VideoItem? = null
+                                for (rec in com.example.util.PlaybackHistoryManager.getAllPlaybackRecords(context)) {
+                                    val found = (if (rec.path.isNotBlank()) source.firstOrNull { it.path == rec.path } else null)
+                                        ?: (if (rec.uriString.isNotBlank()) source.firstOrNull { it.uri.toString() == rec.uriString } else null)
+                                    if (found != null) { target = found; break }
+                                }
+                                val chosen = target ?: source.firstOrNull()
+                                withContext(Dispatchers.Main) {
+                                    if (chosen != null) onPlayVideo(chosen, source)
+                                }
+                            }
+                        }
+                        .testTag("playlist_resume_fab"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    com.example.ui.components.PlayGradientLogoIcon(size = 32.dp)
+                }
+            }
+
             // PLAYLISTS: floating "+ Create Playlist" button (replaces the old floating Play button).
             // Same glass look as the other floating buttons; opens the translucent options sheet.
             AnimatedVisibility(

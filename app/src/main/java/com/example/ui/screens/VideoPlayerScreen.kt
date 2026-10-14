@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
@@ -2487,17 +2488,29 @@ fun VideoPlayerScreen(
         // -------------------------------------------------------------
         // BUFFERING INDICATOR
         // -------------------------------------------------------------
-        if (uiState.playerSettings.showLoadingCircle && isBuffering && isPlaying) {
+        // Streams (online / M3U live TV) always show it so a black screen never looks like a hang.
+        if ((uiState.playerSettings.showLoadingCircle || controller.onlineStreamMode) && isBuffering && isPlaying) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Transparent),
                 contentAlignment = Alignment.Center
             ) {
-                LumoraExpressiveLoadingIndicator(
-                    size = 56.dp,
-                    isDark = true
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    LumoraExpressiveLoadingIndicator(
+                        size = 56.dp,
+                        isDark = true
+                    )
+                    if (controller.onlineStreamMode && currentPositionMs <= 200L) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Connecting to stream…",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
             }
         }
 

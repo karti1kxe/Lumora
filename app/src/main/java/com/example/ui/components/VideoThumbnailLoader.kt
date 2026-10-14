@@ -558,7 +558,7 @@ fun VideoThumbnailCard(
 ) {
     val context = LocalContext.current.applicationContext
     val cacheKey = remember(videoId, videoPath, remoteThumbnailUrl, thumbnailStrategy, thumbnailQuality, thumbnailFallbackSecond) {
-        if (!remoteThumbnailUrl.isNullOrBlank()) "remote_vid_${remoteThumbnailUrl}_400"
+        if (!remoteThumbnailUrl.isNullOrBlank()) "remote_audio_${remoteThumbnailUrl}_400"
         else "${videoId}_${videoPath}_${thumbnailStrategy.name}_${thumbnailQuality.name}_t${thumbnailFallbackSecond.coerceIn(1, 10)}"
     }
     val initialCached = remember(cacheKey, videoId, videoPath) {
@@ -572,7 +572,7 @@ fun VideoThumbnailCard(
     LaunchedEffect(cacheKey) {
         if (thumbnailBitmap == null) {
             if (!remoteThumbnailUrl.isNullOrBlank()) {
-                val bmp = loadRemoteAudioThumbnail(remoteThumbnailUrl, targetSizePx = 400)
+                val bmp = loadRemoteAudioThumbnail(remoteThumbnailUrl, targetSizePx = 400, context = context)
                 if (bmp != null) {
                     thumbnailBitmap = bmp
                 }
@@ -625,11 +625,16 @@ fun VideoThumbnailCard(
     ) {
         // Thumbnail content (Image or artistic placeholder)
         if (thumbnailBitmap != null) {
+            val bmp = thumbnailBitmap!!
+            // TV channel logos (square / wide / tall) are shown zoomed-out and fully visible instead of being
+            // cropped; real 16:9 frames and YouTube thumbnails still fill the card.
+            val aspect = bmp.width.toFloat() / bmp.height.coerceAtLeast(1).toFloat()
+            val isLogoLike = !remoteThumbnailUrl.isNullOrBlank() && (aspect < 1.5f || aspect > 2.05f)
             Image(
-                bitmap = thumbnailBitmap!!.asImageBitmap(),
+                bitmap = bmp.asImageBitmap(),
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
+                contentScale = if (isLogoLike) ContentScale.Fit else ContentScale.Crop,
+                modifier = if (isLogoLike) Modifier.fillMaxSize().padding(6.dp) else Modifier.fillMaxSize()
             )
         } else {
             // Never show an artistic gradient in place of a real video thumbnail.
