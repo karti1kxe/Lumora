@@ -204,7 +204,7 @@ fun CustomPlaylistsTabContent(
     val selectedVideoPaths = remember { mutableStateListOf<String>() }
     var isReorderMode by remember { mutableStateOf(false) }
     // Folder tabs (All / Saved / Favourite) + heart/bookmark marks of the open playlist
-    var filterTab by remember(selectedPlaylist?.id) { mutableStateOf(0) }
+    var filterTab by remember(selectedPlaylist?.id) { mutableStateOf("All") }
     var marksVersion by remember { mutableStateOf(0) }
     var revealedPath by remember(selectedPlaylist?.id) { mutableStateOf<String?>(null) }
 
@@ -528,15 +528,20 @@ fun CustomPlaylistsTabContent(
             !pl0.isAudio && pl0.videoPaths.any { com.example.util.StreamEntryStore.get(it) != null }
         } == true
     }
-    val tabKinds = if (isM3uFolder) listOf("All", "Saved", "Favourite") else listOf("All", "Favourite")
-    val activeTab = filterTab.coerceIn(0, tabKinds.size - 1)
-    val activeTabName = tabKinds[activeTab]
     val favSet = remember(effectiveSelectedPlaylist?.id, marksVersion) {
         effectiveSelectedPlaylist?.let { com.example.util.PlaylistMarkStore.paths(context, com.example.util.PlaylistMarkStore.KIND_FAVOURITE, it.id) } ?: emptySet()
     }
     val savedSet = remember(effectiveSelectedPlaylist?.id, marksVersion) {
         effectiveSelectedPlaylist?.let { com.example.util.PlaylistMarkStore.paths(context, com.example.util.PlaylistMarkStore.KIND_SAVED, it.id) } ?: emptySet()
     }
+    // Only "All" is shown until something is marked; "Saved" / "Favourite" appear as soon as they have items.
+    val tabKinds = buildList {
+        add("All")
+        if (isM3uFolder && savedSet.isNotEmpty()) add("Saved")
+        if (favSet.isNotEmpty()) add("Favourite")
+    }
+    val activeTabName = if (filterTab in tabKinds) filterTab else "All"
+    val activeTab = tabKinds.indexOf(activeTabName).coerceAtLeast(0)
     val innerQuery = searchQuery.trim()
     val isFilteredView = activeTabName != "All" || innerQuery.isNotEmpty()
     val shownVideos = remember(displayPlVideos, activeTabName, favSet, savedSet, innerQuery) {
@@ -731,7 +736,7 @@ fun CustomPlaylistsTabContent(
                         tabs = tabKinds,
                         selectedIndex = activeTab,
                         isDark = isDark,
-                        onSelect = { filterTab = it; revealedPath = null },
+                        onSelect = { i -> filterTab = tabKinds.getOrElse(i) { "All" }; revealedPath = null },
                         modifier = Modifier.padding(horizontal = 4.dp).padding(bottom = 8.dp)
                     )
                     val detailListState = rememberLazyListState()
