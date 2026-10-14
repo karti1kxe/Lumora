@@ -53,6 +53,7 @@ import com.example.util.AppStorageManager
 import com.example.util.CustomSubtitlePersistenceManager
 import com.example.util.SubtitleSessionMemory
 import com.example.util.MkvManagerEngine
+import com.example.util.StreamRequestOptions
 import com.example.ai.AiFeaturesSettings
 import com.example.ai.SubtitleTranslationService
 import com.example.ai.TranslateLanguages
@@ -97,6 +98,9 @@ data class PlayerMediaTrack(
 
 /** One audio stream (original / dubbed / auto-translated) of an online video, attached as an external mpv audio track. */
 data class OnlineAudioSource(val url: String, val title: String, val language: String)
+
+/** Seekable part of a live stream (DVR / time-shift window) in the same timeline as the playback position. */
+data class LiveSeekRange(val startMs: Long, val endMs: Long)
 
 data class PlayerVideoChapter(
     val index: Int,
@@ -291,6 +295,21 @@ class MpvPlayerController {
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
+    // ---- imported M3U / IPTV streams (opened directly by mpv) ----
+    /** True while the opened stream has no known duration (live TV). Never true for normal videos. */
+    private val _isLiveStream = MutableStateFlow(false)
+    val isLiveStream: StateFlow<Boolean> = _isLiveStream.asStateFlow()
+
+    /** The window a live stream can really be seeked in (DVR). null = not seekable: the seek bar stays inactive. */
+    private val _liveSeekRange = MutableStateFlow<LiveSeekRange?>(null)
+    val liveSeekRange: StateFlow<LiveSeekRange?> = _liveSeekRange.asStateFlow()
+
+    @Volatile private var directStreamMode = false
+    @Volatile private var directStreamStarted = false
+    @Volatile private var directStreamErrorShown = false
+    @Volatile private var directStreamLoadStartedAt = 0L
+    @Volatile private var streamOptionsApplied = false
+
     private val _isBuffering = MutableStateFlow(true)
     val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow()
 
@@ -371,12 +390,94 @@ class MpvPlayerController {
         selectedAudioIndex: Int = 0,
         chapters: List<PlayerVideoChapter>? = null
     ) {
+        directStreamMode = false
         onlineStreamMode = enabled
         onlineAudioSources = if (enabled) audios else emptyList()
         onlineAudioSelectedIndex = selectedAudioIndex.coerceIn(0, (audios.size - 1).coerceAtLeast(0))
         externalChapters = if (enabled) chapters else null
         _chapters.value = externalChapters ?: emptyList()
         if (enabled) _isBuffering.value = true
+    }
+
+    /**
+     * Call right after [setOnlineStream] (true) and BEFORE [loadVideo] for an imported M3U/IPTV stream: the URL is then
+     * opened directly by mpv, with the per-stream User-Agent / headers, and live-TV behaviour is detected.
+     */
+    fun setDirectStream(enabled: Boolean) {
+        directStreamMode = enabled
+        if (!enabled) {
+            _isLiveStream.value = false
+            _liveSeekRange.value = null
+        }
+    }
+
+    /** Applies the stream's own User-Agent / referrer / headers (and clears them again for the next, different file). */
+    private fun applyStreamRequestOptions(view: VideoPlayerMpvView, filePath: String) {
+        val options = if (directStreamMode) StreamRequestOptions.forUrl(filePath) else null
+        if (options == null && !streamOptionsApplied) return
+        try {
+            if (options?.userAgent != null) view.mpv.setPropertyString("user-agent", options.userAgent)
+            view.mpv.setPropertyString("referrer", options?.referrer ?: "")
+            view.mpv.setPropertyString("http-header-fields", options?.headerFields ?: "")
+            streamOptionsApplied = options != null
+        } catch (_: Throwable) {}
+    }
+
+    /** Live detection, seekable window and "stream cannot be played" detection for direct streams. Runs in the poll loop. */
+    private fun updateDirectStreamState(view: VideoPlayerMpvView, posSec: Double?, durSec: Double?) {
+        if (posSec != null && posSec >= 0.0) directStreamStarted = true
+        if (!directStreamStarted) {
+            val waited = System.currentTimeMillis() - directStreamLoadStartedAt
+            val idle = try { view.mpv.getPropertyBoolean("idle-active") == true } catch (_: Throwable) { false }
+            if (!directStreamErrorShown && ((idle && waited > 3000L) || waited > 40000L)) {
+                directStreamErrorShown = true
+                _isBuffering.value = false
+                _errorMessage.value = "This stream could not be played. It may be offline, expired, blocked or in an unsupported format."
+            }
+            return
+        }
+        val live = !(durSec != null && durSec > 0.0)
+        if (_isLiveStream.value != live) _isLiveStream.value = live
+        var range: LiveSeekRange? = null
+        if (live) {
+            try {
+                if (view.mpv.getPropertyBoolean("seekable") == true) {
+                    range = parseSeekableRange(view.mpv.getPropertyString("demuxer-cache-state"), posSec ?: 0.0)
+                }
+                val eof = view.mpv.getPropertyBoolean("eof-reached") == true
+                if (eof && !directStreamErrorShown) {
+                    directStreamErrorShown = true
+                    _errorMessage.value = "The live stream ended or the connection was lost."
+                }
+            } catch (_: Throwable) {}
+        }
+        if (_liveSeekRange.value != range) _liveSeekRange.value = range
+    }
+
+    /** Reads mpv's demuxer-cache-state (JSON text) and returns the seekable range around the playhead, if any. */
+    private fun parseSeekableRange(json: String?, posSec: Double): LiveSeekRange? {
+        if (json.isNullOrBlank()) return null
+        val array = Regex("\"seekable-ranges\"\\s*:\\s*\\[(.*?)\\]", RegexOption.DOT_MATCHES_ALL)
+            .find(json)?.groupValues?.get(1) ?: return null
+        val startRe = Regex("\"start\"\\s*:\\s*(-?[0-9.eE+-]+)")
+        val endRe = Regex("\"end\"\\s*:\\s*(-?[0-9.eE+-]+)")
+        val ranges = ArrayList<LiveSeekRange>()
+        for (obj in Regex("\\{[^{}]*\\}").findAll(array)) {
+            val text = obj.value
+            val st = startRe.find(text)?.groupValues?.get(1)?.toDoubleOrNull() ?: continue
+            val en = endRe.find(text)?.groupValues?.get(1)?.toDoubleOrNull() ?: continue
+            if (en - st >= 3.0) ranges.add(LiveSeekRange((st * 1000.0).toLong(), (en * 1000.0).toLong()))
+        }
+        if (ranges.isEmpty()) return null
+        val posMs = (posSec * 1000.0).toLong()
+        return ranges.firstOrNull { posMs >= it.startMs - 500L && posMs <= it.endMs + 500L } ?: ranges.last()
+    }
+
+    /** Live streams only seek inside their real seekable window; without one, seeking is ignored. */
+    private fun liveAdjustedSeek(timeMs: Long): Long? {
+        if (!directStreamMode || !directStreamStarted || !_isLiveStream.value) return timeMs
+        val range = _liveSeekRange.value ?: return null
+        return timeMs.coerceIn(range.startMs, range.endMs)
     }
 
     /** Index (in the online audio list) of the audio track currently selected, so a quality switch keeps it. */
@@ -737,7 +838,8 @@ class MpvPlayerController {
 
             // 2. Re-instantiate media stream decoder cleanly on the new Surface
             val startSec = (currentPos / 1000.0).coerceAtLeast(0.0)
-            if (currentPos > 500L) {
+            // a live stream has no "last position" to return to: it simply reconnects at the live edge
+            if (currentPos > 500L && !(directStreamMode && _isLiveStream.value)) {
                 targetResumePositionMs = currentPos
                 isResumeSeekVerified = false
                 try {
@@ -749,6 +851,7 @@ class MpvPlayerController {
             }
 
             resetAdvancedAssBindings()
+            applyStreamRequestOptions(view, path)
             try {
                 view.mpv.command("loadfile", path, "replace")
             } catch (_: Throwable) {
@@ -875,6 +978,9 @@ class MpvPlayerController {
                             _durationMs.value = (durSec * 1000.0).toLong()
                         }
                         _isPlaying.value = !paused
+                        if (directStreamMode) {
+                            updateDirectStreamState(view, posSec, durSec)
+                        }
                         if (onlineStreamMode && cacheTimeSec > 0.0) {
                             // demuxer-cache-time is already the absolute end of the cached data
                             _bufferedPositionMs.value = (cacheTimeSec * 1000.0).toLong().coerceAtLeast(_currentPositionMs.value)
@@ -1063,6 +1169,12 @@ class MpvPlayerController {
         subtitlesLoadedOnce = false
         subtitleUsesGeneratedAss = false
         _durationMs.value = 0L
+        // an imported stream is treated as live until mpv reports a real duration
+        _isLiveStream.value = directStreamMode
+        _liveSeekRange.value = null
+        directStreamStarted = false
+        directStreamErrorShown = false
+        directStreamLoadStartedAt = System.currentTimeMillis()
         _subtitleTracks.value = emptyList()
         resetAdvancedAssBindings()
         lastAppliedNativeAssOverride = null
@@ -1093,6 +1205,7 @@ class MpvPlayerController {
                 view.mpv.setPropertyString("secondary-sid", "no")
             } catch (_: Throwable) {}
             applyStreamingProfile(view, onlineStreamMode)
+            applyStreamRequestOptions(view, filePath)
             try {
                 view.mpv.command("loadfile", filePath, "replace")
             } catch (_: Throwable) {
@@ -1354,6 +1467,11 @@ class MpvPlayerController {
     }
 
     fun seekTo(timeMs: Long) {
+        val target = liveAdjustedSeek(timeMs) ?: return
+        seekToInternal(target)
+    }
+
+    private fun seekToInternal(timeMs: Long) {
         try {
             // Seeking away from the very end: with keep-open mpv sits paused at EOF, so the video
             // must be un-paused again or "drag the slider back and play" appears to do nothing.

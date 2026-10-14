@@ -1180,6 +1180,8 @@ fun VideoPlayerScreen(
     val controllerPos by controller.currentPositionMs.collectAsState()
     val controllerDur by controller.durationMs.collectAsState()
     val controllerEof by controller.eofReached.collectAsState()
+    val controllerIsLive by controller.isLiveStream.collectAsState()
+    val controllerLiveRange by controller.liveSeekRange.collectAsState()
 
     LaunchedEffect(controllerIsPlaying) {
         isPlaying = controllerIsPlaying
@@ -1508,6 +1510,8 @@ fun VideoPlayerScreen(
     fun persistPlaybackPosition(posMs: Long = currentPositionMs, forceDisk: Boolean = true) {
         val vid = persistVideoState ?: return
         if (!persistSaveOnQuitState) return
+        // live TV has no meaningful resume position
+        if (controller.isLiveStream.value) return
 
         val controllerVal = controller.currentPositionMs.value
         val rawPos = if (controllerVal > 0L) controllerVal else posMs
@@ -1679,6 +1683,8 @@ fun VideoPlayerScreen(
         currentPositionMs = initialPos
         if (targetVideo.durationMs > 0) {
             durationMs = targetVideo.durationMs
+        } else if (targetVideo.isDirectStream) {
+            durationMs = 0L
         }
 
         // 6. Update thumbnail
@@ -1729,7 +1735,15 @@ fun VideoPlayerScreen(
             coroutineScope.launch {
                 if (firstLoad) kotlinx.coroutines.delay(entryDelayMs)
                 if (lastLoadedVideoKey != key) return@launch
-                if (targetVideo.isOnline) {
+                if (targetVideo.isDirectStream) {
+                    // Imported M3U / IPTV stream: the real stream URL goes straight into the existing mpv player
+                    // (with the stream's own User-Agent / headers); no YouTube resolving.
+                    onlinePlayback = null
+                    controller.setOnlineStream(true)
+                    controller.setDirectStream(true)
+                    controller.loadVideo(path, startPositionMs = initialPos)
+                    controller.play()
+                } else if (targetVideo.isOnline) {
                     startOnlinePlayback(path, initialPos, key)
                 } else {
                     controller.setOnlineStream(false)
@@ -2970,6 +2984,9 @@ fun VideoPlayerScreen(
             },
             chapters = realChapters,
             bufferedPositionMs = bufferedPositionMs,
+            isLiveStream = controllerIsLive,
+            liveSeekStartMs = controllerLiveRange?.startMs ?: 0L,
+            liveSeekEndMs = controllerLiveRange?.endMs ?: 0L,
             availableVideoQualities = onlinePlayback?.qualities?.map { it.label }?.let { listOf(OnlineVideoService.AUTO_QUALITY) + it } ?: emptyList(),
             selectedVideoQuality = if (onlineAutoMode) "${OnlineVideoService.AUTO_QUALITY} (${selectedOnlineQuality ?: "…"})" else selectedOnlineQuality,
             onSelectVideoQuality = { label -> switchOnlineQuality(label) },

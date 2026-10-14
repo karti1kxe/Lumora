@@ -571,6 +571,11 @@ fun VideoPlayerOverlay(
     onResetEqualizer: () -> Unit = {},
     chapters: List<com.example.player.PlayerVideoChapter> = emptyList(),
     bufferedPositionMs: Long = 0L,
+    /** Live TV: the seek bar shows elapsed time + "LIVE" instead of a fake end time. */
+    isLiveStream: Boolean = false,
+    /** Live TV with a DVR / time-shift window: the real seekable range (0/0 = not seekable). */
+    liveSeekStartMs: Long = 0L,
+    liveSeekEndMs: Long = 0L,
     showBufferedRange: Boolean = true,
     thumbFastPreview: Boolean = false,
     previewVideoUri: android.net.Uri? = null,
@@ -2723,6 +2728,9 @@ fun VideoPlayerOverlay(
                             chapters = chapters,
                             skipMarkers = skipMarkers,
                             bufferedPositionMs = bufferedPositionMs,
+                            isLiveStream = isLiveStream,
+                            liveSeekStartMs = liveSeekStartMs,
+                            liveSeekEndMs = liveSeekEndMs,
                             showBufferedRange = showBufferedRange,
                             thumbFastPreview = thumbFastPreview,
                             previewVideoUri = previewVideoUri,
@@ -4475,6 +4483,9 @@ fun PlayerScrubberBar(
     durationMs: Long,
     seekbarStyle: com.example.ui.state.SeekbarStyle,
     bufferedPositionMs: Long = 0L,
+    isLiveStream: Boolean = false,
+    liveSeekStartMs: Long = 0L,
+    liveSeekEndMs: Long = 0L,
     showBufferedRange: Boolean = true,
     thumbFastPreview: Boolean = false,
     previewVideoUri: android.net.Uri? = null,
@@ -4487,19 +4498,26 @@ fun PlayerScrubberBar(
     notifyInteraction: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Seek-bar math: normal video = whole duration; live TV with a DVR window = that window; live TV without = no seeking.
+    val liveWindowMs = liveSeekEndMs - liveSeekStartMs
+    val liveSeekable = isLiveStream && liveWindowMs >= 3000L
+    val barDurationMs = if (isLiveStream) (if (liveSeekable) liveWindowMs else 0L) else durationMs
+    val barOffsetMs = if (liveSeekable) liveSeekStartMs else 0L
     val view = LocalView.current
     val haptic = LocalHapticFeedback.current
     var lastScrubberHapticSec by remember { mutableLongStateOf(-1L) }
-    val scrubberProgressFraction by remember(currentPositionMs, durationMs) {
+    val scrubberProgressFraction by remember(currentPositionMs, barDurationMs, barOffsetMs, isLiveStream) {
         derivedStateOf {
-            if (durationMs > 0) (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+            if (isLiveStream && barDurationMs <= 0L) 1f
+            else if (barDurationMs > 0) ((currentPositionMs - barOffsetMs).toFloat() / barDurationMs.toFloat()).coerceIn(0f, 1f)
+            else 0f
         }
     }
     val currentScrubberTimeText by remember(currentPositionMs) {
         derivedStateOf { formatTimeShort(currentPositionMs) }
     }
-    val durationScrubberTimeText by remember(durationMs) {
-        derivedStateOf { formatTimeShort(durationMs) }
+    val durationScrubberTimeText by remember(barDurationMs) {
+        derivedStateOf { formatTimeShort(barDurationMs) }
     }
     val context = LocalContext.current
     val previewScope = rememberCoroutineScope()
@@ -4508,8 +4526,8 @@ fun PlayerScrubberBar(
     var previewJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     fun requestPreview(targetMs: Long) {
-        if (!thumbFastPreview || durationMs <= 0L) return
-        previewTargetMs = targetMs.coerceIn(0L, durationMs)
+        if (!thumbFastPreview || barDurationMs <= 0L || isLiveStream) return
+        previewTargetMs = targetMs.coerceIn(0L, barDurationMs)
         previewJob?.cancel()
         previewJob = previewScope.launch {
             kotlinx.coroutines.delay(70L)
@@ -4554,7 +4572,9 @@ fun PlayerScrubberBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(28.dp)
-                    .pointerInput(durationMs) {
+                    .pointerInput(barDurationMs, barOffsetMs, isLiveStream) {
+                        // live TV that cannot be seeked: the bar is display-only (no seek to 0 / no fake position)
+                        if (isLiveStream && barDurationMs <= 0L) return@pointerInput
                         // Drag-to-scrub and tap-to-seek combined in one
                         // pointerInput block so both detectors read the same
                         // pointer stream instead of racing across two separate
@@ -4570,14 +4590,14 @@ fun PlayerScrubberBar(
                                     onHorizontalDrag = { change, _ ->
                                         change.consume()
                                         val newFraction = (change.position.x / size.width).coerceIn(0f, 1f)
-                                        val targetMs = (newFraction * durationMs).toLong()
+                                        val targetMs = (newFraction * barDurationMs).toLong()
                                         requestPreview(targetMs)
                                         val currentSec = targetMs / 1000L
                                         if (kotlin.math.abs(currentSec - lastScrubberHapticSec) >= 1L) {
                                             lastScrubberHapticSec = currentSec
                                             AppHaptics.performTick(view, haptic)
                                         }
-                                        onSeekTo(targetMs)
+                                        onSeekTo(targetMs + barOffsetMs)
                                         notifyInteraction()
                                     }
                                 )
@@ -4586,9 +4606,9 @@ fun PlayerScrubberBar(
                                 detectTapGestures { offset ->
                                     AppHaptics.performGestureThreshold(view, haptic)
                                     val newFraction = (offset.x / size.width).coerceIn(0f, 1f)
-                                    val targetMs = (newFraction * durationMs).toLong()
+                                    val targetMs = (newFraction * barDurationMs).toLong()
                                     requestPreview(targetMs)
-                                    onSeekTo(targetMs)
+                                    onSeekTo(targetMs + barOffsetMs)
                                     notifyInteraction()
                                 }
                             }
@@ -4599,7 +4619,7 @@ fun PlayerScrubberBar(
                 val h = size.height
                 val centerY = h / 2f
                 val activeW = w * scrubberProgressFraction
-                val bufferedFraction = if (durationMs > 0L) (bufferedPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+                val bufferedFraction = if (barDurationMs > 0L) ((bufferedPositionMs - barOffsetMs).toFloat() / barDurationMs.toFloat()).coerceIn(0f, 1f) else 0f
                 val bufferedW = w * bufferedFraction
 
                 if (showBufferedRange && bufferedW > activeW) {
@@ -4626,7 +4646,7 @@ fun PlayerScrubberBar(
                         )
 
                         // Chapter Skip Markers
-                        drawPlayerScrubberChapterMarkers(this, w, centerY, trackH, durationMs, skipMarkers)
+                        drawPlayerScrubberChapterMarkers(this, w, centerY, trackH, barDurationMs, skipMarkers)
 
                         // Active progress
                         if (activeW > 0) {
@@ -4639,10 +4659,10 @@ fun PlayerScrubberBar(
                         }
 
                         // Chapter boundary markers
-                        drawPlayerScrubberChapterBoundaries(this, w, centerY, trackH, durationMs, chapters)
+                        drawPlayerScrubberChapterBoundaries(this, w, centerY, trackH, barDurationMs, chapters)
 
                         // A-B Repeat Loop markers
-                        drawPlayerScrubberLoopMarkers(this, w, centerY, trackH, durationMs, loopPointA, loopPointB)
+                        drawPlayerScrubberLoopMarkers(this, w, centerY, trackH, barDurationMs, loopPointA, loopPointB)
 
                         // Circular thumb with halo
                         val thumbRadius = 6.5.dp.toPx()
@@ -4678,7 +4698,7 @@ fun PlayerScrubberBar(
                         )
 
                         // Chapter Skip Markers
-                        drawPlayerScrubberChapterMarkers(this, w, centerY, trackH, durationMs, skipMarkers)
+                        drawPlayerScrubberChapterMarkers(this, w, centerY, trackH, barDurationMs, skipMarkers)
 
                         // Active teal progress
                         if (activeW > 0) {
@@ -4691,10 +4711,10 @@ fun PlayerScrubberBar(
                         }
 
                         // Chapter boundary markers
-                        drawPlayerScrubberChapterBoundaries(this, w, centerY, trackH, durationMs, chapters)
+                        drawPlayerScrubberChapterBoundaries(this, w, centerY, trackH, barDurationMs, chapters)
 
                         // A-B Repeat Loop markers
-                        drawPlayerScrubberLoopMarkers(this, w, centerY, trackH, durationMs, loopPointA, loopPointB)
+                        drawPlayerScrubberLoopMarkers(this, w, centerY, trackH, barDurationMs, loopPointA, loopPointB)
 
                         // Thumb indicator bar (vertical bright cyan rectangle)
                         val pinW = 4.dp.toPx()
@@ -4726,7 +4746,7 @@ fun PlayerScrubberBar(
                         }
 
                         // Chapter Skip Markers
-                        drawPlayerScrubberChapterMarkers(this, w, centerY, strokeW * 1.8f, durationMs, skipMarkers)
+                        drawPlayerScrubberChapterMarkers(this, w, centerY, strokeW * 1.8f, barDurationMs, skipMarkers)
 
                         // Active wavy sine wave path
                         if (activeW > 0) {
@@ -4747,10 +4767,10 @@ fun PlayerScrubberBar(
                         }
 
                         // Chapter boundary markers
-                        drawPlayerScrubberChapterBoundaries(this, w, centerY, strokeW * 2f, durationMs, chapters)
+                        drawPlayerScrubberChapterBoundaries(this, w, centerY, strokeW * 2f, barDurationMs, chapters)
 
                         // A-B Repeat Loop markers
-                        drawPlayerScrubberLoopMarkers(this, w, centerY, strokeW * 2f, durationMs, loopPointA, loopPointB)
+                        drawPlayerScrubberLoopMarkers(this, w, centerY, strokeW * 2f, barDurationMs, loopPointA, loopPointB)
 
                         // Pin thumb divider
                         val pinW = 3.5.dp.toPx()
@@ -4778,7 +4798,7 @@ fun PlayerScrubberBar(
                         )
 
                         // Chapter Skip Markers
-                        drawPlayerScrubberChapterMarkers(this, w, centerY, trackH, durationMs, skipMarkers)
+                        drawPlayerScrubberChapterMarkers(this, w, centerY, trackH, barDurationMs, skipMarkers)
 
                         // Active progress
                         if (activeW > 0) {
@@ -4791,10 +4811,10 @@ fun PlayerScrubberBar(
                         }
 
                         // Chapter boundary markers
-                        drawPlayerScrubberChapterBoundaries(this, w, centerY, trackH, durationMs, chapters)
+                        drawPlayerScrubberChapterBoundaries(this, w, centerY, trackH, barDurationMs, chapters)
 
                         // A-B Repeat Loop markers
-                        drawPlayerScrubberLoopMarkers(this, w, centerY, trackH, durationMs, loopPointA, loopPointB)
+                        drawPlayerScrubberLoopMarkers(this, w, centerY, trackH, barDurationMs, loopPointA, loopPointB)
 
                         // Vertical divider pin
                         val pinW = 4.dp.toPx()
@@ -4822,7 +4842,7 @@ fun PlayerScrubberBar(
                         )
 
                         // Chapter Skip Markers
-                        drawPlayerScrubberChapterMarkers(this, w, centerY, trackH, durationMs, skipMarkers)
+                        drawPlayerScrubberChapterMarkers(this, w, centerY, trackH, barDurationMs, skipMarkers)
 
                         // Active progress
                         if (activeW > 0) {
@@ -4835,10 +4855,10 @@ fun PlayerScrubberBar(
                         }
 
                         // Chapter boundary markers
-                        drawPlayerScrubberChapterBoundaries(this, w, centerY, trackH, durationMs, chapters)
+                        drawPlayerScrubberChapterBoundaries(this, w, centerY, trackH, barDurationMs, chapters)
 
                         // A-B Repeat Loop markers
-                        drawPlayerScrubberLoopMarkers(this, w, centerY, trackH, durationMs, loopPointA, loopPointB)
+                        drawPlayerScrubberLoopMarkers(this, w, centerY, trackH, barDurationMs, loopPointA, loopPointB)
                     }
                 }
             }
@@ -4860,7 +4880,7 @@ fun PlayerScrubberBar(
         Spacer(modifier = Modifier.width(10.dp))
 
         Text(
-            text = durationScrubberTimeText,
+            text = if (isLiveStream) "LIVE" else durationScrubberTimeText,
             fontSize = 12.5.sp,
             fontWeight = FontWeight.SemiBold,
             color = Color.White

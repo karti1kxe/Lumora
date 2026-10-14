@@ -454,6 +454,8 @@ fun HomeScreen(
     var selectedMusicFolder by remember { mutableStateOf<AudioFolderItem?>(null) }
     var selectedRecentsFolder by remember { mutableStateOf<RecentsFolder?>(null) }
     var selectedPlaylist by remember { mutableStateOf<com.example.util.CustomPlaylist?>(null) }
+    // Incremented by the floating "+ Create Playlist" button; CustomPlaylistsTabContent opens its options sheet on each change.
+    var playlistCreateRequest by remember { mutableStateOf(0) }
     var isInsideRecentsFolder by remember { mutableStateOf(false) }
     var isInsidePlaylistDetail by remember { mutableStateOf(false) }
 
@@ -1902,6 +1904,7 @@ fun HomeScreen(
                                 onPlaylistShareCallback = onShare
                             },
                             onPlayVideo = onPlayVideo,
+                            createPlaylistRequest = playlistCreateRequest,
                             modifier = Modifier.fillMaxWidth().weight(1f)
                         )
                     }
@@ -2837,9 +2840,10 @@ fun HomeScreen(
                 }
             }
 
-            // PLAYLISTS: Floating Play Button to play tracks in current/top playlist
+            // PLAYLISTS: floating "+ Create Playlist" button (replaces the old floating Play button).
+            // Same glass look as the other floating buttons; opens the translucent options sheet.
             AnimatedVisibility(
-                visible = !isSelectionMode && effectiveSelectedTab == NavigationTab.PLAYLISTS,
+                visible = !isSelectionMode && effectiveSelectedTab == NavigationTab.PLAYLISTS && selectedPlaylist == null,
                 enter = fadeIn() + scaleIn(),
                 exit = fadeOut() + scaleOut(),
                 modifier = Modifier
@@ -2848,83 +2852,31 @@ fun HomeScreen(
                     .padding(end = 20.dp, bottom = fabBottomPadding)
             ) {
                 val fabShape = RoundedCornerShape(20.dp)
-                Box(
+                Row(
                     modifier = Modifier
-                        .size(60.dp)
+                        .height(60.dp)
                         .shadow(18.dp, fabShape, ambientColor = com.example.ui.theme.AccentSkyBlue.copy(alpha = 0.50f), spotColor = com.example.ui.theme.AccentPink.copy(alpha = 0.60f))
                         .clip(fabShape)
                         .background(if (isDark) Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f))) else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.95f), Color(0xFFF1F5F9).copy(alpha = 0.95f))))
                         .border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape)
-                        .bounceClick(scaleDown = 0.88f) {
-                            coroutineScope.launch(Dispatchers.IO) {
-                                val targetPl = selectedPlaylist ?: PlaylistManager.getPlaylists(context).firstOrNull()
-                                if (targetPl != null) {
-                                    if (targetPl.isAudio) {
-                                        val allAudio = com.example.util.AudioLibraryCache.getOrScanAudio(context)
-                                        val trackMap = allAudio.associateBy { it.path }
-                                        val tracks = targetPl.videoPaths.mapNotNull { path ->
-                                            trackMap[path]
-                                                ?: com.example.util.OnlineTrackMetadataCache.getTrack(context, path)
-                                                ?: if (path.startsWith(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)) {
-                                                    val url = path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
-                                                    com.example.util.OnlineTrackMetadataCache.getTrack(context, url) ?: com.example.ui.screens.AudioTrackItem(
-                                                        id = -(kotlin.math.abs(url.hashCode().toLong())),
-                                                        uri = Uri.EMPTY,
-                                                        title = "Online Track",
-                                                        artist = "Online Music",
-                                                        album = targetPl.name,
-                                                        durationMs = 0L,
-                                                        path = path,
-                                                        sizeBytes = 0L,
-                                                        format = "STREAM",
-                                                        audioType = "Stereo",
-                                                        dateModified = System.currentTimeMillis()
-                                                    )
-                                                } else null
-                                        }
-                                        withContext(Dispatchers.Main) {
-                                            if (tracks.isNotEmpty()) {
-                                                AudioPlaybackManager.playTrack(context, tracks.first(), tracks)
-                                            } else {
-                                                Toast.makeText(context, "Playlist is empty", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    } else {
-                                        val videos = targetPl.videoPaths.mapNotNull { path ->
-                                            allLibraryVideos.find { it.path == path }
-                                                ?: if (File(path).exists()) {
-                                                    val f = File(path)
-                                                    VideoItem(
-                                                        id = f.absolutePath.hashCode().toLong(),
-                                                        uri = Uri.fromFile(f),
-                                                        displayName = f.nameWithoutExtension,
-                                                        path = f.absolutePath,
-                                                        sizeBytes = f.length(),
-                                                        durationMs = 0L,
-                                                        dateModified = f.lastModified() / 1000L,
-                                                        isNew = false
-                                                    )
-                                                } else null
-                                        }
-                                        withContext(Dispatchers.Main) {
-                                            if (videos.isNotEmpty()) {
-                                                onPlayVideo(videos.first(), videos)
-                                            } else {
-                                                Toast.makeText(context, "Playlist is empty", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    withContext(Dispatchers.Main) {
-                                        Toast.makeText(context, "No playlist available to play", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            }
-                        }
-                        .testTag("playlist_play_fab"),
-                    contentAlignment = Alignment.Center
+                        .bounceClick(scaleDown = 0.92f) { playlistCreateRequest++ }
+                        .padding(horizontal = 20.dp)
+                        .testTag("playlist_create_fab"),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    com.example.ui.components.PlayGradientLogoIcon(size = 32.dp)
+                    StyledIcon(
+                        imageVector = Icons.Outlined.Add,
+                        contentDescription = "Create Playlist",
+                        tint = com.example.ui.theme.AccentSkyBlue,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Create Playlist",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isDark) Color.White else Color(0xFF0F172A)
+                    )
                 }
             }
 

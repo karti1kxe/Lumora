@@ -60,6 +60,16 @@ object OnlineMediaLibrary {
         prefs(c).edit().putString(key, obj.toString()).apply()
     }
 
+    /** Same as [rememberMeta] for many items with a single read + write (used by the YouTube playlist import). */
+    @Synchronized
+    fun rememberMetaBatch(c: Context, kind: String, list: List<OnlineTrackResult>) {
+        attach(c)
+        val key = "meta_$kind"
+        val obj = readObj(c, key)
+        for (r in list) obj.put(r.videoUrl, r.toJson())
+        prefs(c).edit().putString(key, obj.toString()).apply()
+    }
+
     @Synchronized
     fun getMeta(kind: String, url: String, context: Context? = null): OnlineTrackResult? {
         val c = context ?: appCtx ?: return null

@@ -23,8 +23,11 @@ data class CustomPlaylist(
     val isAudio: Boolean
         get() = mediaType.equals("AUDIO", ignoreCase = true) ||
                 (videoPaths.isNotEmpty() && videoPaths.all { path ->
+                    // imported stream URLs (IPTV / radio lists) are never classified by their file extension
                     val ext = path.substringAfterLast('.', "").lowercase()
-                    ext in listOf("mp3", "m4a", "aac", "flac", "wav", "ogg", "opus", "wma")
+                    !path.startsWith("http://", ignoreCase = true) &&
+                        !path.startsWith("https://", ignoreCase = true) &&
+                        ext in listOf("mp3", "m4a", "aac", "flac", "wav", "ogg", "opus", "wma")
                 })
 
     val isOnlineFolder: Boolean
@@ -63,6 +66,7 @@ object PlaylistManager {
     @Synchronized
     fun getPlaylists(context: Context): List<CustomPlaylist> {
         OnlineMediaLibrary.attach(context)
+        StreamEntryStore.attach(context)
         val prefs = getPrefs(context)
         val jsonStr = prefs.getString(KEY_PLAYLISTS, null) ?: return emptyList()
         val list = mutableListOf<CustomPlaylist>()
@@ -120,6 +124,28 @@ object PlaylistManager {
         return newPl
     }
 
+    /** Creates a playlist that already contains [paths] with ONE save (used by the M3U / YouTube importers). */
+    @Synchronized
+    fun createPlaylistWithPaths(
+        context: Context,
+        name: String,
+        mediaType: String = "VIDEO",
+        isOnline: Boolean = false,
+        paths: List<String>
+    ): CustomPlaylist {
+        val trimmed = name.trim().ifBlank { "Playlist ${System.currentTimeMillis() % 1000}" }
+        val current = getPlaylists(context).toMutableList()
+        val newPl = CustomPlaylist(
+            name = trimmed,
+            videoPaths = paths.filter { it.isNotBlank() }.distinct(),
+            mediaType = mediaType,
+            isOnline = isOnline
+        )
+        current.add(0, newPl)
+        savePlaylists(context, current)
+        return newPl
+    }
+
     @Synchronized
     fun addVideosToPlaylist(context: Context, playlistId: String, newVideoPaths: List<String>): Int {
         val current = getPlaylists(context).toMutableList()
@@ -165,6 +191,12 @@ object PlaylistManager {
         val current = getPlaylists(context).toMutableList()
         current.removeAll { it.id == playlistId }
         savePlaylists(context, current)
+        // forget logos / headers of imported streams that no remaining playlist uses
+        StreamEntryStore.prune(
+            current.flatMap { it.videoPaths }
+                .filter { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+                .toSet()
+        )
     }
 
     @Synchronized
@@ -231,6 +263,25 @@ object PlaylistManager {
                 val meta = OnlineMediaLibrary.getMeta(OnlineMediaLibrary.KIND_VIDEO, url)
                     ?: com.example.util.OnlineTrackResult(videoUrl = url, title = url, artist = "", durationSec = 0L, thumbnailUrl = null)
                 result.add(meta.toOnlineVideoItem())
+            } else if (path.startsWith("http://", ignoreCase = true) || path.startsWith("https://", ignoreCase = true)) {
+                // Imported M3U / IPTV stream: rebuild the normal video card (logo as thumbnail, group as sub-line).
+                val meta = StreamEntryStore.get(path)
+                result.add(
+                    VideoItem(
+                        id = -(kotlin.math.abs(("stream:" + path).hashCode().toLong())) - 1L,
+                        uri = android.net.Uri.parse(path),
+                        displayName = meta?.name?.takeIf { it.isNotBlank() }
+                            ?: path.substringBefore('?').substringAfterLast('/').ifBlank { path },
+                        path = path,
+                        sizeBytes = 0L,
+                        durationMs = 0L,
+                        dateModified = 0L,
+                        isOnline = true,
+                        thumbnailUrl = meta?.logo,
+                        channelName = meta?.group,
+                        isDirectStream = true
+                    )
+                )
             } else {
                 val f = File(path)
                 if (f.exists()) {

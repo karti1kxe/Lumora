@@ -2,6 +2,8 @@ package com.example.ui.screens
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -94,7 +96,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import com.example.R
+import com.example.ui.components.AddPlaylistFromUrlSheet
 import com.example.ui.components.BottomMoveCopyProgressBar
+import com.example.ui.components.CreateEmptyPlaylistSheet
+import com.example.ui.components.PlaylistOptionsSheet
 import com.example.ui.components.FolderGlyphType
 import com.example.ui.components.InlineRenameField
 import com.example.ui.components.LayoutMode
@@ -120,10 +125,14 @@ import com.example.ui.theme.LightTextSecondary
 import com.example.util.AudioFileManager
 import com.example.util.AudioLibraryCache
 import com.example.util.CustomPlaylist
+import com.example.util.PlaylistImportResult
+import com.example.util.PlaylistImporter
 import com.example.util.PlaylistManager
 import com.example.util.VideoFileManager
 import com.example.player.AudioPlaybackManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -160,6 +169,8 @@ fun CustomPlaylistsTabContent(
         onShare: () -> Unit
     ) -> Unit = { _, _, _, _, _ -> },
     onPlayVideo: (VideoItem, List<VideoItem>) -> Unit,
+    /** Incremented by the floating "+ Create Playlist" button of the Home screen to open the options sheet. */
+    createPlaylistRequest: Int = 0,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -223,6 +234,21 @@ fun CustomPlaylistsTabContent(
     // Media Playlist Filter Tab: "VIDEO" | "AUDIO" (Video is primary/default)
     var selectedMediaTab by remember { mutableStateOf("VIDEO") }
 
+    // ---- floating "+ Create Playlist" flow: options sheet -> empty-name sheet / URL-or-file import sheet ----
+    // 0 = closed, 1 = options, 2 = create empty, 3 = add from URL / local file
+    var playlistSheetStage by remember { mutableStateOf(0) }
+    var handledCreateRequest by remember { mutableStateOf(createPlaylistRequest) }
+    LaunchedEffect(createPlaylistRequest) {
+        // only a NEW tap opens the sheet (re-entering the tab must not re-open it)
+        if (createPlaylistRequest != handledCreateRequest) {
+            handledCreateRequest = createPlaylistRequest
+            playlistSheetStage = 1
+        }
+    }
+    var isImportingPlaylist by remember { mutableStateOf(false) }
+    var importErrorMessage by remember { mutableStateOf<String?>(null) }
+    var importJob by remember { mutableStateOf<Job?>(null) }
+
     LaunchedEffect(effectiveSelectedPlaylist) {
         onPlaylistSelected(effectiveSelectedPlaylist != null)
         selectedVideoPaths.clear()
@@ -245,6 +271,50 @@ fun CustomPlaylistsTabContent(
 
     LaunchedEffect(Unit) {
         refreshPlaylists()
+    }
+
+    /**
+     * Runs one import (URL / YouTube / local file) off the main thread. Only one import can run at a time, so
+     * double taps or closing and re-opening the sheet can never create the same playlist twice.
+     */
+    fun runPlaylistImport(block: suspend () -> PlaylistImportResult) {
+        if (isImportingPlaylist) return
+        isImportingPlaylist = true
+        importErrorMessage = null
+        importJob = coroutineScope.launch {
+            try {
+                val result = try {
+                    block()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    PlaylistImportResult.Failure(e.message ?: "Import failed")
+                }
+                when (result) {
+                    is PlaylistImportResult.Success -> {
+                        playlistSheetStage = 0
+                        // imported lists are video playlists: make sure the new one is visible in the current tab
+                        selectedMediaTab = "VIDEO"
+                        refreshPlaylists()
+                        val count = result.itemCount
+                        val msg = "Playlist \"${result.playlist.name}\" created with $count item${if (count != 1) "s" else ""}" +
+                            (result.note?.let { " ($it)" } ?: "")
+                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    }
+                    is PlaylistImportResult.Failure -> importErrorMessage = result.message
+                }
+            } finally {
+                isImportingPlaylist = false
+                importJob = null
+            }
+        }
+    }
+
+    // Android's system file picker (Storage Access Framework). The file is read right away from the returned URI.
+    val m3uPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { pickedUri ->
+        if (pickedUri != null) {
+            runPlaylistImport { PlaylistImporter.importFromLocalFile(context, pickedUri) }
+        }
     }
 
     val mediaFilteredPlaylists = remember(playlists.toList(), selectedMediaTab) {
@@ -1613,6 +1683,66 @@ fun CustomPlaylistsTabContent(
                         Toast.makeText(context, "Playlist created: $name", Toast.LENGTH_SHORT).show()
                     }
                 }
+            )
+        }
+
+        // ---- Floating "+ Create Playlist": translucent bottom sheets ----
+        if (playlistSheetStage == 1) {
+            PlaylistOptionsSheet(
+                isDark = isDark,
+                glassBlurTransparency = uiState.glassBlurTransparency,
+                onDismiss = { playlistSheetStage = 0 },
+                onCreateEmpty = { playlistSheetStage = 2 },
+                onAddFromUrl = {
+                    importErrorMessage = null
+                    playlistSheetStage = 3
+                }
+            )
+        }
+        if (playlistSheetStage == 2) {
+            CreateEmptyPlaylistSheet(
+                isDark = isDark,
+                glassBlurTransparency = uiState.glassBlurTransparency,
+                title = if (selectedMediaTab == "AUDIO") "Create Audio Playlist" else "Create Video Playlist",
+                onDismiss = { playlistSheetStage = 0 },
+                onCreate = { name ->
+                    val targetType = selectedMediaTab
+                    playlistSheetStage = 0
+                    coroutineScope.launch {
+                        withContext(Dispatchers.IO) {
+                            PlaylistManager.createPlaylist(context, name, mediaType = targetType)
+                        }
+                        refreshPlaylists()
+                        Toast.makeText(context, "Playlist created: $name", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            )
+        }
+        if (playlistSheetStage == 3) {
+            AddPlaylistFromUrlSheet(
+                isDark = isDark,
+                glassBlurTransparency = uiState.glassBlurTransparency,
+                isImporting = isImportingPlaylist,
+                errorMessage = importErrorMessage,
+                onDismiss = {
+                    importJob?.cancel()
+                    isImportingPlaylist = false
+                    importErrorMessage = null
+                    playlistSheetStage = 0
+                },
+                onAddFromUrl = { url, userAgent ->
+                    val validationError = PlaylistImporter.validateUrl(url)
+                    if (validationError != null) {
+                        importErrorMessage = validationError
+                    } else {
+                        runPlaylistImport { PlaylistImporter.importFromUrl(context, url, userAgent) }
+                    }
+                },
+                onChooseLocalFile = {
+                    importErrorMessage = null
+                    m3uPickerLauncher.launch(arrayOf("*/*"))
+                },
+                onInputChanged = { if (importErrorMessage != null) importErrorMessage = null }
             )
         }
 
