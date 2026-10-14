@@ -331,7 +331,14 @@ fun HomeScreen(
     }
 
     // Navigation Tabs State (Reactive to AppConfig settings)
-    var currentBottomTab by rememberSaveable { mutableStateOf(NavigationTab.HOME) }
+    // Returning from the video player must land on the SAME tab (and folder) the video was started from.
+    var currentBottomTab by rememberSaveable {
+        mutableStateOf(
+            viewModel?.lastBottomTabName?.let { n -> NavigationTab.values().firstOrNull { it.name == n } }
+                ?: NavigationTab.HOME
+        )
+    }
+    LaunchedEffect(currentBottomTab) { viewModel?.lastBottomTabName = currentBottomTab.name }
 
     val activeTabs = remember(
         uiState.showHomeTab,
@@ -453,11 +460,18 @@ fun HomeScreen(
     var isInsideMusicFolder by remember { mutableStateOf(false) }
     var selectedMusicFolder by remember { mutableStateOf<AudioFolderItem?>(null) }
     var selectedRecentsFolder by remember { mutableStateOf<RecentsFolder?>(null) }
-    var selectedPlaylist by remember { mutableStateOf<com.example.util.CustomPlaylist?>(null) }
+    var selectedPlaylist by remember {
+        mutableStateOf<com.example.util.CustomPlaylist?>(
+            viewModel?.lastPlaylistId?.let { id ->
+                com.example.util.PlaylistManager.getPlaylists(context).firstOrNull { it.id == id }
+            }
+        )
+    }
+    LaunchedEffect(selectedPlaylist?.id) { viewModel?.lastPlaylistId = selectedPlaylist?.id }
     // Incremented by the floating "+ Create Playlist" button; CustomPlaylistsTabContent opens its options sheet on each change.
     var playlistCreateRequest by remember { mutableStateOf(0) }
     var isInsideRecentsFolder by remember { mutableStateOf(false) }
-    var isInsidePlaylistDetail by remember { mutableStateOf(false) }
+    var isInsidePlaylistDetail by remember { mutableStateOf(selectedPlaylist != null) }
 
     BackHandler(enabled = effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder != null) {
         searchQuery = ""
@@ -473,7 +487,10 @@ fun HomeScreen(
         selectedPlaylist = null
     }
 
+    var tabEffectFirstRun by remember { mutableStateOf(true) }
     LaunchedEffect(effectiveSelectedTab) {
+        // The first run is the screen being (re)created, e.g. coming back from the player: keep the open folder.
+        if (tabEffectFirstRun) { tabEffectFirstRun = false; return@LaunchedEffect }
         searchQuery = ""
         isSearchActive = false
         selectedMusicFolder = null
@@ -1688,7 +1705,7 @@ fun HomeScreen(
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Search videos, channels online..." else if (currentFolder != null) "Search in ${currentFolder.name}..." else "Search videos, or /playlist (e.g. /Op Anime)..."
                         NavigationTab.MUSIC -> if (selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) "Search songs, albums, artists online..." else "Search songs, albums, artists..."
                         NavigationTab.RECENTS -> "Search watch history..."
-                        NavigationTab.PLAYLISTS -> "Search playlists..."
+                        NavigationTab.PLAYLISTS -> selectedPlaylist?.let { "Search in ${it.name}..." } ?: "Search playlists..."
                     }
                     Box(
                         modifier = Modifier

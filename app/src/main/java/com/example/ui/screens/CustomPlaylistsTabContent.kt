@@ -104,6 +104,10 @@ import com.example.ui.components.FolderGlyphType
 import com.example.ui.components.InlineRenameField
 import com.example.ui.components.LayoutMode
 import com.example.ui.components.ModernFolderIcon
+import androidx.compose.ui.text.style.TextAlign
+import com.example.ui.components.PlaylistFilterTabs
+import com.example.ui.components.glideToItem
+import com.example.ui.components.PlaylistRevealSwipe
 import com.example.ui.components.SortDirection
 import com.example.ui.components.SortField
 import com.example.ui.components.StyledIcon
@@ -199,6 +203,10 @@ fun CustomPlaylistsTabContent(
     val selectedPlaylistIds = remember { mutableStateListOf<String>() }
     val selectedVideoPaths = remember { mutableStateListOf<String>() }
     var isReorderMode by remember { mutableStateOf(false) }
+    // Folder tabs (All / Saved / Favourite) + heart/bookmark marks of the open playlist
+    var filterTab by remember(selectedPlaylist?.id) { mutableStateOf(0) }
+    var marksVersion by remember { mutableStateOf(0) }
+    var revealedPath by remember(selectedPlaylist?.id) { mutableStateOf<String?>(null) }
 
     val isPlaylistSelection = effectiveSelectedPlaylist == null && selectedPlaylistIds.isNotEmpty()
     val isVideoSelection = effectiveSelectedPlaylist != null && selectedVideoPaths.isNotEmpty()
@@ -513,6 +521,46 @@ fun CustomPlaylistsTabContent(
 
     val playlistMediaCount = if (effectiveSelectedPlaylist?.isAudio == true) displayPlAudioTracks.size else displayPlVideos.size
 
+    // M3U / IPTV folder = Saved + Favourite marks; every other folder = Favourite only.
+    val isM3uFolder = remember(effectiveSelectedPlaylist?.id, effectiveSelectedPlaylist?.videoPaths) {
+        com.example.util.StreamEntryStore.attach(context)
+        effectiveSelectedPlaylist?.let { pl0 ->
+            !pl0.isAudio && pl0.videoPaths.any { com.example.util.StreamEntryStore.get(it) != null }
+        } == true
+    }
+    val tabKinds = if (isM3uFolder) listOf("All", "Saved", "Favourite") else listOf("All", "Favourite")
+    val activeTab = filterTab.coerceIn(0, tabKinds.size - 1)
+    val activeTabName = tabKinds[activeTab]
+    val favSet = remember(effectiveSelectedPlaylist?.id, marksVersion) {
+        effectiveSelectedPlaylist?.let { com.example.util.PlaylistMarkStore.paths(context, com.example.util.PlaylistMarkStore.KIND_FAVOURITE, it.id) } ?: emptySet()
+    }
+    val savedSet = remember(effectiveSelectedPlaylist?.id, marksVersion) {
+        effectiveSelectedPlaylist?.let { com.example.util.PlaylistMarkStore.paths(context, com.example.util.PlaylistMarkStore.KIND_SAVED, it.id) } ?: emptySet()
+    }
+    val innerQuery = searchQuery.trim()
+    val isFilteredView = activeTabName != "All" || innerQuery.isNotEmpty()
+    val shownVideos = remember(displayPlVideos, activeTabName, favSet, savedSet, innerQuery) {
+        displayPlVideos.filter { v ->
+            val tabOk = when (activeTabName) {
+                "Saved" -> v.path in savedSet
+                "Favourite" -> v.path in favSet
+                else -> true
+            }
+            tabOk && (innerQuery.isEmpty() ||
+                v.displayName.contains(innerQuery, ignoreCase = true) ||
+                (v.channelName?.contains(innerQuery, ignoreCase = true) == true))
+        }
+    }
+    val shownAudioTracks = remember(displayPlAudioTracks, activeTabName, favSet, innerQuery) {
+        displayPlAudioTracks.filter { t ->
+            val tabOk = if (activeTabName == "Favourite") t.path in favSet else true
+            tabOk && (innerQuery.isEmpty() ||
+                t.title.contains(innerQuery, ignoreCase = true) ||
+                t.artist.contains(innerQuery, ignoreCase = true) ||
+                t.album.contains(innerQuery, ignoreCase = true))
+        }
+    }
+
     // Sync selection details to top SelectionTopBar in HomeScreen
     LaunchedEffect(
         isPlaylistSelection,
@@ -679,7 +727,38 @@ fun CustomPlaylistsTabContent(
                         }
                     }
                 } else {
+                    PlaylistFilterTabs(
+                        tabs = tabKinds,
+                        selectedIndex = activeTab,
+                        isDark = isDark,
+                        onSelect = { filterTab = it; revealedPath = null },
+                        modifier = Modifier.padding(horizontal = 4.dp).padding(bottom = 8.dp)
+                    )
                     val detailListState = rememberLazyListState()
+
+                    // Coming back from the player (or entering the folder) glides to the video / channel that was
+                    // watched last in this folder, instead of leaving the list at the top.
+                    var autoScrolledToLast by remember(pl.id) { mutableStateOf(false) }
+                    LaunchedEffect(pl.id, shownVideos.size, isFilteredView) {
+                        if (autoScrolledToLast || isAudioPlaylist || isFilteredView || !uiState.autoScrollToLastPlayed) return@LaunchedEffect
+                        if (shownVideos.isEmpty()) return@LaunchedEffect
+                        val idx = withContext(Dispatchers.Default) {
+                            var found = -1
+                            for (rec in com.example.util.PlaybackHistoryManager.getAllPlaybackRecords(context)) {
+                                val i = shownVideos.indexOfFirst {
+                                    (rec.path.isNotBlank() && it.path == rec.path) ||
+                                        (rec.uriString.isNotBlank() && it.uri.toString() == rec.uriString)
+                                }
+                                if (i >= 0) { found = i; break }
+                            }
+                            found
+                        }
+                        autoScrolledToLast = true
+                        if (idx > 0) {
+                            androidx.compose.runtime.withFrameNanos { }
+                            detailListState.glideToItem(idx)
+                        }
+                    }
                     var draggingPath by remember { mutableStateOf<String?>(null) }
                     var dragOffsetY by remember { mutableFloatStateOf(0f) }
                     var measuredItemHeightPx by remember { mutableFloatStateOf(0f) }
@@ -736,11 +815,32 @@ fun CustomPlaylistsTabContent(
                         contentPadding = PaddingValues(bottom = if (isVideoSelection) 120.dp else 140.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        if ((if (isAudioPlaylist) shownAudioTracks.isEmpty() else shownVideos.isEmpty())) {
+                            item(key = "pl_filter_empty") {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth().padding(top = 56.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = when {
+                                            innerQuery.isNotEmpty() -> "No results for \"$innerQuery\""
+                                            activeTabName == "Saved" -> "Nothing saved yet. Swipe a channel left and tap the bookmark."
+                                            else -> "No favourites yet. Swipe left and tap the heart."
+                                        },
+                                        fontSize = 13.sp,
+                                        color = secondaryText,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.padding(horizontal = 24.dp)
+                                    )
+                                }
+                            }
+                        }
                         if (isAudioPlaylist) {
                             itemsIndexed(
-                                items = displayPlAudioTracks,
+                                items = shownAudioTracks,
                                 key = { _, track -> "pl_audio_${track.path}" }
-                            ) { index, track ->
+                            ) { listIndex, track ->
+                                val index = reorderedPaths.indexOf(track.path)
                                 val isSelected = selectedVideoPaths.contains(track.path)
                                 val isRenaming = renamingVideoPath == track.path
                                 val isBeingDragged = (draggingPath == track.path)
@@ -768,6 +868,21 @@ fun CustomPlaylistsTabContent(
 
                                 val visualTranslationY = if (isBeingDragged) dragOffsetY else animatedTranslationY
 
+                                PlaylistRevealSwipe(
+                                    enabled = !isReorderMode && !isVideoSelection && draggingPath == null && !isRenaming,
+                                    showBookmark = false,
+                                    isFavourite = track.path in favSet,
+                                    isSaved = false,
+                                    isDark = isDark,
+                                    revealed = revealedPath == track.path,
+                                    onRevealedChange = { open -> revealedPath = if (open) track.path else if (revealedPath == track.path) null else revealedPath },
+                                    onToggleFavourite = {
+                                        val now = com.example.util.PlaylistMarkStore.toggle(context, com.example.util.PlaylistMarkStore.KIND_FAVOURITE, pl.id, track.path)
+                                        marksVersion++
+                                        Toast.makeText(context, if (now) "Added to Favourite" else "Removed from Favourite", Toast.LENGTH_SHORT).show()
+                                    },
+                                    onToggleSaved = {}
+                                ) {
                                 AudioTrackListCard(
                                     track = track,
                                     isCurrent = AudioPlaybackManager.currentTrack.value?.path == track.path,
@@ -804,7 +919,7 @@ fun CustomPlaylistsTabContent(
                                         if (isVideoSelection) {
                                             if (isSelected) selectedVideoPaths.remove(track.path) else selectedVideoPaths.add(track.path)
                                         } else {
-                                            AudioPlaybackManager.playTrack(context, track, plAudioTracks)
+                                            AudioPlaybackManager.playTrack(context, track, if (isFilteredView) shownAudioTracks else plAudioTracks)
                                             AudioPlaybackManager.openFullScreen()
                                         }
                                     },
@@ -880,12 +995,14 @@ fun CustomPlaylistsTabContent(
                                         },
                                     reorderMode = isReorderMode
                                 )
+                                }
                             }
                         } else {
                             itemsIndexed(
-                                items = displayPlVideos,
+                                items = shownVideos,
                                 key = { _, video -> "pl_video_${video.path}" }
-                            ) { index, video ->
+                            ) { listIndex, video ->
+                                val index = reorderedPaths.indexOf(video.path)
                                 val isSelected = selectedVideoPaths.contains(video.path)
                                 val isRenaming = renamingVideoPath == video.path
                                 val isBeingDragged = (draggingPath == video.path)
@@ -913,6 +1030,25 @@ fun CustomPlaylistsTabContent(
 
                                 val visualTranslationY = if (isBeingDragged) dragOffsetY else animatedTranslationY
 
+                                PlaylistRevealSwipe(
+                                    enabled = !isReorderMode && !isVideoSelection && draggingPath == null && !isRenaming,
+                                    showBookmark = isM3uFolder,
+                                    isFavourite = video.path in favSet,
+                                    isSaved = video.path in savedSet,
+                                    isDark = isDark,
+                                    revealed = revealedPath == video.path,
+                                    onRevealedChange = { open -> revealedPath = if (open) video.path else if (revealedPath == video.path) null else revealedPath },
+                                    onToggleFavourite = {
+                                        val now = com.example.util.PlaylistMarkStore.toggle(context, com.example.util.PlaylistMarkStore.KIND_FAVOURITE, pl.id, video.path)
+                                        marksVersion++
+                                        Toast.makeText(context, if (now) "Added to Favourite" else "Removed from Favourite", Toast.LENGTH_SHORT).show()
+                                    },
+                                    onToggleSaved = {
+                                        val now = com.example.util.PlaylistMarkStore.toggle(context, com.example.util.PlaylistMarkStore.KIND_SAVED, pl.id, video.path)
+                                        marksVersion++
+                                        Toast.makeText(context, if (now) "Saved" else "Removed from Saved", Toast.LENGTH_SHORT).show()
+                                    }
+                                ) {
                                 VideoItemCard(
                                     video = video,
                                     isDark = isDark,
@@ -944,7 +1080,7 @@ fun CustomPlaylistsTabContent(
                                     onClick = {
                                         if (isVideoSelection) {
                                             if (isSelected) selectedVideoPaths.remove(video.path) else selectedVideoPaths.add(video.path)
-                                        } else onPlayVideo(video, plVideos)
+                                        } else onPlayVideo(video, if (isFilteredView) shownVideos else plVideos)
                                     },
                                     onLongClick = {
                                         if (isSelected) selectedVideoPaths.remove(video.path) else selectedVideoPaths.add(video.path)
@@ -1023,6 +1159,7 @@ fun CustomPlaylistsTabContent(
                                     showNetworkThumbnails = uiState.showNetworkThumbnails,
                                     onThumbnailClick = null
                                 )
+                                }
                             }
                         }
                     }

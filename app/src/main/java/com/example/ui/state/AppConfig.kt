@@ -1436,6 +1436,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     // Folder navigation stack preserved across playing videos and screen switches
     val folderNavigationStack = mutableListOf<com.example.ui.screens.VideoFolder>()
 
+    // Last bottom tab and opened playlist of the Home screen, so Back from the player returns to the same place.
+    var lastBottomTabName: String? = null
+    var lastPlaylistId: String? = null
+
     fun startPlaying(video: com.example.ui.screens.VideoItem, playlist: List<com.example.ui.screens.VideoItem>) {
         activeVideoItem = video
         activeVideoPlaylist = playlist
