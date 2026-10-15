@@ -320,6 +320,7 @@ fun HomeScreen(
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var showLastWatchedDialog by remember { mutableStateOf(false) }
     var showSortAndViewDialog by remember { mutableStateOf(false) }
+    var showNetworkDownloads by rememberSaveable { mutableStateOf(false) }
     var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     val searchFocusRequester = remember { FocusRequester() }
@@ -364,6 +365,11 @@ fun HomeScreen(
 
     BackHandler(enabled = effectiveSelectedTab != NavigationTab.HOME && activeTabs.contains(NavigationTab.HOME)) {
         currentBottomTab = NavigationTab.HOME
+    }
+    BackHandler(enabled = effectiveSelectedTab == NavigationTab.NETWORK && showNetworkDownloads) {
+        showNetworkDownloads = false
+        isSearchActive = false
+        searchQuery = ""
     }
 
     // Per-Tab Sort & View Options State (persisted across app restarts, decoupled for folder vs content)
@@ -1615,7 +1621,7 @@ fun HomeScreen(
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Online" else (currentFolder?.name ?: AppStrings.getTitle(lang))
                         NavigationTab.MUSIC -> selectedMusicFolder?.name ?: "Music & Audio"
                         NavigationTab.RECENTS -> selectedRecentsFolder?.name ?: "Recently Played"
-                        NavigationTab.NETWORK -> "Network"
+                        NavigationTab.NETWORK -> if (showNetworkDownloads) "Downloads" else "Network"
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.name ?: "Playlists"
                     }
                     val headerSubtitle = when (effectiveSelectedTab) {
@@ -1638,7 +1644,7 @@ fun HomeScreen(
                         NavigationTab.RECENTS -> selectedRecentsFolder?.let {
                             "${it.records.size} video${if (it.records.size != 1) "s" else ""} in folder"
                         } ?: "Resume your watch history"
-                        NavigationTab.NETWORK -> "Play links from the internet"
+                        NavigationTab.NETWORK -> if (showNetworkDownloads) "Your downloads" else "Play links from the internet"
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.let {
                             val count = it.videoPaths.size
                             val type = if (it.isAudio) "Audio" else "Video"
@@ -1671,7 +1677,7 @@ fun HomeScreen(
                                 }
                             } else null
                             NavigationTab.RECENTS -> if (selectedRecentsFolder != null) { { selectedRecentsFolder = null } } else null
-                            NavigationTab.NETWORK -> null
+                            NavigationTab.NETWORK -> if (showNetworkDownloads) { { showNetworkDownloads = false; isSearchActive = false; searchQuery = "" } } else null
                             NavigationTab.PLAYLISTS -> if (selectedPlaylist != null) {
                                 {
                                     searchQuery = ""
@@ -1685,7 +1691,8 @@ fun HomeScreen(
                             isSearchActive = !isSearchActive
                             if (!isSearchActive) searchQuery = ""
                         },
-                        onSortClick = { showSortAndViewDialog = true },
+                        onSortClick = if (effectiveSelectedTab == NavigationTab.NETWORK && !showNetworkDownloads) null else { { showSortAndViewDialog = true } },
+                        onDownloadClick = if (effectiveSelectedTab == NavigationTab.NETWORK && !showNetworkDownloads) { { showNetworkDownloads = true; isSearchActive = false; searchQuery = "" } } else null,
                         onSettingsClick = { showSettingsSheet = true }
                     )
                 }
@@ -1895,6 +1902,8 @@ fun HomeScreen(
                         NetworkTabContent(
                             isDark = isDark,
                             onPlayVideo = onPlayVideo,
+                            showDownloads = showNetworkDownloads,
+                            onOpenDownloads = { showNetworkDownloads = true },
                             modifier = Modifier.fillMaxWidth().weight(1f)
                         )
                     }

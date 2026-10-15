@@ -1,18 +1,6 @@
 package com.example.ui.screens
 
 import android.widget.Toast
-import android.app.DownloadManager
-import android.content.Context
-import android.net.Uri
-import android.os.Environment
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.OutlinedTextField
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDLRequest
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -38,6 +26,12 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -85,6 +79,10 @@ import com.example.util.TorrentLibrary
 import com.example.util.TorrentOpenResult
 import com.example.util.TorrentSource
 import com.example.util.TorrentStreamEngine
+import com.example.util.NetworkDownloadManager
+import com.example.util.NetworkDownload
+import com.example.util.DownloadOptions
+import com.example.util.DownloadMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -97,6 +95,8 @@ import kotlinx.coroutines.launch
 fun NetworkTabContent(
     isDark: Boolean,
     onPlayVideo: (VideoItem, List<VideoItem>) -> Unit,
+    showDownloads: Boolean = false,
+    onOpenDownloads: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -106,17 +106,10 @@ fun NetworkTabContent(
 
     var section by rememberSaveable { mutableStateOf(0) }
     var url by rememberSaveable { mutableStateOf("") }
-    var showDownloadOptions by remember { mutableStateOf(false) }
-    var downloadTarget by remember { mutableStateOf<RecentStreamEntry?>(null) }
-    var downloadQuality by rememberSaveable { mutableStateOf("Best up to 720p") }
-    var downloadAudioOnly by rememberSaveable { mutableStateOf(false) }
-    var downloadName by rememberSaveable { mutableStateOf("") }
-    var downloadStatus by remember { mutableStateOf("") }
-    var downloadBusy by remember { mutableStateOf(false) }
-    var downloadScreen by rememberSaveable { mutableStateOf(false) }
     var isResolving by remember { mutableStateOf(false) }
     var pasteFlash by remember { mutableStateOf(false) }
     var resolvingLabel by remember { mutableStateOf("Loading link…") }
+    var downloadEntry by remember { mutableStateOf<RecentStreamEntry?>(null) }
     val recentTick by RecentStreamStore.changes.collectAsState()
     val recents = remember(recentTick) { RecentStreamStore.getAll(context) }
 
@@ -270,9 +263,12 @@ fun NetworkTabContent(
     fun play() = playLink(url)
 
     Column(modifier = modifier.fillMaxSize()) {
+        if (showDownloads) {
+            NetworkDownloadsPage(isDark = isDark)
+        } else {
         // Same gradient "liquid" underline + slide animation as the Saved / Favourite tabs of a playlist.
         PlaylistFilterTabs(
-            tabs = listOf("Local Network", "Media", "Downloads"),
+            tabs = listOf("Local Network", "Media"),
             selectedIndex = section,
             isDark = isDark,
             onSelect = { section = it },
@@ -460,13 +456,7 @@ fun NetworkTabContent(
                                     surfaceColor = surfaceColor,
                                     borderColor = borderColor,
                                     onClick = { playLink(entry.url) },
-                                    onDownload = {
-                                        downloadTarget = entry
-                                        downloadName = entry.title
-                                        downloadQuality = "Best up to 720p"
-                                        downloadAudioOnly = false
-                                        showDownloadOptions = true
-                                    },
+                                    onDownload = { downloadEntry = entry },
                                     onRemove = { RecentStreamStore.remove(context, entry.url) }
                                 )
                             }
@@ -474,97 +464,26 @@ fun NetworkTabContent(
                         }
                     }
                 }
-            } else if (current == 1) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                    Text(text = "Media", fontSize = 15.sp, color = secondaryText, modifier = Modifier.padding(top = 32.dp))
-                }
             } else {
-                Column(Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
-                    Text("Downloads", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = primaryText,
-                        modifier = Modifier.padding(vertical = 16.dp))
-                    if (downloadStatus.isNotBlank()) Text(downloadStatus, color = secondaryText, fontSize = 13.sp)
-                    Text("Downloads started here are saved to Download/Lumora. Keep the app open until yt-dlp finishes.",
-                        color = secondaryText, fontSize = 13.sp)
+                // "Media" section is added in the next step.
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                    Text(
+                        text = "Coming soon",
+                        fontSize = 13.sp,
+                        color = secondaryText,
+                        modifier = Modifier.padding(top = 32.dp)
+                    )
                 }
             }
         }
+        }
     }
-
-    if (showDownloadOptions) {
-        AlertDialog(
-            onDismissRequest = { if (!downloadBusy) showDownloadOptions = false },
-            title = { Text("Download video") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("File name", color = primaryText)
-                    OutlinedTextField(value = downloadName, onValueChange = { downloadName = it },
-                        singleLine = true, placeholder = { Text("Video title") })
-                    Text("Quality", color = primaryText)
-                    listOf("Best available", "Best up to 1080p", "Best up to 720p", "Best up to 480p", "Audio only").forEach { quality ->
-                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable {
-                            downloadQuality = quality
-                            downloadAudioOnly = quality == "Audio only"
-                        }.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (downloadQuality == quality) "●  " else "○  ", color = AccentSkyBlue)
-                            Text(quality, color = primaryText)
-                        }
-                    }
-                    if (downloadBusy) {
-                        CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
-                        Text(downloadStatus, color = secondaryText, fontSize = 12.sp)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(enabled = !downloadBusy, onClick = {
-                    val entry = downloadTarget ?: return@TextButton
-                    val source = entry.url
-                    val safeName = downloadName.trim().ifBlank { entry.title }.filterNot { it in charArrayOf('\\', '/', ':', '*', '?', '"', '<', '>', '|') }.take(120)
-                    downloadBusy = true
-                    downloadStatus = "Preparing download…"
-                    scope.launch {
-                        val result = withContext(Dispatchers.IO) {
-                            try {
-                                YoutubeDL.getInstance().init(context.applicationContext)
-                                val folder = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Lumora")
-                                folder.mkdirs()
-                                val request = YoutubeDLRequest(source)
-                                request.addOption("--no-playlist")
-                                request.addOption("--newline")
-                                request.addOption("--no-part")
-                                request.addOption("-o", File(folder, "$safeName.%(ext)s").absolutePath)
-                                if (downloadAudioOnly) {
-                                    request.addOption("-f", "bestaudio/best")
-                                    request.addOption("-x")
-                                    request.addOption("--audio-format", "mp3")
-                                } else {
-                                    val format = when (downloadQuality) {
-                                        "Best up to 1080p" -> "bv*[height<=1080]+ba/b[height<=1080]/best"
-                                        "Best up to 720p" -> "bv*[height<=720]+ba/b[height<=720]/best"
-                                        "Best up to 480p" -> "bv*[height<=480]+ba/b[height<=480]/best"
-                                        else -> "bv*+ba/best"
-                                    }
-                                    request.addOption("-f", format)
-                                    request.addOption("--merge-output-format", "mp4")
-                                }
-                                YoutubeDL.getInstance().execute(request, null, null)
-                                "Download complete: ${folder.absolutePath}"
-                            } catch (t: Throwable) {
-                                "Download failed: ${t.message ?: "unknown error"}"
-                            }
-                        }
-                        downloadStatus = result
-                        downloadBusy = false
-                        if (result.startsWith("Download complete")) {
-                            Toast.makeText(context, result, Toast.LENGTH_LONG).show()
-                            showDownloadOptions = false
-                            section = 2
-                        } else Toast.makeText(context, result, Toast.LENGTH_LONG).show()
-                    }
-                }) { Text(if (downloadBusy) "Downloading…" else "Download") }
-            },
-            dismissButton = { TextButton(enabled = !downloadBusy, onClick = { showDownloadOptions = false }) { Text("Cancel") } }
-        )
+    if (downloadEntry != null) {
+        DownloadOptionsSheet(entry = downloadEntry!!, isDark = isDark, onDismiss = { downloadEntry = null }, onStart = { options ->
+            NetworkDownloadManager.start(context, downloadEntry!!.url, options)
+            onOpenDownloads()
+            downloadEntry = null
+        })
     }
 }
 
@@ -619,31 +538,96 @@ private fun RecentStreamRow(
                 overflow = TextOverflow.Ellipsis
             )
         }
-        Box(
-            modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).clickable(
-                interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDownload
-            ), contentAlignment = Alignment.Center
-        ) {
-            StyledIcon(drawableRes = R.drawable.lumora_download_minimalistic, contentDescription = "Download",
-                tint = AccentSkyBlue, modifier = Modifier.size(20.dp))
+        TextButton(onClick = onDownload, modifier = Modifier.size(width = 42.dp, height = 44.dp)) {
+            Text("↓", color = AccentSkyBlue, fontSize = 23.sp)
         }
         Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onRemove
-                ),
+            modifier = Modifier.size(38.dp).clip(RoundedCornerShape(12.dp)).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) { StyledIcon(drawableRes = R.drawable.lumora_play_solid, contentDescription = "Play", tint = AccentSkyBlue, modifier = Modifier.size(19.dp)) }
+        Box(
+            modifier = Modifier.size(38.dp).clip(RoundedCornerShape(12.dp)).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onRemove),
             contentAlignment = Alignment.Center
         ) {
-            StyledIcon(
-                drawableRes = R.drawable.lumora_close_circle,
-                contentDescription = "Remove from recent",
-                tint = secondaryText.copy(alpha = 0.8f),
-                modifier = Modifier.size(20.dp)
-            )
+            StyledIcon(drawableRes = R.drawable.lumora_close_circle, contentDescription = "Remove from recent", tint = secondaryText.copy(alpha = 0.8f), modifier = Modifier.size(20.dp))
         }
     }
+}
+
+
+@Composable
+private fun NetworkDownloadsPage(isDark: Boolean) {
+    val downloads by NetworkDownloadManager.items.collectAsState()
+    val textColor = if (isDark) DarkTextPrimary else LightTextPrimary
+    val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
+    val surface = if (isDark) DarkGlassSurface else LightGlassSurface
+    LaunchedEffect(Unit) { while (true) { NetworkDownloadManager.refreshSizes(); delay(1000) } }
+    Column(Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+        Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 6.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Downloads", color = textColor, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            TextButton(onClick = { NetworkDownloadManager.deleteCompleted() }) { Text("Clear completed", color = AccentSkyBlue) }
+        }
+        if (downloads.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No downloads yet", color = secondary) }
+        else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(downloads, key = { it.id }) { item ->
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(surface).padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(item.title, color = textColor, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(item.status, color = secondary, fontSize = 12.sp)
+                        }
+                        TextButton(onClick = { NetworkDownloadManager.delete(item) }) { Text("Delete", color = secondary) }
+                    }
+                    if (item.status == "Downloading") LinearProgressIndicator(progress = { item.progress }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+                    Text("${formatBytes(item.bytes)} / ${if (item.totalBytes > 0) formatBytes(item.totalBytes) else "size unknown"}  •  ${if (item.bytesPerSecond > 0) "${formatBytes(item.bytesPerSecond)}/s" else "speed calculating"}  •  ${if (item.etaSeconds >= 0) "${item.etaSeconds}s left" else "ETA calculating"}", color = secondary, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DownloadOptionsSheet(entry: RecentStreamEntry, isDark: Boolean, onDismiss: () -> Unit, onStart: (DownloadOptions) -> Unit) {
+    var title by remember(entry.url) { mutableStateOf(entry.title) }
+    var author by remember(entry.url) { mutableStateOf(entry.subtitle.orEmpty()) }
+    var mode by remember(entry.url) { mutableStateOf(DownloadMode.VIDEO) }
+    var quality by remember(entry.url) { mutableStateOf("Best Quality") }
+    var showQuality by remember { mutableStateOf(false) }
+    var thumbnail by remember { mutableStateOf(true) }
+    var subtitles by remember { mutableStateOf(false) }
+    var chapters by remember { mutableStateOf(true) }
+    var sponsor by remember { mutableStateOf(false) }
+    val textColor = if (isDark) DarkTextPrimary else LightTextPrimary
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = if (isDark) DarkGlassSurface else LightGlassSurface) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Download", color = textColor, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { mode = DownloadMode.AUDIO }) { Text(if (mode == DownloadMode.AUDIO) "● Audio" else "Audio", color = AccentSkyBlue) }
+                TextButton(onClick = { mode = DownloadMode.VIDEO }) { Text(if (mode == DownloadMode.VIDEO) "● Video" else "Video", color = AccentSkyBlue) }
+            }
+            OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Title / filename") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = author, onValueChange = { author = it }, label = { Text("Author") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            if (mode == DownloadMode.VIDEO) {
+                TextButton(onClick = { showQuality = !showQuality }) { Text("Video quality: $quality  ▾", color = AccentSkyBlue) }
+                if (showQuality) listOf("Best Quality", "4K (2160p)", "2K (1440p)", "1080p", "720p", "480p", "360p", "Audio-efficient 720p").forEach { q ->
+                    TextButton(onClick = { quality = q; showQuality = false }, modifier = Modifier.fillMaxWidth()) { Text(if (q == quality) "✓  $q" else q, color = textColor) }
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) { androidx.compose.material3.Checkbox(checked = thumbnail, onCheckedChange = { thumbnail = it }); Text("Download and embed thumbnail", color = textColor) }
+            if (mode == DownloadMode.VIDEO) {
+                Row(verticalAlignment = Alignment.CenterVertically) { androidx.compose.material3.Checkbox(checked = chapters, onCheckedChange = { chapters = it }); Text("Metadata / chapters", color = textColor) }
+                Row(verticalAlignment = Alignment.CenterVertically) { androidx.compose.material3.Checkbox(checked = subtitles, onCheckedChange = { subtitles = it }); Text("Subtitles (including auto subtitles)", color = textColor) }
+                Row(verticalAlignment = Alignment.CenterVertically) { androidx.compose.material3.Checkbox(checked = sponsor, onCheckedChange = { sponsor = it }); Text("SponsorBlock segments", color = textColor) }
+            }
+            Button(onClick = { onStart(DownloadOptions(title, author, mode, quality, thumbnail, subtitles, chapters, sponsor)) }, modifier = Modifier.fillMaxWidth()) { Text("Download") }
+        }
+    }
+}
+
+private fun formatBytes(value: Long): String = when {
+    value >= 1024L * 1024L * 1024L -> String.format(java.util.Locale.US, "%.2f GB", value / (1024.0 * 1024 * 1024))
+    value >= 1024L * 1024L -> String.format(java.util.Locale.US, "%.1f MB", value / (1024.0 * 1024))
+    value >= 1024L -> String.format(java.util.Locale.US, "%.1f KB", value / 1024.0)
+    else -> "$value B"
 }
