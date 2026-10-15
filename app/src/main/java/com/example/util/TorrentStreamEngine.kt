@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.libtorrent4j.Priority
 import org.libtorrent4j.SessionManager
@@ -52,6 +53,8 @@ object TorrentStreamEngine {
     private const val TAG = "TorrentStreamEngine"
     private const val MAGNET_TIMEOUT_SEC = 90
     private const val MAX_TORRENT_FILE_BYTES = 16 * 1024 * 1024
+    private const val PREBUFFER_PERCENT = 5
+    private const val PREBUFFER_TIMEOUT_MS = 180_000L
 
     private val lock = Any()
 
@@ -314,12 +317,69 @@ object TorrentStreamEngine {
             val a = activate(context.applicationContext, hash) ?: return@withContext null
             if (index < 0 || index >= a.info.files().numFiles()) return@withContext null
             selectFile(a, index)
+            prebuffer(a, index)
             val srv = synchronized(lock) { server ?: StreamServer().also { server = it } }
             val name = a.info.files().filePath(index).substringAfterLast('/')
             "http://127.0.0.1:${srv.port}/t/$hash/$index/${URLEncoder.encode(name, "UTF-8").replace("+", "%20")}"
         } catch (t: Throwable) {
             Log.e(TAG, "prepareStream failed", t)
             null
+        }
+    }
+
+    /** Share of the video file (0..100) that is already downloaded and verified: shown as "Buffering N%" in the player. */
+    fun fileProgressPercent(torrentPath: String): Int {
+        val (hash, index) = TorrentLibrary.parsePath(torrentPath) ?: return 0
+        val a = active?.takeIf { it.infoHash == hash } ?: return 0
+        return try {
+            val fs = a.info.files()
+            val size = fs.fileSize(index)
+            if (size <= 0L) return 100
+            val pieceLen = a.info.pieceLength().toLong()
+            val first = (fs.fileOffset(index) / pieceLen).toInt()
+            val last = ((fs.fileOffset(index) + size - 1) / pieceLen).toInt().coerceAtMost(a.info.numPieces() - 1)
+            var have = 0
+            for (p in first..last) if (a.handle.havePiece(p)) have++
+            ((have * 100L) / (last - first + 1)).toInt().coerceIn(0, 100)
+        } catch (_: Throwable) { 0 }
+    }
+
+    /**
+     * Waits until the first ~[PREBUFFER_PERCENT]% of the file is downloaded (the part that holds the container header,
+     * the audio / subtitle tracks and the embedded fonts), so the player opens a file that has all its tracks at once.
+     * The rest keeps downloading in the background while the video plays. Gives up after [PREBUFFER_TIMEOUT_MS] and lets
+     * the player wait on its own.
+     */
+    private suspend fun prebuffer(a: ActiveTorrent, fileIndex: Int) {
+        val fs = a.info.files()
+        val size = fs.fileSize(fileIndex)
+        if (size <= 0L) return
+        val pieceLen = a.info.pieceLength().toLong()
+        val first = (fs.fileOffset(fileIndex) / pieceLen).toInt()
+        val last = ((fs.fileOffset(fileIndex) + size - 1) / pieceLen).toInt().coerceAtMost(a.info.numPieces() - 1)
+        val total = last - first + 1
+        val target = Math.ceil(total * PREBUFFER_PERCENT / 100.0).toInt().coerceIn(minOf(3, total), total)
+        val name = fs.filePath(fileIndex).lowercase()
+        // mp4 / mov keep the index at the end of the file; without it they cannot start
+        val needTail = name.endsWith(".mp4") || name.endsWith(".m4v") || name.endsWith(".mov")
+        val tailPieces = if (needTail) (maxOf(0, last - 1)..last).filter { it >= first + target } else emptyList()
+        try { a.handle.clearPieceDeadlines() } catch (_: Throwable) {}
+        for (i in 0 until target) {
+            try { if (!a.handle.havePiece(first + i)) a.handle.setPieceDeadline(first + i, 200 + i * 100) } catch (_: Throwable) {}
+        }
+        // the end of the file (cues / index) is requested early for every format so seeking works soon
+        for (p in maxOf(first + target, last - 1)..last) {
+            try { if (!a.handle.havePiece(p)) a.handle.setPieceDeadline(p, 2000) } catch (_: Throwable) {}
+        }
+        val started = System.currentTimeMillis()
+        while (System.currentTimeMillis() - started < PREBUFFER_TIMEOUT_MS) {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (active !== a) return
+            val ready = try {
+                (0 until target).all { a.handle.havePiece(first + it) } && tailPieces.all { a.handle.havePiece(it) }
+            } catch (_: Throwable) { true }
+            if (ready) return
+            kotlinx.coroutines.delay(250)
         }
     }
 
@@ -616,7 +676,7 @@ object TorrentStreamEngine {
             // a request that starts while nothing else is being served is a fresh seek: forget old deadlines
             if (activeRequests.get() <= 1) { try { a.handle.clearPieceDeadlines() } catch (_: Throwable) {} }
 
-            val windowPieces = (12L * 1024 * 1024 / pieceLen).toInt().coerceIn(4, 40)
+            val windowPieces = (24L * 1024 * 1024 / pieceLen).toInt().coerceIn(4, 60)
             val lastPieceOfFile = ((fileOffset + size - 1) / pieceLen).toInt().coerceAtMost(numPieces - 1)
             var scheduledPiece = -1
             val buf = ByteArray(64 * 1024)

@@ -80,6 +80,49 @@ object TorrentLibrary {
     fun loadBytes(context: Context, infoHash: String): ByteArray? =
         try { torrentFile(context, infoHash).takeIf { it.exists() }?.readBytes() } catch (_: Throwable) { null }
 
+    // ---- duration + thumbnail of a torrent video: unknown until some of it was played once, then remembered ----
+
+    private fun metaFile(context: Context, infoHash: String): File = File(dir(context), "$infoHash.meta.json")
+
+    fun durationMs(context: Context, path: String): Long {
+        val (hash, idx) = parsePath(path) ?: return 0L
+        return try {
+            val f = metaFile(context, hash)
+            if (!f.exists()) 0L else JSONObject(f.readText()).optLong(idx.toString(), 0L)
+        } catch (_: Throwable) { 0L }
+    }
+
+    @Synchronized
+    fun saveDuration(context: Context, path: String, durationMs: Long) {
+        if (durationMs <= 0L) return
+        val (hash, idx) = parsePath(path) ?: return
+        try {
+            val f = metaFile(context, hash)
+            val o = if (f.exists()) JSONObject(f.readText()) else JSONObject()
+            if (o.optLong(idx.toString(), 0L) == durationMs) return
+            o.put(idx.toString(), durationMs)
+            f.writeText(o.toString())
+        } catch (_: Throwable) {}
+    }
+
+    fun thumbnailFile(context: Context, path: String): File? {
+        val (hash, idx) = parsePath(path) ?: return null
+        return File(File(context.applicationContext.filesDir, "torrent_thumbs").apply { mkdirs() }, "${hash}_$idx.jpg")
+    }
+
+    /** Absolute path of the saved thumbnail, null when there is none yet. */
+    fun thumbnailPath(context: Context, path: String): String? =
+        thumbnailFile(context, path)?.takeIf { it.exists() && it.length() > 0L }?.absolutePath
+
+    /** Removes the saved duration / thumbnails of a torrent (when the torrent playlist / entry is deleted). */
+    fun deleteMeta(context: Context, infoHash: String) {
+        try { metaFile(context, infoHash).delete() } catch (_: Throwable) {}
+        try {
+            File(context.applicationContext.filesDir, "torrent_thumbs").listFiles { f -> f.name.startsWith(infoHash + "_") }
+                ?.forEach { it.delete() }
+        } catch (_: Throwable) {}
+    }
+
     /** Name of one torrent video for cards / recents, e.g. "Episode 03.mkv". */
     fun fileDisplayName(context: Context, path: String): String? {
         val (hash, idx) = parsePath(path) ?: return null
@@ -101,9 +144,10 @@ object TorrentLibrary {
             displayName = file?.displayName ?: path,
             path = path,
             sizeBytes = file?.size ?: 0L,
-            durationMs = 0L,
+            durationMs = durationMs(context, path),
             dateModified = System.currentTimeMillis() / 1000L,
             isOnline = true,
+            thumbnailUrl = thumbnailPath(context, path),
             isTorrentStream = true
         )
     }

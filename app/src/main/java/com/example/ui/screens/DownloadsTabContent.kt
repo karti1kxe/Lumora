@@ -19,8 +19,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
@@ -29,6 +35,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,7 +50,13 @@ import androidx.compose.ui.window.Dialog
 import com.example.R
 import com.example.player.AudioPlaybackManager
 import com.example.ui.components.LinkThumbnail
+import com.example.ui.components.LayoutMode
 import com.example.ui.components.SortDirection
+import com.example.ui.components.VisibleFields
+import com.example.ui.components.VideoItemCard
+import com.example.ui.components.VideoItemGridCard
+import com.example.ui.state.ThumbnailQuality
+import com.example.ui.state.ThumbnailStrategy
 import com.example.ui.components.SortField
 import com.example.ui.components.StyledIcon
 import com.example.ui.theme.AccentGradient
@@ -73,6 +87,12 @@ fun DownloadsTabContent(
     searchQuery: String,
     sortField: SortField,
     sortDirection: SortDirection,
+    layoutMode: LayoutMode,
+    visibleFields: VisibleFields,
+    thumbnailStrategy: ThumbnailStrategy,
+    thumbnailQuality: ThumbnailQuality,
+    thumbnailFallbackSecond: Int,
+    showNetworkThumbnails: Boolean,
     onPlayVideo: (VideoItem, List<VideoItem>) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -123,23 +143,173 @@ fun DownloadsTabContent(
         return
     }
 
-    LazyColumn(
+    val isGrid = layoutMode == LayoutMode.GRID
+    val finishedAudioQueue = remember(finished) { finished.filter { it.isAudio }.map { downloadAudioTrack(it) } }
+    // Same list / grid, same gaps and same cards as the folders of the app.
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(if (isGrid) 2 else 1),
         modifier = modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        contentPadding = PaddingValues(top = 4.dp, bottom = 84.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         if (running.isNotEmpty()) {
-            item(key = "hdr_running") { SectionTitle("In progress", primaryText) }
-            items(running, key = { it.id }) { d ->
+            item(key = "hdr_running", span = { GridItemSpan(maxLineSpan) }) { SectionTitle("In progress", primaryText) }
+            items(running, key = { it.id }, span = { GridItemSpan(maxLineSpan) }) { d ->
                 DownloadCard(d, primaryText, secondaryText, surfaceColor, borderColor) { playDownload(context, d, onPlayVideo) }
             }
         }
         if (finished.isNotEmpty()) {
-            item(key = "hdr_done") { SectionTitle("Downloaded", primaryText) }
+            item(key = "hdr_done", span = { GridItemSpan(maxLineSpan) }) { SectionTitle("Downloaded", primaryText) }
             items(finished, key = { it.id }) { d ->
-                DownloadCard(d, primaryText, secondaryText, surfaceColor, borderColor) { playDownload(context, d, onPlayVideo) }
+                FinishedDownloadItem(
+                    d = d,
+                    isDark = isDark,
+                    isGrid = isGrid,
+                    visibleFields = visibleFields,
+                    thumbnailStrategy = thumbnailStrategy,
+                    thumbnailQuality = thumbnailQuality,
+                    thumbnailFallbackSecond = thumbnailFallbackSecond,
+                    showNetworkThumbnails = showNetworkThumbnails,
+                    audioQueue = finishedAudioQueue,
+                    onPlayVideo = onPlayVideo
+                )
             }
         }
-        item(key = "bottom_space") { Spacer(modifier = Modifier.height(24.dp)) }
+    }
+}
+
+/** A finished download: the same video / audio card the folders of the app use (list or grid). */
+@Composable
+private fun FinishedDownloadItem(
+    d: DownloadItem,
+    isDark: Boolean,
+    isGrid: Boolean,
+    visibleFields: VisibleFields,
+    thumbnailStrategy: ThumbnailStrategy,
+    thumbnailQuality: ThumbnailQuality,
+    thumbnailFallbackSecond: Int,
+    showNetworkThumbnails: Boolean,
+    audioQueue: List<AudioTrackItem>,
+    onPlayVideo: (VideoItem, List<VideoItem>) -> Unit
+) {
+    val context = LocalContext.current
+    var showDeleteSheet by remember { mutableStateOf(false) }
+    val durationMs by produceState(0L, d.id, d.fileUri, d.filePath) {
+        value = withContext(Dispatchers.IO) { probeDurationMs(context, d) }
+    }
+
+    if (d.isAudio) {
+        val base = remember(d) { downloadAudioTrack(d) }
+        val track = base.copy(durationMs = durationMs)
+        val current by AudioPlaybackManager.currentTrack.collectAsState()
+        val playing by AudioPlaybackManager.isPlaying.collectAsState()
+        val isCurrent = current?.uri?.toString() == track.uri.toString()
+        val onClick: () -> Unit = {
+            if (!DownloadFileSaver.exists(context, d)) {
+                Toast.makeText(context, "This file was deleted from the phone", Toast.LENGTH_SHORT).show()
+            } else {
+                try {
+                    AudioPlaybackManager.openFullScreen()
+                    AudioPlaybackManager.playTrack(context = context, track = track, newQueue = audioQueue.ifEmpty { listOf(track) })
+                } catch (_: Throwable) {
+                    Toast.makeText(context, "Could not start the audio player", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        if (isGrid) {
+            AudioTrackGridCard(
+                track = track, isCurrent = isCurrent, isPlaying = isCurrent && playing, isDark = isDark,
+                visibleFields = visibleFields, onClick = onClick, onLongClick = { showDeleteSheet = true }
+            )
+        } else {
+            AudioTrackListCard(
+                track = track, isCurrent = isCurrent, isPlaying = isCurrent && playing, isDark = isDark,
+                visibleFields = visibleFields, onClick = onClick, onLongClick = { showDeleteSheet = true }
+            )
+        }
+    } else {
+        val video = remember(d, durationMs) { downloadVideoItem(d, durationMs) }
+        val onClick: () -> Unit = { playDownload(context, d, onPlayVideo) }
+        if (isGrid) {
+            VideoItemGridCard(
+                video = video, isDark = isDark, visibleFields = visibleFields,
+                onClick = onClick, onLongClick = { showDeleteSheet = true },
+                thumbnailStrategy = thumbnailStrategy, thumbnailQuality = thumbnailQuality,
+                thumbnailFallbackSecond = thumbnailFallbackSecond, showNetworkThumbnails = showNetworkThumbnails
+            )
+        } else {
+            VideoItemCard(
+                video = video, isDark = isDark, visibleFields = visibleFields,
+                onClick = onClick, onLongClick = { showDeleteSheet = true },
+                thumbnailStrategy = thumbnailStrategy, thumbnailQuality = thumbnailQuality,
+                thumbnailFallbackSecond = thumbnailFallbackSecond, showNetworkThumbnails = showNetworkThumbnails
+            )
+        }
+    }
+
+    if (showDeleteSheet) {
+        com.example.ui.components.DeleteConfirmSheet(
+            title = if (d.isAudio) "Delete 1 audio track?" else "Delete 1 video?",
+            message = "This action cannot be undone. The selected item will be permanently deleted.",
+            itemNames = listOf(d.filePath?.substringAfterLast('/') ?: d.title),
+            isDark = isDark,
+            onDismiss = { showDeleteSheet = false },
+            onConfirm = {
+                showDeleteSheet = false
+                DownloadManager.remove(context, d.id)
+            }
+        )
+    }
+}
+
+private fun downloadUri(d: DownloadItem): Uri =
+    d.fileUri?.let { Uri.parse(it) } ?: d.filePath?.let { Uri.fromFile(File(it)) } ?: Uri.EMPTY
+
+private fun downloadMediaId(d: DownloadItem, uri: Uri): Long =
+    try { ContentUris.parseId(uri) } catch (_: Throwable) { -(kotlin.math.abs(("download:" + d.id).hashCode().toLong())) - 1L }
+
+private fun downloadVideoItem(d: DownloadItem, durationMs: Long): VideoItem {
+    val uri = downloadUri(d)
+    val path = d.filePath ?: uri.toString()
+    return VideoItem(
+        id = downloadMediaId(d, uri),
+        uri = uri,
+        displayName = d.filePath?.substringAfterLast('/') ?: d.title,
+        path = path,
+        sizeBytes = d.totalBytes,
+        durationMs = durationMs,
+        dateModified = d.createdAt / 1000L
+    )
+}
+
+private fun downloadAudioTrack(d: DownloadItem): AudioTrackItem {
+    val uri = downloadUri(d)
+    val path = d.filePath ?: uri.toString()
+    return AudioTrackItem(
+        id = downloadMediaId(d, uri),
+        uri = uri,
+        title = d.title,
+        artist = d.subtitle ?: "Download",
+        album = "Download",
+        durationMs = 0L,
+        path = path,
+        sizeBytes = d.totalBytes,
+        format = path.substringAfterLast('.', "AUDIO").uppercase(),
+        dateModified = d.createdAt / 1000L,
+        thumbnailUrl = null
+    )
+}
+
+private fun probeDurationMs(context: android.content.Context, d: DownloadItem): Long {
+    val retriever = android.media.MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(context, downloadUri(d))
+        retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+    } catch (_: Throwable) {
+        0L
+    } finally {
+        try { retriever.release() } catch (_: Throwable) {}
     }
 }
 
@@ -164,6 +334,7 @@ private fun DownloadCard(
     onPlay: () -> Unit
 ) {
     val context = LocalContext.current
+    var showDeleteSheet by remember { mutableStateOf(false) }
     val done = d.status == DownloadStatus.COMPLETED
     val failed = d.status == DownloadStatus.FAILED
     val shape = RoundedCornerShape(20.dp)
@@ -227,8 +398,22 @@ private fun DownloadCard(
                 else -> {}
             }
             CardButton(R.drawable.lumora_trash_bin_2, if (done) "Delete" else "Cancel", secondaryText.copy(alpha = 0.9f)) {
-                DownloadManager.remove(context, d.id)
+                showDeleteSheet = true
             }
+        }
+
+        if (showDeleteSheet) {
+            com.example.ui.components.DeleteConfirmSheet(
+                title = "Delete 1 video?",
+                message = "This action cannot be undone. The selected item will be permanently deleted.",
+                itemNames = listOf(d.title),
+                isDark = primaryText == DarkTextPrimary,
+                onDismiss = { showDeleteSheet = false },
+                onConfirm = {
+                    showDeleteSheet = false
+                    DownloadManager.remove(context, d.id)
+                }
+            )
         }
 
         if (!done && !failed) {
@@ -366,68 +551,4 @@ private fun playDownload(context: android.content.Context, d: DownloadItem, onPl
         dateModified = d.createdAt / 1000L
     )
     onPlayVideo(video, listOf(video))
-}
-
-/** Sort options of the Download page (opened from the Sort & View button of its header). */
-@Composable
-fun DownloadSortDialog(
-    isDark: Boolean,
-    sortField: SortField,
-    sortDirection: SortDirection,
-    onSortFieldChange: (SortField) -> Unit,
-    onSortDirectionChange: (SortDirection) -> Unit,
-    onDismiss: () -> Unit
-) {
-    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
-    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
-    val surface = if (isDark) Color(0xFF0B1120) else Color.White
-    val accent = if (isDark) Color(0xFF38BDF8) else Color(0xFF0284C7)
-    val activeBg = if (isDark) Color(0xFF0284C7).copy(alpha = 0.28f) else Color(0xFFE0F2FE)
-
-    @Composable
-    fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(if (selected) activeBg else Color.Transparent)
-                .border(1.dp, if (selected) accent.copy(alpha = 0.7f) else secondaryText.copy(alpha = 0.3f), RoundedCornerShape(50))
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onClick
-                )
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(text = label, fontSize = 13.sp, color = if (selected) accent else primaryText, fontWeight = FontWeight.Medium)
-        }
-    }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
-                .background(surface)
-                .border(1.dp, secondaryText.copy(alpha = 0.2f), RoundedCornerShape(24.dp))
-                .padding(20.dp)
-        ) {
-            Text(text = "Sort & View", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = primaryText)
-            Spacer(modifier = Modifier.height(14.dp))
-            Text(text = "Sort downloaded videos by", fontSize = 12.5.sp, color = secondaryText)
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Chip("Date", sortField == SortField.DATE) { onSortFieldChange(SortField.DATE) }
-                Chip("Name", sortField == SortField.TITLE) { onSortFieldChange(SortField.TITLE) }
-                Chip("Size", sortField == SortField.SIZE) { onSortFieldChange(SortField.SIZE) }
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(text = "Order", fontSize = 12.5.sp, color = secondaryText)
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Chip("Ascending", sortDirection == SortDirection.ASCENDING) { onSortDirectionChange(SortDirection.ASCENDING) }
-                Chip("Descending", sortDirection == SortDirection.DESCENDING) { onSortDirectionChange(SortDirection.DESCENDING) }
-            }
-        }
-    }
 }

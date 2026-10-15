@@ -3629,6 +3629,22 @@ fun SubtitlesTab(
     }
     var isSubtitlesExpanded by remember { mutableStateOf(false) }
     var isFontsExpanded by remember { mutableStateOf(false) }
+    // font deletion is confirmed in a bottom sheet first ("\u0000ALL" = every custom font)
+    var pendingDeleteFont by remember { mutableStateOf<String?>(null) }
+    pendingDeleteFont?.let { target ->
+        val all = target == "\u0000ALL"
+        DeleteConfirmSheet(
+            title = if (all) "Delete all custom fonts?" else "Delete 1 font?",
+            message = "This action cannot be undone. The selected ${if (all) "fonts" else "item"} will be permanently deleted.",
+            itemNames = if (all) installedFonts.filter { SubtitleFontManager.isUserUploadedFont(context, it) }.map { it.name } else listOf(target),
+            isDark = isDark,
+            onDismiss = { pendingDeleteFont = null },
+            onConfirm = {
+                pendingDeleteFont = null
+                if (all) onDeleteAllFonts() else onDeleteFont(target)
+            }
+        )
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
         // 1. Header: "Subtitles & Custom Fonts"
@@ -4477,7 +4493,7 @@ fun SubtitlesTab(
                                     shape = RoundedCornerShape(12.dp),
                                     color = Color(0xFFEF4444).copy(alpha = 0.15f),
                                     border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.40f)),
-                                    onClick = onDeleteAllFonts
+                                    onClick = { pendingDeleteFont = "\u0000ALL" }
                                 ) {
                                     Row(
                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -4650,7 +4666,7 @@ fun SubtitlesTab(
                                                     shape = RoundedCornerShape(10.dp),
                                                     color = Color(0xFFEF4444).copy(alpha = 0.12f),
                                                     border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.35f)),
-                                                    onClick = { onDeleteFont(fontFile.name) }
+                                                    onClick = { pendingDeleteFont = fontFile.name }
                                                 ) {
                                                     Row(
                                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),

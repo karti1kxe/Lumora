@@ -1523,6 +1523,7 @@ fun CustomPlaylistsTabContent(
                         count = count,
                         isDark = isDark,
                         alphaRatio = alphaRatio,
+                        itemNames = selectedPlaylistIds.map { id -> playlists.find { it.id == id }?.name ?: "Playlist" },
                         onCancel = { showDeleteConfirmDialog = false },
                         onConfirm = {
                             showDeleteConfirmDialog = false
@@ -1566,6 +1567,7 @@ fun CustomPlaylistsTabContent(
                         count = count,
                         isDark = isDark,
                         alphaRatio = alphaRatio,
+                        itemNames = selectedVideoPaths.map { it.trimEnd('/').substringAfterLast('/') },
                         onCancel = { showDeleteConfirmDialog = false },
                         onConfirm = {
                             showDeleteConfirmDialog = false

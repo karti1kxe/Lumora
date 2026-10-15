@@ -978,6 +978,8 @@ fun AudioMusicTabContent(
                     count = totalSelectedCount,
                     isDark = isDark,
                     alphaRatio = 0.95f,
+                    itemNames = (if (isFolderSelection) selectedFolderPaths else selectedTrackPaths)
+                        .map { it.trimEnd('/').substringAfterLast('/') },
                     onCancel = { showDeleteConfirmDialog = false },
                     onConfirm = { deleteSelectedItems() }
                 )

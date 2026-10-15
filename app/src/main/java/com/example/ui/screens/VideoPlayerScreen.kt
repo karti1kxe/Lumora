@@ -513,6 +513,10 @@ fun VideoPlayerScreen(
     val currentEpisodeIndex = if (currentPlaylist.isNotEmpty()) currentVideoIndex + 1 else 1
 
     var lastLoadedVideoKey by remember { mutableStateOf<String?>(null) }
+    // Torrent video: true while the first ~5% is being downloaded (before the player opens the file)
+    var torrentPreparing by remember { mutableStateOf(false) }
+    var torrentPercent by remember { mutableIntStateOf(0) }
+    var torrentStreamUrl by remember { mutableStateOf<String?>(null) }
 
     // ---- Online video (YouTube via NewPipeExtractor): resolved streams of the video that is playing ----
     var onlinePlayback by remember(currentVideo) { mutableStateOf<OnlineVideoPlayback?>(null) }
@@ -632,8 +636,15 @@ fun VideoPlayerScreen(
     /** Torrent / magnet video: the torrent engine starts downloading it in playback order and serves it on a local http URL. */
     suspend fun startTorrentPlayback(torrentPath: String, startMs: Long, key: String) {
         controller.setOnlineStream(true)
-        val url = com.example.util.TorrentStreamEngine.prepareStream(context, torrentPath)
+        torrentPercent = 0
+        torrentPreparing = true
+        val url = try {
+            com.example.util.TorrentStreamEngine.prepareStream(context, torrentPath)
+        } finally {
+            if (lastLoadedVideoKey == key) torrentPreparing = false
+        }
         if (lastLoadedVideoKey != key) return
+        torrentStreamUrl = url
         if (url == null) {
             Toast.makeText(context, "Could not start this torrent video. Check your internet connection.", Toast.LENGTH_LONG).show()
             return
@@ -1249,6 +1260,35 @@ fun VideoPlayerScreen(
     LaunchedEffect(controllerDur) {
         if (controllerDur > 0L) {
             durationMs = controllerDur
+        }
+    }
+
+    // Torrent videos have no duration / thumbnail until some of them played: remember both for the folder list
+    LaunchedEffect(controllerDur, currentVideo?.path) {
+        val tv = currentVideo
+        if (tv == null || !tv.isTorrentStream || controllerDur <= 0L) return@LaunchedEffect
+        com.example.util.TorrentLibrary.saveDuration(context, tv.path, controllerDur)
+        val thumbFile = com.example.util.TorrentLibrary.thumbnailFile(context, tv.path) ?: return@LaunchedEffect
+        if (thumbFile.exists() && thumbFile.length() > 0L) return@LaunchedEffect
+        kotlinx.coroutines.delay(4000)
+        val streamUrl = torrentStreamUrl ?: return@LaunchedEffect
+        withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val retriever = android.media.MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(streamUrl, HashMap<String, String>())
+                // an early point: that part of the file is already downloaded
+                val atMs = (controllerDur / 50L).coerceIn(1000L, 60_000L)
+                val frame = retriever.getFrameAtTime(atMs * 1000L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                if (frame != null) {
+                    val w = 480
+                    val h = (frame.height * (w.toFloat() / frame.width.coerceAtLeast(1))).toInt().coerceAtLeast(1)
+                    val scaled = android.graphics.Bitmap.createScaledBitmap(frame, w, h, true)
+                    thumbFile.outputStream().use { scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }
+                }
+            } catch (_: Throwable) {
+            } finally {
+                try { retriever.release() } catch (_: Throwable) {}
+            }
         }
     }
 
@@ -2162,6 +2202,17 @@ fun VideoPlayerScreen(
     }
 
     val isBuffering by controller.isBuffering.collectAsState()
+    val currentIsTorrent = currentVideo?.isTorrentStream == true
+    // Percent of the torrent video that is downloaded - shown instead of "Connecting to stream"
+    LaunchedEffect(currentIsTorrent, torrentPreparing, isBuffering, currentVideo?.path) {
+        val tp = currentVideo?.path
+        if (currentIsTorrent && tp != null && (torrentPreparing || isBuffering)) {
+            while (true) {
+                torrentPercent = com.example.util.TorrentStreamEngine.fileProgressPercent(tp)
+                kotlinx.coroutines.delay(400)
+            }
+        }
+    }
     val bufferedPositionMs by controller.bufferedPositionMs.collectAsState()
 
     /** Loads [q] at the current position (same moment, same audio track) without touching the saved preference. */
@@ -2550,7 +2601,8 @@ fun VideoPlayerScreen(
         // BUFFERING INDICATOR
         // -------------------------------------------------------------
         // Streams (online / M3U live TV) always show it so a black screen never looks like a hang.
-        if ((uiState.playerSettings.showLoadingCircle || controller.onlineStreamMode) && isBuffering && isPlaying) {
+        if ((uiState.playerSettings.showLoadingCircle || controller.onlineStreamMode || (currentIsTorrent && torrentPreparing)) &&
+            (isBuffering || (currentIsTorrent && torrentPreparing)) && isPlaying) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -2562,7 +2614,15 @@ fun VideoPlayerScreen(
                         size = 56.dp,
                         isDark = true
                     )
-                    if (controller.onlineStreamMode && currentPositionMs <= 200L) {
+                    if (currentIsTorrent && (torrentPreparing || currentPositionMs <= 200L || isBuffering)) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Buffering ${torrentPercent}%",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    } else if (controller.onlineStreamMode && currentPositionMs <= 200L) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
                             text = "Connecting to stream…",

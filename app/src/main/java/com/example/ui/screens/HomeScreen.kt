@@ -322,8 +322,17 @@ fun HomeScreen(
     var showSortAndViewDialog by remember { mutableStateOf(false) }
     // Network tab: the download button of its header opens the Download page (same header, same tab slot)
     var showDownloads by rememberSaveable { mutableStateOf(false) }
-    var downloadsSortField by remember { mutableStateOf(SortField.DATE) }
-    var downloadsSortDirection by remember { mutableStateOf(SortDirection.DESCENDING) }
+    // Sort & View of the Download page: the same options / defaults as the Online Video folder, saved under "downloads"
+    var downloadsSortField by remember {
+        val loaded = SettingsPreferencesManager.loadSortField(context, "downloads")
+        mutableStateOf(if (loaded == SortField.DATE || loaded == SortField.TITLE) loaded else SortField.DATE)
+    }
+    var downloadsSortDirection by remember { mutableStateOf(SettingsPreferencesManager.loadSortDirection(context, "downloads")) }
+    var downloadsLayoutMode by remember { mutableStateOf(SettingsPreferencesManager.loadLayoutMode(context, "downloads")) }
+    var downloadsVisibleFields by remember {
+        val loaded = SettingsPreferencesManager.loadVisibleFields(context, "downloads")
+        mutableStateOf(loaded.copy(showPath = false, showSubtitleIndicator = false, showFramerate = false, showVideoCount = false, showNewBadge = false, showFullName = false))
+    }
     var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     val searchFocusRequester = remember { FocusRequester() }
@@ -1923,6 +1932,12 @@ fun HomeScreen(
                                 searchQuery = searchQuery,
                                 sortField = downloadsSortField,
                                 sortDirection = downloadsSortDirection,
+                                layoutMode = downloadsLayoutMode,
+                                visibleFields = downloadsVisibleFields,
+                                thumbnailStrategy = uiState.thumbnailStrategy,
+                                thumbnailQuality = uiState.thumbnailQuality,
+                                thumbnailFallbackSecond = uiState.thumbnailFallbackSecond,
+                                showNetworkThumbnails = uiState.showNetworkThumbnails,
                                 onPlayVideo = onPlayVideo,
                                 modifier = Modifier.fillMaxWidth().weight(1f)
                             )
@@ -3063,6 +3078,13 @@ fun HomeScreen(
                             count = count,
                             isDark = isDark,
                             alphaRatio = (uiState.glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
+                            itemNames = if (isFolderSelection) {
+                                (if (currentFolder != null) displayedSubFolders else displayedFolders)
+                                    .filter { selectedFolderIds.contains(it.id) }.map { it.name }
+                            } else {
+                                (if (currentFolder != null) displayedVideos else allLibraryVideos)
+                                    .filter { selectedVideoPaths.contains(it.path) }.map { it.displayName }
+                            },
                             onCancel = { showDeleteConfirmDialog = false },
                             onConfirm = {
                                 showDeleteConfirmDialog = false
@@ -3352,20 +3374,8 @@ fun HomeScreen(
                 )
             }
 
-            // D0. Sort & View of the Download page
-            if (showSortAndViewDialog && effectiveSelectedTab == NavigationTab.NETWORK && showDownloads) {
-                DownloadSortDialog(
-                    isDark = isDark,
-                    sortField = downloadsSortField,
-                    sortDirection = downloadsSortDirection,
-                    onSortFieldChange = { downloadsSortField = it },
-                    onSortDirectionChange = { downloadsSortDirection = it },
-                    onDismiss = { showSortAndViewDialog = false }
-                )
-            }
-
             // D. Sort & View Options Liquid Glass Popup
-            if (showSortAndViewDialog && !(effectiveSelectedTab == NavigationTab.NETWORK && showDownloads)) {
+            if (showSortAndViewDialog) {
                 val isInsideFolder = when (effectiveSelectedTab) {
                     NavigationTab.HOME -> currentFolder != null || activeViewMode == ViewMode.LIBRARY
                     NavigationTab.MUSIC -> isInsideMusicFolder || activeViewMode == ViewMode.LIBRARY
@@ -3375,7 +3385,9 @@ fun HomeScreen(
                 }
                 val isOnlineAudioFolder = (effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH)
                 val isOnlineFolder = (effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH)
-                val isOnlineVideoFolder = (effectiveSelectedTab == NavigationTab.HOME && isOnlineVideoOpen)
+                val isDownloadsPage = (effectiveSelectedTab == NavigationTab.NETWORK && showDownloads)
+                // The Download page shows the exact Sort & View of the Online Video folder.
+                val isOnlineVideoFolder = (effectiveSelectedTab == NavigationTab.HOME && isOnlineVideoOpen) || isDownloadsPage
                 val isOnlinePlaylist = (effectiveSelectedTab == NavigationTab.PLAYLISTS &&
                     selectedPlaylist?.videoPaths?.any {
                         it.startsWith("http://") || it.startsWith("https://") || it.startsWith(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
@@ -3387,11 +3399,11 @@ fun HomeScreen(
                 }
                 SortAndViewOptionsPopup(
                     isDark = isDark,
-                    sortField = if (isOnlineVideoFolder) onlineVideoSortField else if (isOnlineAudioFolder) onlineAudioSortField else activeSortField,
-                    sortDirection = if (isOnlineVideoFolder) onlineVideoSortDirection else if (isOnlineAudioFolder) onlineAudioSortDirection else activeSortDirection,
+                    sortField = if (isDownloadsPage) downloadsSortField else if (isOnlineVideoFolder) onlineVideoSortField else if (isOnlineAudioFolder) onlineAudioSortField else activeSortField,
+                    sortDirection = if (isDownloadsPage) downloadsSortDirection else if (isOnlineVideoFolder) onlineVideoSortDirection else if (isOnlineAudioFolder) onlineAudioSortDirection else activeSortDirection,
                     viewMode = activeViewMode,
-                    layoutMode = if (isOnlineVideoFolder) onlineVideoLayoutMode else if (isOnlineAudioFolder) onlineAudioLayoutMode else activeLayoutMode,
-                    visibleFields = if (isOnlineVideoFolder) onlineVideoVisibleFields else if (isOnlineAudioFolder) onlineAudioVisibleFields else effectiveVisibleFields,
+                    layoutMode = if (isDownloadsPage) downloadsLayoutMode else if (isOnlineVideoFolder) onlineVideoLayoutMode else if (isOnlineAudioFolder) onlineAudioLayoutMode else activeLayoutMode,
+                    visibleFields = if (isDownloadsPage) downloadsVisibleFields else if (isOnlineVideoFolder) onlineVideoVisibleFields else if (isOnlineAudioFolder) onlineAudioVisibleFields else effectiveVisibleFields,
                     isInsideFolder = if (isOnlineAudioFolder || isOnlineVideoFolder) true else isInsideFolder,
                     isMusicMode = isMusic,
                     isRecentsMode = (effectiveSelectedTab == NavigationTab.RECENTS),
@@ -3403,7 +3415,10 @@ fun HomeScreen(
                     appScale = uiState.appScale,
                     glassBlurTransparency = uiState.glassBlurTransparency,
                     onSortFieldChange = { newField ->
-                        if (isOnlineVideoFolder) {
+                        if (isDownloadsPage) {
+                            downloadsSortField = newField
+                            SettingsPreferencesManager.saveSortField(context, newField, "downloads")
+                        } else if (isOnlineVideoFolder) {
                             onlineVideoSortField = newField
                             com.example.ui.components.OnlineVideoFeedState.sortTouched = true
                             SettingsPreferencesManager.saveSortField(context, newField, "online_video")
@@ -3432,7 +3447,10 @@ fun HomeScreen(
                         }
                     },
                     onSortDirectionChange = { newDir ->
-                        if (isOnlineVideoFolder) {
+                        if (isDownloadsPage) {
+                            downloadsSortDirection = newDir
+                            SettingsPreferencesManager.saveSortDirection(context, newDir, "downloads")
+                        } else if (isOnlineVideoFolder) {
                             onlineVideoSortDirection = newDir
                             com.example.ui.components.OnlineVideoFeedState.sortTouched = true
                             SettingsPreferencesManager.saveSortDirection(context, newDir, "online_video")
@@ -3473,7 +3491,10 @@ fun HomeScreen(
                         }
                     },
                     onLayoutModeChange = { newLayout ->
-                        if (isOnlineVideoFolder) {
+                        if (isDownloadsPage) {
+                            downloadsLayoutMode = newLayout
+                            SettingsPreferencesManager.saveLayoutMode(context, newLayout, "downloads")
+                        } else if (isOnlineVideoFolder) {
                             onlineVideoLayoutMode = newLayout
                             SettingsPreferencesManager.saveLayoutMode(context, newLayout, "online_video")
                         } else if (isOnlineAudioFolder) {
@@ -3501,7 +3522,11 @@ fun HomeScreen(
                         }
                     },
                     onVisibleFieldsChange = { newFields ->
-                        if (isOnlineVideoFolder) {
+                        if (isDownloadsPage) {
+                            val sanitizedDl = newFields.copy(showPath = false, showSubtitleIndicator = false, showFramerate = false, showVideoCount = false, showNewBadge = false, showFullName = false)
+                            downloadsVisibleFields = sanitizedDl
+                            SettingsPreferencesManager.saveVisibleFields(context, sanitizedDl, "downloads")
+                        } else if (isOnlineVideoFolder) {
                             val sanitizedVideo = newFields.copy(showSize = false, showPath = false, showSubtitleIndicator = false, showFramerate = false, showVideoCount = false, showNewBadge = false, showFullName = false)
                             onlineVideoVisibleFields = sanitizedVideo
                             SettingsPreferencesManager.saveVisibleFields(context, sanitizedVideo, "online_video")
@@ -5377,148 +5402,21 @@ fun BottomDeleteConfirmationBar(
     isDark: Boolean,
     alphaRatio: Float,
     onCancel: () -> Unit,
-    onConfirm: () -> Unit
+    onConfirm: () -> Unit,
+    itemNames: List<String> = emptyList()
 ) {
-    val barBg = if (isDark) {
-        if (alphaRatio >= 0.99f) Color(0xFF1E1017)
-        else Color(0xFF1E1017).copy(alpha = (0.85f + 0.15f * alphaRatio).coerceIn(0.65f, 1.0f))
-    } else {
-        if (alphaRatio >= 0.99f) Color(0xFFFFFFFF)
-        else Color(0xFFFFFFFF).copy(alpha = (0.90f + 0.10f * alphaRatio).coerceIn(0.75f, 1.0f))
-    }
-    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
-    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
-    val barShape = RoundedCornerShape(26.dp)
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .shadow(
-                elevation = 22.dp,
-                shape = barShape,
-                ambientColor = Color(0xFFEF4444).copy(alpha = 0.35f),
-                spotColor = Color(0xFFEF4444).copy(alpha = 0.45f)
-            )
-            .clip(barShape)
-            .background(barBg)
-            .border(
-                width = 1.5.dp,
-                brush = Brush.horizontalGradient(
-                    listOf(
-                        Color(0xFFEF4444),
-                        Color(0xFFF43F5E),
-                        Color(0xFFEF4444)
-                    )
-                ),
-                shape = barShape
-            )
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFFEF4444).copy(alpha = 0.16f)),
-                contentAlignment = Alignment.Center
-            ) {
-                StyledIcon(
-                    imageVector = Icons.Outlined.DeleteOutline,
-                    contentDescription = null,
-                    tint = Color(0xFFEF4444),
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = primaryText,
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = message,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Normal,
-                    color = secondaryText,
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Cancel Button
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(40.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(if (isDark) Color(0xFF334155).copy(alpha = 0.65f) else Color(0xFFE2E8F0))
-                    .clickable(onClick = onCancel),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "Cancel",
-                    fontSize = 13.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = primaryText
-                )
-            }
-
-            // Delete Button
-            Box(
-                modifier = Modifier
-                    .weight(1.2f)
-                    .height(40.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(
-                                Color(0xFFEF4444),
-                                Color(0xFFDC2626)
-                            )
-                        )
-                    )
-                    .clickable(onClick = onConfirm),
-                contentAlignment = Alignment.Center
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    StyledIcon(
-                        imageVector = Icons.Outlined.DeleteOutline,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (count > 1) "Delete ($count)" else "Delete",
-                        fontSize = 13.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                }
-            }
-        }
-    }
+    // Bottom sheet (system style) instead of an inline bar: confirm before anything is deleted.
+    val text = if (message.startsWith("Permanently delete")) {
+        "This action cannot be undone. The selected ${if (count > 1) "items" else "item"} will be permanently deleted."
+    } else message
+    com.example.ui.components.DeleteConfirmSheet(
+        title = title,
+        message = text,
+        itemNames = itemNames,
+        isDark = isDark,
+        onDismiss = onCancel,
+        onConfirm = onConfirm
+    )
 }
 
 @Composable
@@ -5659,116 +5557,20 @@ fun DeleteConfirmDialog(
     isDark: Boolean,
     alphaRatio: Float,
     onDismiss: () -> Unit,
-    onConfirm: () -> Unit
+    onConfirm: () -> Unit,
+    itemNames: List<String> = emptyList(),
+    confirmLabel: String = if (title.startsWith("Clear")) "Clear" else "Delete"
 ) {
-    val dialogBg = if (isDark) {
-        if (alphaRatio >= 0.99f) Color(0xFF0F172A)
-        else Color(0xFF0F172A).copy(alpha = (0.75f + 0.25f * alphaRatio).coerceIn(0.50f, 1.0f))
-    } else {
-        if (alphaRatio >= 0.99f) Color(0xFFFFFFFF)
-        else Color(0xFFFFFFFF).copy(alpha = (0.80f + 0.20f * alphaRatio).coerceIn(0.55f, 1.0f))
-    }
-    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
-    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
-
-    androidx.compose.ui.window.Dialog(
-        onDismissRequest = onDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(0.90f)
-                .clip(RoundedCornerShape(26.dp))
-                .background(dialogBg)
-                .border(1.5.dp, Color(0xFFEF4444).copy(alpha = 0.6f), RoundedCornerShape(26.dp))
-                .padding(22.dp)
-        ) {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(52.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFEF4444).copy(alpha = 0.15f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    StyledIcon(
-                        imageVector = Icons.Outlined.DeleteOutline,
-                        contentDescription = null,
-                        tint = Color(0xFFEF4444),
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                Text(
-                    text = title,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = primaryText
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = message,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Normal,
-                    color = secondaryText,
-                    lineHeight = 18.sp,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                )
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(44.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(if (isDark) Color(0xFF1E293B) else Color(0xFFE2E8F0))
-                            .clickable(onClick = onDismiss),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "Cancel",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = primaryText
-                        )
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(44.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(
-                                Brush.horizontalGradient(
-                                    listOf(Color(0xFFDC2626), Color(0xFFEF4444))
-                                )
-                            )
-                            .clickable(onClick = onConfirm),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "Delete",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
-                }
-            }
-        }
-    }
+    // Always a bottom sheet now (never a centered dialog).
+    com.example.ui.components.DeleteConfirmSheet(
+        title = title,
+        message = message,
+        itemNames = itemNames,
+        isDark = isDark,
+        confirmLabel = confirmLabel,
+        onDismiss = onDismiss,
+        onConfirm = onConfirm
+    )
 }
 
 /**
