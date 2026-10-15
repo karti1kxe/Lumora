@@ -49,6 +49,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.player.AudioPlaybackManager
+import com.example.ui.components.toAudioTrackItem
 import com.example.ui.components.PlaylistFilterTabs
 import com.example.ui.components.StyledIcon
 import com.example.ui.theme.AccentGradient
@@ -118,11 +120,45 @@ fun NetworkTabContent(
             }
             isResolving = false
             if (stream == null) {
+                val reason = NetworkStreamResolver.lastError
                 Toast.makeText(
                     context,
-                    "Could not play this link. Check the link and your internet connection.",
+                    if (reason.isNullOrBlank()) "Could not play this link." else "Could not play this link: $reason",
                     Toast.LENGTH_LONG
                 ).show()
+                return@launch
+            }
+            if (stream.isAudio) {
+                // Music / audio-only link: play it in the app's audio player (same player as the Music tab).
+                if (stream.tracks.isNotEmpty()) {
+                    // Spotify & playlist links: queue the tracks, each is matched to its audio when it starts.
+                    val queue = stream.tracks.map { it.toAudioTrackItem() }
+                    try {
+                        AudioPlaybackManager.openFullScreen()
+                        AudioPlaybackManager.playTrack(context = context, track = queue.first(), newQueue = queue)
+                    } catch (_: Throwable) {
+                        Toast.makeText(context, "Could not start the audio player", Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+                val track = AudioTrackItem(
+                    id = -(kotlin.math.abs(("netaudio:" + normalized).hashCode().toLong())) - 1L,
+                    uri = android.net.Uri.parse(stream.videoUrl),
+                    title = stream.title,
+                    artist = stream.uploader ?: "Network",
+                    album = "Network",
+                    durationMs = stream.durationSec * 1000L,
+                    path = normalized,
+                    sizeBytes = 0L,
+                    format = "STREAM",
+                    thumbnailUrl = stream.thumbnailUrl
+                )
+                try {
+                    AudioPlaybackManager.openFullScreen()
+                    AudioPlaybackManager.playTrack(context = context, track = track, newQueue = listOf(track))
+                } catch (_: Throwable) {
+                    Toast.makeText(context, "Could not start the audio player", Toast.LENGTH_SHORT).show()
+                }
                 return@launch
             }
             val item = VideoItem(
@@ -278,6 +314,14 @@ fun NetworkTabContent(
                                 )
                             }
                         }
+                    }
+                    if (isResolving) {
+                        Text(
+                            text = "Loading link…",
+                            fontSize = 12.5.sp,
+                            color = secondaryText,
+                            modifier = Modifier.padding(start = 18.dp, top = 10.dp)
+                        )
                     }
                 }
             } else {
