@@ -1925,6 +1925,7 @@ fun HomeScreen(
                                 isDark = isDark,
                                 onPlayVideo = onPlayVideo,
                                 modifier = Modifier.fillMaxWidth().weight(1f),
+                                glassBlurTransparency = uiState.glassBlurTransparency,
                                 onOpenDownloads = {
                                     searchQuery = ""
                                     isSearchActive = false

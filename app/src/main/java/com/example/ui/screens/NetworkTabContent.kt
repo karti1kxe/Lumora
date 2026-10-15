@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.player.AudioPlaybackManager
 import com.example.ui.components.toAudioTrackItem
+import com.example.ui.components.DownloadOptionsSheet
 import com.example.ui.components.PlaylistFilterTabs
 import com.example.ui.components.StyledIcon
 import com.example.ui.theme.AccentGradient
@@ -87,7 +88,8 @@ fun NetworkTabContent(
     isDark: Boolean,
     onPlayVideo: (VideoItem, List<VideoItem>) -> Unit,
     modifier: Modifier = Modifier,
-    onOpenDownloads: () -> Unit = {}
+    onOpenDownloads: () -> Unit = {},
+    glassBlurTransparency: Float = 85f
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -95,6 +97,7 @@ fun NetworkTabContent(
     val clipboard = LocalClipboardManager.current
 
     var section by rememberSaveable { mutableStateOf(0) }
+    var optionsEntry by remember { mutableStateOf<RecentStreamEntry?>(null) }
     var url by rememberSaveable { mutableStateOf("") }
     var isResolving by remember { mutableStateOf(false) }
     var pasteFlash by remember { mutableStateOf(false) }
@@ -251,15 +254,23 @@ fun NetworkTabContent(
 
     fun play() = playLink(url)
 
-    /** Download button of a recent link: starts the download and opens the Download page, where it can be followed. */
+    /**
+     * Download button of a recent link. Torrents start right away; other links open the options sheet first (name,
+     * container, video / audio quality). Either way the Download page is opened so the progress can be followed there.
+     */
     fun downloadEntry(entry: RecentStreamEntry) {
-        val message = try {
-            DownloadManager.enqueueFromRecent(context, entry)
-        } catch (t: Throwable) {
-            "Could not start the download"
+        if (TorrentLibrary.parsePath(entry.url) != null || DownloadManager.isTorrentLink(entry.url)) {
+            val message = try {
+                DownloadManager.enqueueFromRecent(context, entry)
+            } catch (t: Throwable) {
+                "Could not start the download"
+            }
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            onOpenDownloads()
+        } else {
+            focusManager.clearFocus()
+            optionsEntry = entry
         }
-        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-        onOpenDownloads()
     }
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -473,6 +484,29 @@ fun NetworkTabContent(
                 }
             }
         }
+    }
+
+    optionsEntry?.let { entry ->
+        val isMusic = entry.url.contains("music.youtube.com", ignoreCase = true)
+        DownloadOptionsSheet(
+            isDark = isDark,
+            glassBlurTransparency = glassBlurTransparency,
+            url = entry.url,
+            initialTitle = entry.title,
+            initialAuthor = entry.subtitle,
+            startWithAudio = isMusic,
+            onDismiss = { optionsEntry = null },
+            onDownload = { request ->
+                optionsEntry = null
+                val message = try {
+                    DownloadManager.enqueueCustom(context, request)
+                } catch (t: Throwable) {
+                    "Could not start the download"
+                }
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                onOpenDownloads()
+            }
+        )
     }
 }
 

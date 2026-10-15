@@ -29,7 +29,11 @@ data class DownloadItem(
     val note: String? = null,
     val filePath: String? = null,
     val fileUri: String? = null,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** yt-dlp "-f" expression chosen in the options sheet (null = default quality). */
+    val formatSpec: String? = null,
+    /** Chosen output container (mp4 / mkv / webm / mp3 / m4a / opus / wav), null = default. */
+    val container: String? = null
 ) {
     val isActive: Boolean
         get() = status == DownloadStatus.QUEUED || status == DownloadStatus.DOWNLOADING || status == DownloadStatus.PROCESSING
@@ -152,7 +156,9 @@ object DownloadStore {
                     note = o.optString("n").ifBlank { null },
                     filePath = o.optString("fp").ifBlank { null },
                     fileUri = o.optString("fu").ifBlank { null },
-                    createdAt = o.optLong("c", 0L)
+                    createdAt = o.optLong("c", 0L),
+                    formatSpec = o.optString("fmt").ifBlank { null },
+                    container = o.optString("cont").ifBlank { null }
                 )
             }
         } catch (_: Throwable) {
@@ -178,6 +184,8 @@ object DownloadStore {
                     .put("fp", e.filePath ?: "")
                     .put("fu", e.fileUri ?: "")
                     .put("c", e.createdAt)
+                    .put("fmt", e.formatSpec ?: "")
+                    .put("cont", e.container ?: "")
             )
         }
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

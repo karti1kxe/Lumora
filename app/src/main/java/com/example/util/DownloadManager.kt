@@ -101,6 +101,46 @@ object DownloadManager {
         return "Download started"
     }
 
+    /** Starts a link download with the quality / name / container chosen in the download options sheet. */
+    fun enqueueCustom(context: Context, req: DownloadRequest): String {
+        val app = context.applicationContext
+        DownloadStore.init(app)
+        val source = req.source.trim()
+        for (old in DownloadStore.items.value.filter {
+            it.source == source && it.formatSpec == req.formatSpec && it.isAudio == req.isAudio && it.container == req.container
+        }) {
+            when (old.status) {
+                DownloadStatus.COMPLETED -> {
+                    if (DownloadFileSaver.exists(app, old)) return "Already downloaded"
+                    DownloadStore.remove(app, old.id)
+                }
+                DownloadStatus.FAILED -> DownloadStore.remove(app, old.id)
+                DownloadStatus.PAUSED -> {
+                    resume(app, old.id)
+                    return "Download resumed"
+                }
+                else -> return "Already downloading"
+            }
+        }
+        val id = newId()
+        DownloadStore.add(
+            app,
+            DownloadItem(
+                id = id,
+                source = source,
+                isTorrent = false,
+                title = req.title.ifBlank { source },
+                subtitle = req.author,
+                isAudio = req.isAudio,
+                totalBytes = req.estimatedBytes,
+                formatSpec = req.formatSpec,
+                container = req.container
+            )
+        )
+        start(app, id)
+        return "Download started"
+    }
+
     fun pause(context: Context, id: String) {
         val app = context.applicationContext
         val item = DownloadStore.get(id) ?: return
@@ -173,7 +213,7 @@ object DownloadManager {
 
     private fun torrentDir(app: Context, hash: String): File = File(baseDir(app), "torrent-$hash")
 
-    private fun isTorrentLink(url: String): Boolean =
+    fun isTorrentLink(url: String): Boolean =
         Regex("magnet:\\?\\S+", RegexOption.IGNORE_CASE).containsMatchIn(url) ||
             url.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)
 
@@ -300,8 +340,9 @@ object DownloadManager {
         val ready = withContext(Dispatchers.IO) { NetworkStreamResolver.prepareYtDlpForDownload(app) }
         if (!ready) throw IllegalStateException(NetworkStreamResolver.lastError ?: "yt-dlp could not start")
         if (stops.containsKey(id)) return
-        val canMerge = !item.isAudio && withContext(Dispatchers.IO) { ensureFfmpeg(app) }
-        val format = formatFor(item.isAudio, canMerge)
+        // ffmpeg is needed to merge video + audio and to convert audio (mp3 ...)
+        val canMerge = withContext(Dispatchers.IO) { ensureFfmpeg(app) }
+        val format = effectiveFormat(item, canMerge)
         val pid = processId(id)
 
         val total = AtomicLong(item.totalBytes)
@@ -311,12 +352,12 @@ object DownloadManager {
         try {
             withContext(Dispatchers.IO) {
                 try {
-                    downloadOnce(item.source, format, canMerge, dir, pid, mergeNote)
+                    downloadOnce(item, format, canMerge, dir, pid, mergeNote)
                 } catch (t: Throwable) {
                     // sites change all the time: one more try with the newest yt-dlp before giving up
                     if (stops.containsKey(id)) throw t
                     if (!NetworkStreamResolver.forceYtDlpUpdate(app)) throw t
-                    downloadOnce(item.source, format, canMerge, dir, pid, mergeNote)
+                    downloadOnce(item, format, canMerge, dir, pid, mergeNote)
                 }
             }
         } finally {
@@ -342,15 +383,23 @@ object DownloadManager {
         try { dir.deleteRecursively() } catch (_: Throwable) {}
     }
 
+    private fun effectiveFormat(item: DownloadItem, canMerge: Boolean): String {
+        val custom = item.formatSpec
+        if (custom.isNullOrBlank()) return formatFor(item.isAudio, canMerge)
+        if (item.isAudio || canMerge) return custom
+        // no ffmpeg: video and audio cannot be merged, so the single-file variant of the chosen quality is used
+        return custom.substringBefore('+').substringBefore('/') + "/b[height<=1080]/b"
+    }
+
     private fun downloadOnce(
-        url: String,
+        item: DownloadItem,
         format: String,
         canMerge: Boolean,
         dir: File,
         pid: String,
         mergeNote: AtomicReference<String?>
     ) {
-        val req = YoutubeDLRequest(url)
+        val req = YoutubeDLRequest(item.source)
         req.addOption("--no-playlist")
         req.addOption("--no-warnings")
         req.addOption("--no-mtime")
@@ -363,7 +412,17 @@ object DownloadManager {
         req.addOption("-N", 16)
         req.addOption("--http-chunk-size", "10M")
         req.addOption("-f", format)
-        if (canMerge) req.addOption("--merge-output-format", "mp4/mkv")
+        val container = item.container
+        if (item.isAudio) {
+            if (container != null && canMerge) {
+                req.addOption("-x")
+                req.addOption("--audio-format", container)
+                req.addOption("--audio-quality", 0)
+            }
+        } else if (canMerge) {
+            req.addOption("--merge-output-format", container ?: "mp4/mkv")
+            if (container != null) req.addOption("--remux-video", container)
+        }
         req.addOption("-o", File(dir, "media.%(ext)s").absolutePath)
         YoutubeDL.getInstance().execute(req, pid) { _, _, line ->
             val l = line.orEmpty()
