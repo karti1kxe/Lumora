@@ -101,6 +101,8 @@ object DownloadProbe {
                 if (size <= 0L && tbr > 0.0 && duration > 0.0) size = (tbr * 125.0 * duration).toLong()
 
                 if (hasV) {
+                    // video-only formats would need ffmpeg to be merged with audio: not offered
+                    if (!hasA) continue
                     val family = codecFamily(vcodec)
                     val fpsPart = if (fps > 30.0) fps.toInt().toString() else ""
                     val label = if (h > 0) "${h}p$fpsPart" + (if (w > 0) " (${w}x$h)" else "")

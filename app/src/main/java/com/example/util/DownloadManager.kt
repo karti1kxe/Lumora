@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Download page engine.
  *  - links (YouTube, Instagram, direct files, ... everything yt-dlp supports) are downloaded with yt-dlp, 16 fragments in
- *    parallel, video + audio merged with ffmpeg when needed,
+ *    parallel; the original file / container is kept (no conversion, no ffmpeg: keeps the app small),
  *  - torrent / magnet videos are downloaded with libtorrent4j (only the chosen file),
  *  - the finished file is moved to Movies/Lumora (Music/Lumora for audio) so it appears in the app's library.
  * Progress, speed and the time left are measured here (bytes on disk / verified torrent pieces), not parsed from tool output.
@@ -42,9 +42,6 @@ object DownloadManager {
     private val permits = Semaphore(MAX_PARALLEL)
     private val jobs = ConcurrentHashMap<String, Job>()
     private val stops = ConcurrentHashMap<String, Stop>()
-
-    @Volatile private var ffmpegChecked = false
-    @Volatile private var ffmpegOk = false
 
     // ---------------------------------------------------------------------------------------------
     // Public API
@@ -308,30 +305,9 @@ object DownloadManager {
     // Links (yt-dlp)
     // ---------------------------------------------------------------------------------------------
 
-    /** ffmpeg (video + audio merge) lives in an optional library module that is started by reflection. */
-    private fun ensureFfmpeg(app: Context): Boolean {
-        if (ffmpegChecked) return ffmpegOk
-        synchronized(this) {
-            if (ffmpegChecked) return ffmpegOk
-            ffmpegOk = try {
-                val cls = Class.forName("com.yausername.ffmpeg.FFmpeg")
-                val instance = cls.getMethod("getInstance").invoke(null)
-                cls.getMethod("init", Context::class.java).invoke(instance, app)
-                true
-            } catch (t: Throwable) {
-                Log.w(TAG, "ffmpeg is not available, only single-file formats are downloaded", t)
-                false
-            }
-            ffmpegChecked = true
-            return ffmpegOk
-        }
-    }
-
-    private fun formatFor(audio: Boolean, canMerge: Boolean): String = when {
-        audio -> "ba[ext=m4a]/ba/b"
-        canMerge -> "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
-        else -> "b[height<=1080]/b"
-    }
+    /** Single-file formats only (video and sound already together, or audio only): nothing has to be merged or converted. */
+    private fun formatFor(audio: Boolean): String =
+        if (audio) "ba[ext=m4a]/ba/b" else "b[height<=1080]/b"
 
     private suspend fun runLink(app: Context, id: String) {
         val item = DownloadStore.get(id) ?: return
@@ -340,9 +316,7 @@ object DownloadManager {
         val ready = withContext(Dispatchers.IO) { NetworkStreamResolver.prepareYtDlpForDownload(app) }
         if (!ready) throw IllegalStateException(NetworkStreamResolver.lastError ?: "yt-dlp could not start")
         if (stops.containsKey(id)) return
-        // ffmpeg is needed to merge video + audio and to convert audio (mp3 ...)
-        val canMerge = withContext(Dispatchers.IO) { ensureFfmpeg(app) }
-        val format = effectiveFormat(item, canMerge)
+        val format = effectiveFormat(item)
         val pid = processId(id)
 
         val total = AtomicLong(item.totalBytes)
@@ -352,12 +326,12 @@ object DownloadManager {
         try {
             withContext(Dispatchers.IO) {
                 try {
-                    downloadOnce(item, format, canMerge, dir, pid, mergeNote)
+                    downloadOnce(item, format, dir, pid, mergeNote)
                 } catch (t: Throwable) {
                     // sites change all the time: one more try with the newest yt-dlp before giving up
                     if (stops.containsKey(id)) throw t
                     if (!NetworkStreamResolver.forceYtDlpUpdate(app)) throw t
-                    downloadOnce(item, format, canMerge, dir, pid, mergeNote)
+                    downloadOnce(item, format, dir, pid, mergeNote)
                 }
             }
         } finally {
@@ -383,18 +357,17 @@ object DownloadManager {
         try { dir.deleteRecursively() } catch (_: Throwable) {}
     }
 
-    private fun effectiveFormat(item: DownloadItem, canMerge: Boolean): String {
+    private fun effectiveFormat(item: DownloadItem): String {
         val custom = item.formatSpec
-        if (custom.isNullOrBlank()) return formatFor(item.isAudio, canMerge)
-        if (item.isAudio || canMerge) return custom
-        // no ffmpeg: video and audio cannot be merged, so the single-file variant of the chosen quality is used
-        return custom.substringBefore('+').substringBefore('/') + "/b[height<=1080]/b"
+        // an old saved choice that needs merging ("137+ba") falls back to its video part + any single file
+        return if (custom.isNullOrBlank()) formatFor(item.isAudio)
+        else if (custom.contains('+')) custom.substringBefore('+').substringBefore('/') + "/" + formatFor(item.isAudio)
+        else custom
     }
 
     private fun downloadOnce(
         item: DownloadItem,
         format: String,
-        canMerge: Boolean,
         dir: File,
         pid: String,
         mergeNote: AtomicReference<String?>
@@ -412,17 +385,6 @@ object DownloadManager {
         req.addOption("-N", 16)
         req.addOption("--http-chunk-size", "10M")
         req.addOption("-f", format)
-        val container = item.container
-        if (item.isAudio) {
-            if (container != null && canMerge) {
-                req.addOption("-x")
-                req.addOption("--audio-format", container)
-                req.addOption("--audio-quality", 0)
-            }
-        } else if (canMerge) {
-            req.addOption("--merge-output-format", container ?: "mp4/mkv")
-            if (container != null) req.addOption("--remux-video", container)
-        }
         req.addOption("-o", File(dir, "media.%(ext)s").absolutePath)
         YoutubeDL.getInstance().execute(req, pid) { _, _, line ->
             val l = line.orEmpty()

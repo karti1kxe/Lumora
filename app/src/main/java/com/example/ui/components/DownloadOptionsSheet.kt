@@ -109,9 +109,6 @@ private fun DownloadGlassSheet(
     }
 }
 
-private val VIDEO_CONTAINERS = listOf<Pair<String?, String>>(null to "Default", "mp4" to "MP4", "mkv" to "MKV", "webm" to "WebM")
-private val AUDIO_CONTAINERS = listOf<Pair<String?, String>>(null to "Default", "mp3" to "MP3", "m4a" to "M4A", "opus" to "Opus", "wav" to "WAV")
-
 /**
  * Opens from the download button of a link in Recent Streams: name, author, container and the quality of the video
  * (or of the audio only) can be changed before the download starts. Tapping the quality opens the list of qualities.
@@ -141,10 +138,7 @@ fun DownloadOptionsSheet(
     var error by remember { mutableStateOf<String?>(null) }
     var videoSel by remember { mutableStateOf<FormatOption?>(null) }
     var audioSel by remember { mutableStateOf<FormatOption?>(null) }
-    var videoContainer by remember { mutableStateOf<String?>(null) }
-    var audioContainer by remember { mutableStateOf<String?>(null) }
     var picker by remember { mutableStateOf(0) }
-    var containerMenu by remember { mutableStateOf(false) }
 
     LaunchedEffect(url) {
         val (loaded, err) = DownloadProbe.load(context, url)
@@ -160,8 +154,6 @@ fun DownloadOptionsSheet(
     }
 
     val isAudio = tab == 0
-    val containers = if (isAudio) AUDIO_CONTAINERS else VIDEO_CONTAINERS
-    val container = if (isAudio) audioContainer else videoContainer
     val options = if (isAudio) info?.audioFormats.orEmpty() else info?.videoFormats.orEmpty()
     val selected = if (isAudio) audioSel else videoSel
 
@@ -169,28 +161,20 @@ fun DownloadOptionsSheet(
         val cleanTitle = title.trim().ifBlank { initialTitle.ifBlank { url } }
         val cleanAuthor = author.trim().ifBlank { null }
         val sel = selected
-        val bestAudioSize = info?.audioFormats?.firstOrNull()?.sizeBytes ?: 0L
+        // every offered quality is one file (sound included), so the original format / container is kept
         val spec: String? = when {
             sel == null -> null
             isAudio -> sel.id + "/ba/b"
-            sel.hasAudio -> sel.id
-            else -> {
-                val audioPart = when (container) {
-                    "webm" -> "ba[ext=webm]"
-                    "mkv" -> "ba"
-                    else -> "ba[ext=m4a]"
-                }
-                sel.id + "+" + audioPart + "/" + sel.id + "+ba/" + sel.id
-            }
+            else -> sel.id
         }
-        val estimate = if (sel == null) 0L else sel.sizeBytes + (if (!isAudio && !sel.hasAudio) bestAudioSize else 0L)
+        val estimate = sel?.sizeBytes ?: 0L
         return DownloadRequest(
             source = url,
             title = cleanTitle,
             author = cleanAuthor,
             isAudio = isAudio,
             formatSpec = spec,
-            container = container,
+            container = null,
             estimatedBytes = estimate
         )
     }
@@ -249,50 +233,14 @@ fun DownloadOptionsSheet(
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(modifier = Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = author,
-                onValueChange = { author = it },
-                label = { Text("Author") },
-                singleLine = true,
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.weight(1f)
-            )
-            Box(modifier = Modifier.weight(1f)) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(58.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                        .border(1.dp, secondaryText.copy(alpha = 0.45f), RoundedCornerShape(18.dp))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { containerMenu = true }
-                        .padding(horizontal = 14.dp),
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(text = "Container", fontSize = 11.sp, color = secondaryText)
-                    Text(
-                        text = containers.firstOrNull { it.first == container }?.second ?: "Default",
-                        fontSize = 15.sp,
-                        color = primaryText,
-                        maxLines = 1
-                    )
-                }
-                DropdownMenu(expanded = containerMenu, onDismissRequest = { containerMenu = false }) {
-                    for ((value, label) in containers) {
-                        DropdownMenuItem(
-                            text = { Text(label) },
-                            onClick = {
-                                if (isAudio) audioContainer = value else videoContainer = value
-                                containerMenu = false
-                            }
-                        )
-                    }
-                }
-            }
-        }
+        OutlinedTextField(
+            value = author,
+            onValueChange = { author = it },
+            label = { Text("Author") },
+            singleLine = true,
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth()
+        )
 
         // ---- quality ----
         Text(
