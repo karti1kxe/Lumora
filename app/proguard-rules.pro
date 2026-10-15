@@ -40,3 +40,22 @@
 -keep class com.fasterxml.jackson.** { *; }
 -dontwarn com.fasterxml.jackson.**
 -dontwarn org.apache.commons.io.**
+
+# yt-dlp for Android: the library unzips Python/yt-dlp with commons-compress/xz/commons-io and maps JSON with Jackson.
+# R8 must not rename/strip them, otherwise yt-dlp "could not start" in the release APK.
+-keep class com.yausername.** { *; }
+-dontwarn com.yausername.**
+-keep class org.apache.commons.compress.** { *; }
+-dontwarn org.apache.commons.compress.**
+-keep class org.apache.commons.io.** { *; }
+-dontwarn org.tukaani.xz.**
+-keep class org.tukaani.xz.** { *; }
+-dontwarn com.github.luben.zstd.**
+-dontwarn org.brotli.dec.**
+-dontwarn javax.annotation.**
+-dontwarn org.slf4j.**
+-keepattributes *Annotation*, Signature, InnerClasses, EnclosingMethod
+# readable exception names in error messages
+-keepnames class * extends java.lang.Throwable
+# never fail the release build on optional classes referenced by these libraries
+-ignorewarnings

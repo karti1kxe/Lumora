@@ -457,7 +457,8 @@ object NetworkStreamResolver {
 
     /** First meaningful line of an error (yt-dlp prints "ERROR: ..."), capped so it fits a toast. */
     private fun shortReason(t: Throwable): String {
-        val raw = (t.message ?: t.javaClass.simpleName).trim()
+        val raw = (t.message?.takeIf { it.isNotBlank() }
+            ?: (t.javaClass.name.substringAfterLast('.') + (t.cause?.let { ": " + (it.message ?: it.javaClass.name.substringAfterLast('.')) } ?: ""))).trim()
         val line = raw.lineSequence().map { it.trim() }.firstOrNull { it.startsWith("ERROR", true) }
             ?: raw.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
             ?: raw
