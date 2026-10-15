@@ -57,3 +57,8 @@
 -keep class org.libtorrent4j.swig.libtorrent_jni { *; }
 -keep class org.libtorrent4j.** { *; }
 -dontwarn org.libtorrent4j.**
+
+
+# Media plugins (Network > Media): WebView JavaScript bridge methods are called by name from plugin_runtime.js
+-keepattributes JavascriptInterface
+-keep class com.example.util.media.PluginJsEngine$Bridge { *; }

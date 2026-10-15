@@ -10,6 +10,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -77,11 +81,13 @@ import com.example.util.TorrentLibrary
 import com.example.util.TorrentOpenResult
 import com.example.util.TorrentSource
 import com.example.util.TorrentStreamEngine
+import com.example.util.media.MediaPluginStore
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * "Network" bottom tab. Sections: Local Network (paste a link and play it) and Media (reserved for the next step).
+ * "Network" bottom tab. Sections: Local Network (paste a link and play it), Media (plugin repositories + downloads) and one
+ * extra section per downloaded media plugin (category rows with thumbnails).
  * Playback itself is NOT done here: the link is resolved (yt-dlp) and handed to [onPlayVideo], so it opens in the
  * app's normal video player with its normal controls.
  */
@@ -99,6 +105,10 @@ fun NetworkTabContent(
     val clipboard = LocalClipboardManager.current
 
     var section by rememberSaveable { mutableStateOf(0) }
+    val mediaTick by MediaPluginStore.changes.collectAsState()
+    val mediaPlugins = remember(mediaTick) { MediaPluginStore.getInstalled(context) }
+    // a plugin tab can disappear (plugin removed): fall back to the last existing tab
+    val safeSection = section.coerceIn(0, 1 + mediaPlugins.size)
     var optionsEntry by remember { mutableStateOf<RecentStreamEntry?>(null) }
     var url by rememberSaveable { mutableStateOf("") }
     var isResolving by remember { mutableStateOf(false) }
@@ -282,16 +292,25 @@ fun NetworkTabContent(
 
     Column(modifier = modifier.fillMaxSize()) {
         // Same gradient "liquid" underline + slide animation as the Saved / Favourite tabs of a playlist.
-        PlaylistFilterTabs(
-            tabs = listOf("Local Network", "Media"),
-            selectedIndex = section,
-            isDark = isDark,
-            onSelect = { section = it },
-            modifier = Modifier.padding(horizontal = 4.dp).padding(top = 4.dp, bottom = 12.dp)
-        )
+        // Downloaded media plugins get their own tab next to "Media"; the bar scrolls once there are many.
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val barMinWidth = maxWidth
+            Box(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                PlaylistFilterTabs(
+                    tabs = listOf("Local Network", "Media") + mediaPlugins.map { it.name },
+                    selectedIndex = safeSection,
+                    isDark = isDark,
+                    onSelect = { section = it },
+                    modifier = Modifier
+                        .widthIn(min = barMinWidth)
+                        .padding(horizontal = 4.dp)
+                        .padding(top = 4.dp, bottom = 12.dp)
+                )
+            }
+        }
 
         Crossfade(
-            targetState = section,
+            targetState = safeSection,
             animationSpec = tween(220),
             label = "NetworkSection",
             modifier = Modifier.weight(1f).fillMaxWidth()
@@ -479,15 +498,12 @@ fun NetworkTabContent(
                         }
                     }
                 }
+            } else if (current == 1) {
+                MediaPluginManager(isDark = isDark)
             } else {
-                // "Media" section is added in the next step.
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                    Text(
-                        text = "Coming soon",
-                        fontSize = 13.sp,
-                        color = secondaryText,
-                        modifier = Modifier.padding(top = 32.dp)
-                    )
+                val plugin = mediaPlugins.getOrNull(current - 2)
+                if (plugin != null) {
+                    MediaPluginPage(plugin = plugin, isDark = isDark)
                 }
             }
         }
