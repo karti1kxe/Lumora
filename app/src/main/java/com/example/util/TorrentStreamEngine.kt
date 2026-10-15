@@ -54,6 +54,24 @@ object TorrentStreamEngine {
     private const val MAX_TORRENT_FILE_BYTES = 16 * 1024 * 1024
 
     private val lock = Any()
+
+    /**
+     * Priority of the file being streamed. The constant names of libtorrent4j's Priority differ between releases
+     * (SEVEN / NORMAL / DEFAULT ... are not present everywhere), so it is looked up by name at runtime instead of
+     * hard-coding one that may not exist in the bundled version.
+     */
+    private val playPriority: Priority? by lazy {
+        try {
+            val all = Priority::class.java.enumConstants?.toList().orEmpty().filter { it != Priority.IGNORE }
+            val wanted = listOf("TOP_PRIORITY", "TOP", "SEVEN", "HIGH", "DEFAULT_PRIORITY", "DEFAULT", "NORMAL", "FOUR")
+            val picked = wanted.firstNotNullOfOrNull { n -> all.firstOrNull { it.toString().equals(n, ignoreCase = true) } }
+                ?: all.lastOrNull()
+            Log.i("TorrentStreamEngine", "play priority = ${picked} (available: ${all.joinToString()})")
+            picked
+        } catch (_: Throwable) {
+            null
+        }
+    }
     @Volatile private var session: SessionManager? = null
     @Volatile private var active: ActiveTorrent? = null
     @Volatile private var server: StreamServer? = null
@@ -276,7 +294,10 @@ object TorrentStreamEngine {
         val n = a.info.files().numFiles()
         for (i in 0 until n) {
             try {
-                a.handle.filePriority(i, if (i == fileIndex) Priority.NORMAL else Priority.IGNORE)
+                val wanted = i == fileIndex
+                // no usable "download" priority found -> leave libtorrent's default for the played file
+                if (wanted && playPriority == null) continue
+                a.handle.filePriority(i, if (wanted) playPriority!! else Priority.IGNORE)
             } catch (_: Throwable) {}
         }
         try { a.handle.clearPieceDeadlines() } catch (_: Throwable) {}
