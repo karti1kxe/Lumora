@@ -135,7 +135,8 @@ object DownloadManager {
                 totalBytes = req.estimatedBytes,
                 formatSpec = req.formatSpec,
                 container = req.container,
-                thumbnailUrl = req.thumbnailUrl
+                thumbnailUrl = req.thumbnailUrl,
+                headers = req.headers
             )
         )
         start(app, id)
@@ -486,6 +487,11 @@ object DownloadManager {
         req.addOption("-N", 16)
         req.addOption("--http-chunk-size", "10M")
         req.addOption("-f", format)
+        for ((hName, hValue) in item.headers) {
+            if (hName.isBlank() || hValue.isBlank()) continue
+            if (hName.equals("User-Agent", ignoreCase = true)) req.addOption("--user-agent", hValue)
+            else req.addOption("--add-header", "$hName:$hValue")
+        }
         req.addOption("-o", File(dir, "$outName.%(ext)s").absolutePath)
         YoutubeDL.getInstance().execute(req, pid) { _, _, line ->
             val l = line.orEmpty()

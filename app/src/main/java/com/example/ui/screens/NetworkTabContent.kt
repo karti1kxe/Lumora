@@ -104,7 +104,8 @@ fun NetworkTabContent(
     val focusManager = LocalFocusManager.current
     val clipboard = LocalClipboardManager.current
 
-    var section by rememberSaveable { mutableStateOf(0) }
+    // initial tab = the one that was open before the player / detail page was opened
+    var section by rememberSaveable { mutableStateOf(MediaDetailState.lastSection) }
     val mediaTick by MediaPluginStore.changes.collectAsState()
     val mediaPlugins = remember(mediaTick) { MediaPluginStore.getInstalled(context) }
     // a plugin tab can disappear (plugin removed): fall back to the last existing tab
@@ -290,6 +291,22 @@ fun NetworkTabContent(
         }
     }
 
+    // A media title is open: its detail page replaces the whole Network tab until Back.
+    val detailPlugin = MediaDetailState.plugin
+    val detailPost = MediaDetailState.post
+    if (detailPlugin != null && detailPost != null) {
+        MediaDetailScreen(
+            plugin = detailPlugin,
+            post = detailPost,
+            isDark = isDark,
+            glassBlurTransparency = glassBlurTransparency,
+            onBack = { MediaDetailState.close() },
+            onPlayVideo = onPlayVideo,
+            modifier = modifier
+        )
+        return
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
         // Same gradient "liquid" underline + slide animation as the Saved / Favourite tabs of a playlist.
         // Downloaded media plugins get their own tab next to "Media"; the bar scrolls once there are many.
@@ -300,7 +317,7 @@ fun NetworkTabContent(
                     tabs = listOf("Local Network", "Media") + mediaPlugins.map { it.name },
                     selectedIndex = safeSection,
                     isDark = isDark,
-                    onSelect = { section = it },
+                    onSelect = { section = it; MediaDetailState.lastSection = it },
                     modifier = Modifier
                         .widthIn(min = barMinWidth)
                         .padding(horizontal = 4.dp)
@@ -503,7 +520,12 @@ fun NetworkTabContent(
             } else {
                 val plugin = mediaPlugins.getOrNull(current - 2)
                 if (plugin != null) {
-                    MediaPluginPage(plugin = plugin, isDark = isDark)
+                    MediaPluginPage(
+                        plugin = plugin,
+                        isDark = isDark,
+                        onOpenPost = { MediaDetailState.open(plugin, it) },
+                        onPlayVideo = onPlayVideo
+                    )
                 }
             }
         }

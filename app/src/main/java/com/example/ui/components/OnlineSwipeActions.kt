@@ -99,11 +99,11 @@ fun OnlineQuickActionBar(
     isDark: Boolean,
     alphaRatio: Float,
     isSavedForLater: Boolean,
-    onPlayNext: () -> Unit,
-    onPlayLast: () -> Unit,
+    onPlayNext: (() -> Unit)? = null,
+    onPlayLast: (() -> Unit)? = null,
     onSaveToPlaylist: () -> Unit,
     onWatchLater: () -> Unit,
-    onNotInterested: () -> Unit,
+    onNotInterested: (() -> Unit)? = null,
     onShare: () -> Unit,
     modifier: Modifier = Modifier,
     onDownload: (() -> Unit)? = null
@@ -143,8 +143,12 @@ fun OnlineQuickActionBar(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            QuickActionItem(R.drawable.lumora_next_in_queue, "Play next", Color(0xFF38BDF8), Modifier.width(78.dp), onPlayNext)
-            QuickActionItem(R.drawable.lumora_last_in_queue, "Play last", Color(0xFF818CF8), Modifier.width(78.dp), onPlayLast)
+            if (onPlayNext != null) {
+                QuickActionItem(R.drawable.lumora_next_in_queue, "Play next", Color(0xFF38BDF8), Modifier.width(78.dp), onPlayNext)
+            }
+            if (onPlayLast != null) {
+                QuickActionItem(R.drawable.lumora_last_in_queue, "Play last", Color(0xFF818CF8), Modifier.width(78.dp), onPlayLast)
+            }
             QuickActionItem(R.drawable.lumora_playlist_video, "Playlist", Color(0xFFF472B6), Modifier.width(78.dp), onSaveToPlaylist)
             QuickActionItem(
                 R.drawable.lumora_watch_later,
@@ -153,7 +157,9 @@ fun OnlineQuickActionBar(
                 Modifier.width(78.dp),
                 onWatchLater
             )
-            QuickActionItem(R.drawable.lumora_block, "Not interested", Color(0xFFEF4444), Modifier.width(78.dp), onNotInterested)
+            if (onNotInterested != null) {
+                QuickActionItem(R.drawable.lumora_block, "Not interested", Color(0xFFEF4444), Modifier.width(78.dp), onNotInterested)
+            }
             if (onDownload != null) {
                 QuickActionItem(R.drawable.lumora_download_minimalistic, "Download", Color(0xFF34D399), Modifier.width(78.dp), onDownload)
             }

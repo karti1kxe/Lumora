@@ -71,6 +71,9 @@ import com.example.ui.theme.LightGlassSurface
 import com.example.ui.theme.LightTextPrimary
 import com.example.ui.theme.LightTextSecondary
 import com.example.util.media.MediaCatalogEntry
+import com.example.util.media.MediaLibraryStore
+import com.example.util.media.MediaPlayback
+import com.example.util.media.MediaSavedVideo
 import com.example.util.media.MediaPluginInfo
 import com.example.util.media.MediaPluginStore
 import com.example.util.media.MediaPost
@@ -434,6 +437,8 @@ private fun PluginIconButton(drawableRes: Int, description: String, tint: Color,
 fun MediaPluginPage(
     plugin: MediaPluginInfo,
     isDark: Boolean,
+    onOpenPost: (MediaPost) -> Unit = {},
+    onPlayVideo: (VideoItem, List<VideoItem>) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -441,6 +446,35 @@ fun MediaPluginPage(
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
+
+    val scope = rememberCoroutineScope()
+    val savedTick by MediaLibraryStore.changes.collectAsState()
+    val savedVideos = remember(savedTick, plugin.value) { MediaLibraryStore.watchLater(context, plugin.value) }
+    var playingSaved by remember { mutableStateOf(false) }
+
+    fun playSaved(v: MediaSavedVideo) {
+        if (playingSaved) return
+        playingSaved = true
+        Toast.makeText(context, "Getting video link…", Toast.LENGTH_SHORT).show()
+        scope.launch {
+            try {
+                val result = MediaPlayback.resolve(context, plugin, v.link, v.type)
+                val stream = result.getOrNull()
+                if (stream == null) {
+                    Toast.makeText(
+                        context,
+                        "Could not get this video: " + (result.exceptionOrNull()?.message ?: "unknown error"),
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    val item = MediaPlayback.toVideoItem(context, plugin, v.title, v.poster, stream)
+                    onPlayVideo(item, listOf(item))
+                }
+            } finally {
+                playingSaved = false
+            }
+        }
+    }
 
     var catalog by remember(plugin.value, plugin.version) { mutableStateOf<MediaProviderRepository.Catalog?>(null) }
     var catalogError by remember(plugin.value, plugin.version) { mutableStateOf<String?>(null) }
@@ -468,6 +502,7 @@ fun MediaPluginPage(
             entry = current,
             isDark = isDark,
             onBack = { seeAll = null },
+            onOpenPost = onOpenPost,
             modifier = modifier
         )
         return
@@ -505,8 +540,20 @@ fun MediaPluginPage(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 contentPadding = PaddingValues(bottom = 28.dp)
             ) {
+                if (savedVideos.isNotEmpty()) {
+                    item(key = "watch-later") {
+                        MediaWatchLaterRow(
+                            videos = savedVideos,
+                            isDark = isDark,
+                            primaryText = primaryText,
+                            borderColor = borderColor,
+                            onPlay = { playSaved(it) },
+                            onRemove = { MediaLibraryStore.remove(context, it.pluginId, it.link) }
+                        )
+                    }
+                }
                 items(cat.categories, key = { "c|" + it.title + "|" + it.filter }) { entry ->
-                    MediaCategoryRow(plugin, entry, isDark, primaryText, secondaryText, surfaceColor, borderColor) { seeAll = entry }
+                    MediaCategoryRow(plugin, entry, isDark, primaryText, secondaryText, surfaceColor, borderColor, onOpenPost) { seeAll = entry }
                 }
                 if (cat.genres.isNotEmpty()) {
                     item(key = "genres-label") {
@@ -519,7 +566,7 @@ fun MediaPluginPage(
                         )
                     }
                     items(cat.genres, key = { "g|" + it.title + "|" + it.filter }) { entry ->
-                        MediaCategoryRow(plugin, entry, isDark, primaryText, secondaryText, surfaceColor, borderColor) { seeAll = entry }
+                        MediaCategoryRow(plugin, entry, isDark, primaryText, secondaryText, surfaceColor, borderColor, onOpenPost) { seeAll = entry }
                     }
                 }
             }
@@ -551,6 +598,7 @@ private fun MediaCategoryRow(
     secondaryText: Color,
     surfaceColor: Color,
     borderColor: Color,
+    onOpenPost: (MediaPost) -> Unit,
     onSeeAll: () -> Unit
 ) {
     val context = LocalContext.current
@@ -612,7 +660,7 @@ private fun MediaCategoryRow(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(list, key = { it.link + "|" + it.title }) { post ->
-                        MediaPostCard(post, isDark, primaryText, borderColor, Modifier.width(118.dp))
+                        MediaPostCard(post, isDark, primaryText, borderColor, Modifier.width(118.dp), onClick = { onOpenPost(post) })
                     }
                 }
             }
@@ -652,9 +700,19 @@ private fun MediaPostCard(
     isDark: Boolean,
     primaryText: Color,
     borderColor: Color,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    onRemove: (() -> Unit)? = null
 ) {
-    Column(modifier = modifier) {
+    Column(
+        modifier = modifier.then(
+            if (onClick != null) {
+                Modifier
+                    .clip(RoundedCornerShape(18.dp))
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
+            } else Modifier
+        )
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -675,6 +733,20 @@ private fun MediaPostCard(
                     )
                 }
             )
+            if (onRemove != null) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(Color.Black.copy(alpha = 0.6f))
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onRemove),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(text = "✕", fontSize = 12.sp, color = Color.White)
+                }
+            }
             post.tag?.let { tag ->
                 Text(
                     text = tag,
@@ -710,6 +782,7 @@ private fun MediaSeeAllGrid(
     entry: MediaCatalogEntry,
     isDark: Boolean,
     onBack: () -> Unit,
+    onOpenPost: (MediaPost) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -767,7 +840,7 @@ private fun MediaSeeAllGrid(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             items(items, key = { it.link + "|" + it.title }) { post ->
-                MediaPostCard(post, isDark, primaryText, borderColor)
+                MediaPostCard(post, isDark, primaryText, borderColor, onClick = { onOpenPost(post) })
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "footer") {
                 // Composed when the end of the grid is reached -> loads the next page.
@@ -786,6 +859,43 @@ private fun MediaSeeAllGrid(
                         else -> Spacer(modifier = Modifier.height(1.dp))
                     }
                 }
+            }
+        }
+    }
+}
+
+/** "Watch later" category: the movies / episodes saved from a detail page. Tap plays, the cross removes. */
+@Composable
+private fun MediaWatchLaterRow(
+    videos: List<MediaSavedVideo>,
+    isDark: Boolean,
+    primaryText: Color,
+    borderColor: Color,
+    onPlay: (MediaSavedVideo) -> Unit,
+    onRemove: (MediaSavedVideo) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+        Text(
+            text = "Watch later",
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = primaryText,
+            modifier = Modifier.padding(start = 18.dp, bottom = 12.dp)
+        )
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(videos, key = { "wl|" + it.link }) { v ->
+                MediaPostCard(
+                    post = MediaPost(v.title, v.link, v.poster, null),
+                    isDark = isDark,
+                    primaryText = primaryText,
+                    borderColor = borderColor,
+                    modifier = Modifier.width(118.dp),
+                    onClick = { onPlay(v) },
+                    onRemove = { onRemove(v) }
+                )
             }
         }
     }

@@ -35,7 +35,9 @@ data class DownloadItem(
     /** Chosen output container (mp4 / mkv / webm / mp3 / m4a / opus / wav), null = default. */
     val container: String? = null,
     /** Cover / thumbnail link of the media (embedded into audio files, shown on the Download page). */
-    val thumbnailUrl: String? = null
+    val thumbnailUrl: String? = null,
+    /** HTTP headers sent with the download (media-plugin streams need a Referer / User-Agent). */
+    val headers: Map<String, String> = emptyMap()
 ) {
     val isActive: Boolean
         get() = status == DownloadStatus.QUEUED || status == DownloadStatus.DOWNLOADING || status == DownloadStatus.PROCESSING
@@ -161,7 +163,13 @@ object DownloadStore {
                     createdAt = o.optLong("c", 0L),
                     formatSpec = o.optString("fmt").ifBlank { null },
                     container = o.optString("cont").ifBlank { null },
-                    thumbnailUrl = o.optString("th").ifBlank { null }
+                    thumbnailUrl = o.optString("th").ifBlank { null },
+                    headers = o.optJSONObject("hd")?.let { h ->
+                        val m = LinkedHashMap<String, String>()
+                        val keys = h.keys()
+                        while (keys.hasNext()) { val k = keys.next(); m[k] = h.optString(k) }
+                        m
+                    } ?: emptyMap()
                 )
             }
         } catch (_: Throwable) {
@@ -190,6 +198,13 @@ object DownloadStore {
                     .put("fmt", e.formatSpec ?: "")
                     .put("cont", e.container ?: "")
                     .put("th", e.thumbnailUrl ?: "")
+                    .apply {
+                        if (e.headers.isNotEmpty()) {
+                            val h = JSONObject()
+                            for ((k, v) in e.headers) h.put(k, v)
+                            put("hd", h)
+                        }
+                    }
             )
         }
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
