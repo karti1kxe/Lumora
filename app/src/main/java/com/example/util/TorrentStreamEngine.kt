@@ -276,7 +276,7 @@ object TorrentStreamEngine {
         val n = a.info.files().numFiles()
         for (i in 0 until n) {
             try {
-                a.handle.filePriority(i, if (i == fileIndex) Priority.SEVEN else Priority.IGNORE)
+                a.handle.filePriority(i, if (i == fileIndex) Priority.NORMAL else Priority.IGNORE)
             } catch (_: Throwable) {}
         }
         try { a.handle.clearPieceDeadlines() } catch (_: Throwable) {}
