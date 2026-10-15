@@ -1312,6 +1312,11 @@ class MpvPlayerController {
                 _bufferedPositionMs.value = 0L
             }
             lastLoadWasDirect = directStreamMode
+            // Torrent video (served by the local torrent engine): the first pieces can take a while to arrive from the
+            // swarm, so mpv must not give up after its default 60 s network timeout.
+            if (filePath.startsWith("http://127.0.0.1:")) {
+                try { view.mpv.setPropertyString("network-timeout", "900") } catch (_: Throwable) {}
+            }
             try {
                 view.mpv.command("loadfile", filePath, "replace")
             } catch (_: Throwable) {

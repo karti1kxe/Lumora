@@ -227,6 +227,13 @@ dependencies {
   implementation(libs.mpv.android.lib)
   // yt-dlp for Android (Network tab): resolves YouTube and the other sites yt-dlp supports to playable stream URLs.
   implementation(libs.youtubedl.android.library)
+  // libtorrent4j (github.com/aldenml/libtorrent4j): Torrent / magnet video streaming (util/TorrentStreamEngine.kt).
+  // The Java API plus one native library per ABI (the APK splits above pick the matching one).
+  implementation(libs.libtorrent4j)
+  implementation(libs.libtorrent4j.android.arm)
+  implementation(libs.libtorrent4j.android.arm64)
+  implementation(libs.libtorrent4j.android.x86)
+  implementation(libs.libtorrent4j.android.x8664)
   // media3-exoplayer / media3-ui removed: not used anywhere in the code — the app
   // plays everything through mpv-android-lib. Keeping them only added unused APK
   // weight and a second, unused player stack.

@@ -27,7 +27,12 @@ data class NetworkStream(
     /** true = music / audio only: it belongs in the audio player, not the video player. */
     val isAudio: Boolean = false,
     /** Spotify / playlist links: the tracks to queue in the audio player (resolved to audio when each one starts). */
-    val tracks: List<OnlineTrackResult> = emptyList()
+    val tracks: List<OnlineTrackResult> = emptyList(),
+    /**
+     * All selectable qualities (+ audio / chapters) of a video link, so the player's three-dot menu can offer
+     * "Video Quality" for pasted links exactly like for Online Videos. Null = nothing to choose (plain files, live TV).
+     */
+    val playback: OnlineVideoPlayback? = null
 )
 
 /**
@@ -344,6 +349,9 @@ object NetworkStreamResolver {
             }
         }
         val finalUrl = videoUrl ?: return null
+        val playback = if (sawVideo && !isLive && duration > 0L) {
+            buildYtDlpPlayback(pageUrl, title, uploader.orEmpty(), duration, root)
+        } else null
         return NetworkStream(
             pageUrl = pageUrl,
             title = title,
@@ -355,7 +363,77 @@ object NetworkStreamResolver {
             headers = headers,
             // live streams have no duration: let the player handle them like IPTV channels
             isDirect = isLive || duration <= 0L,
-            isAudio = !sawVideo
+            isAudio = !sawVideo,
+            playback = playback
+        )
+    }
+
+    /**
+     * Every playable video quality of the yt-dlp result ("formats"), best stream per label, plus the best audio stream
+     * (used with video-only formats) and the chapters. Returns null when fewer than 2 qualities exist (nothing to choose).
+     */
+    private fun buildYtDlpPlayback(pageUrl: String, title: String, uploader: String, durationSec: Long, root: JSONObject): OnlineVideoPlayback? {
+        val formats = root.optJSONArray("formats") ?: return null
+        fun playable(f: JSONObject): Boolean {
+            val u = f.optString("url")
+            if (u.isBlank()) return false
+            val proto = f.optString("protocol")
+            // DASH-fragment lists and image storyboards cannot be opened by a plain URL
+            return proto.isBlank() || proto == "https" || proto == "http" || proto == "m3u8" || proto == "m3u8_native"
+        }
+        var bestAudio: JSONObject? = null
+        val byLabel = LinkedHashMap<String, JSONObject>()
+        val labelMeta = HashMap<String, Triple<Int, Int, Boolean>>() // label -> (height, fps, videoOnly)
+        for (i in 0 until formats.length()) {
+            val f = formats.optJSONObject(i) ?: continue
+            if (!playable(f)) continue
+            val hasVideo = f.optString("vcodec", "none").let { it.isNotBlank() && it != "none" }
+            val hasAudio = f.optString("acodec", "none").let { it.isNotBlank() && it != "none" }
+            if (!hasVideo && hasAudio) {
+                val cur = bestAudio
+                val isM4a = f.optString("ext") == "m4a"
+                val curIsM4a = cur?.optString("ext") == "m4a"
+                if (cur == null || (isM4a && !curIsM4a) || (isM4a == curIsM4a && f.optDouble("abr", 0.0) > cur.optDouble("abr", 0.0))) bestAudio = f
+                continue
+            }
+            if (!hasVideo) continue
+            val h = f.optInt("height", 0)
+            if (h <= 0) continue
+            val fps = f.optDouble("fps", 30.0).let { if (it.isNaN() || it <= 0.0) 30 else it.toInt() }
+            val label = if (fps > 30) "${h}p$fps" else "${h}p"
+            val prev = byLabel[label]
+            val isAvc = f.optString("vcodec").startsWith("avc1") || f.optString("vcodec").startsWith("h264")
+            val prevAvc = prev?.optString("vcodec")?.let { it.startsWith("avc1") || it.startsWith("h264") } ?: false
+            val better = prev == null || (isAvc && !prevAvc) || (isAvc == prevAvc && f.optDouble("tbr", 0.0) > prev.optDouble("tbr", 0.0))
+            if (better) {
+                byLabel[label] = f
+                labelMeta[label] = Triple(h, fps, !hasAudio)
+            }
+        }
+        val audioUrl = bestAudio?.optString("url")?.ifBlank { null }
+        val qualities = byLabel.entries.mapNotNull { (label, f) ->
+            val (h, fps, videoOnly) = labelMeta[label] ?: return@mapNotNull null
+            if (videoOnly && audioUrl == null) return@mapNotNull null // video-only without any audio stream cannot be played
+            OnlineVideoQuality(label = label, height = h, fps = fps, url = f.optString("url"), isVideoOnly = videoOnly)
+        }.sortedWith(compareByDescending<OnlineVideoQuality> { it.height }.thenByDescending { it.fps })
+        if (qualities.size < 2) return null
+
+        val chapters = ArrayList<OnlineChapterInfo>()
+        root.optJSONArray("chapters")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val c = arr.optJSONObject(i) ?: continue
+                val startMs = (c.optDouble("start_time", 0.0) * 1000.0).toLong()
+                chapters += OnlineChapterInfo(c.optString("title"), startMs)
+            }
+        }
+        return OnlineVideoPlayback(
+            pageUrl = pageUrl,
+            title = title,
+            uploader = uploader,
+            durationSec = durationSec,
+            qualities = qualities,
+            audios = if (audioUrl != null) listOf(OnlineAudioStreamInfo(audioUrl, "Audio", "", 0, true)) else emptyList(),
+            chapters = chapters
         )
     }
 
@@ -488,7 +566,8 @@ object NetworkStreamResolver {
                 videoUrl = q.url,
                 audioUrl = if (q.isVideoOnly) pb.audios.firstOrNull()?.url else null,
                 headers = emptyMap(),
-                isDirect = false
+                isDirect = false,
+                playback = pb
             )
         } catch (t: Throwable) {
             Log.w(TAG, "NewPipe fallback failed for $url", t)

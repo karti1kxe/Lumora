@@ -52,3 +52,8 @@
 -dontwarn org.brotli.dec.**
 -dontwarn java.lang.management.**
 -dontwarn javax.naming.**
+
+# libtorrent4j (Torrent / magnet streaming): the SWIG layer is called from native code, so it must keep its names.
+-keep class org.libtorrent4j.swig.libtorrent_jni { *; }
+-keep class org.libtorrent4j.** { *; }
+-dontwarn org.libtorrent4j.**

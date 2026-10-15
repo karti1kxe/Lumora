@@ -59,6 +59,9 @@ object PlaylistManager {
     private const val PREFS_NAME = "custom_playlists_prefs"
     private const val KEY_PLAYLISTS = "saved_playlists_json"
 
+    /** Lets the context-less [getVideosForPlaylist] rebuild torrent video cards (set by [getPlaylists]). */
+    @Volatile private var appContextForTorrents: Context? = null
+
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
@@ -67,6 +70,7 @@ object PlaylistManager {
     fun getPlaylists(context: Context): List<CustomPlaylist> {
         OnlineMediaLibrary.attach(context)
         StreamEntryStore.attach(context)
+        if (appContextForTorrents == null) appContextForTorrents = context.applicationContext
         val prefs = getPrefs(context)
         val jsonStr = prefs.getString(KEY_PLAYLISTS, null) ?: return emptyList()
         val list = mutableListOf<CustomPlaylist>()
@@ -263,6 +267,9 @@ object PlaylistManager {
                 val meta = OnlineMediaLibrary.getMeta(OnlineMediaLibrary.KIND_VIDEO, url)
                     ?: com.example.util.OnlineTrackResult(videoUrl = url, title = url, artist = "", durationSec = 0L, thumbnailUrl = null)
                 result.add(meta.toOnlineVideoItem())
+            } else if (path.startsWith(TorrentLibrary.PATH_PREFIX)) {
+                // One video of a torrent playlist: rebuild the card from the saved torrent index.
+                TorrentLibrary.videoItem(appContextForTorrents ?: continue, path)?.let { result.add(it) }
             } else if (path.startsWith("http://", ignoreCase = true) || path.startsWith("https://", ignoreCase = true)) {
                 // Imported M3U / IPTV stream: rebuild the normal video card (logo as thumbnail, group as sub-line).
                 val meta = StreamEntryStore.get(path)

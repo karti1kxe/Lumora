@@ -520,6 +520,8 @@ fun VideoPlayerScreen(
     // true = "Auto": quality follows the internet speed (default until the user picks a fixed quality)
     var onlineAutoMode by remember(currentVideo) { mutableStateOf(false) }
     val onlinePrefs = remember { context.getSharedPreferences("lumora_online_video", android.content.Context.MODE_PRIVATE) }
+    // HTTP headers of a Network-tab link (yt-dlp result); re-applied on every quality switch (setOnlineStream clears them)
+    var networkRequestHeaders by remember(currentVideo) { mutableStateOf<Map<String, String>>(emptyMap()) }
 
 
     // Video thumbnail / first frame state
@@ -566,6 +568,23 @@ fun VideoPlayerScreen(
             )
         }
 
+    /** Picks the quality (saved choice or Auto) of an already resolved video and starts it; shared by Online Video and pasted links. */
+    fun beginResolvedPlayback(pb: OnlineVideoPlayback, startMs: Long, headers: Map<String, String>) {
+        onlinePlayback = pb
+        networkRequestHeaders = headers
+        val savedQuality = onlinePrefs.getString("quality", null)
+        val auto = savedQuality == null || savedQuality == OnlineVideoService.AUTO_QUALITY
+        val q = (if (auto) OnlineVideoService.pickAutoQuality(context, pb.qualities) else null)
+            ?: OnlineVideoService.pickDefaultQuality(pb.qualities, if (auto) null else savedQuality) ?: return
+        onlineAutoMode = auto
+        selectedOnlineQuality = q.label
+        val audios = if (q.isVideoOnly) pb.audios.map { OnlineAudioSource(it.url, it.title, it.language) } else emptyList()
+        controller.setOnlineStream(true, audios, 0, onlineChaptersOf(pb))
+        if (headers.isNotEmpty()) controller.setNetworkRequestHeaders(headers)
+        controller.loadVideo(q.url, startMs)
+        controller.play()
+    }
+
     /** Resolves the stream URLs and starts playback. The existing buffering spinner runs until the first frame. */
     suspend fun startOnlinePlayback(watchUrl: String, startMs: Long, key: String) {
         controller.setOnlineStream(true)
@@ -575,17 +594,7 @@ fun VideoPlayerScreen(
             Toast.makeText(context, "Could not load this video. Check your internet connection.", Toast.LENGTH_LONG).show()
             return
         }
-        onlinePlayback = pb
-        val savedQuality = onlinePrefs.getString("quality", null)
-        val auto = savedQuality == null || savedQuality == OnlineVideoService.AUTO_QUALITY
-        val q = (if (auto) OnlineVideoService.pickAutoQuality(context, pb.qualities) else null)
-            ?: OnlineVideoService.pickDefaultQuality(pb.qualities, if (auto) null else savedQuality) ?: return
-        onlineAutoMode = auto
-        selectedOnlineQuality = q.label
-        val audios = if (q.isVideoOnly) pb.audios.map { OnlineAudioSource(it.url, it.title, it.language) } else emptyList()
-        controller.setOnlineStream(true, audios, 0, onlineChaptersOf(pb))
-        controller.loadVideo(q.url, startMs)
-        controller.play()
+        beginResolvedPlayback(pb, startMs, emptyMap())
     }
 
     /**
@@ -600,6 +609,13 @@ fun VideoPlayerScreen(
             Toast.makeText(context, "Could not play this link. Check the link and your internet connection.", Toast.LENGTH_LONG).show()
             return
         }
+        val pbWithQualities = stream.playback
+        if (pbWithQualities != null && !stream.isAudio) {
+            // Same quality menu (Auto / 1080p / 720p ...) as Online Videos: switching reloads at the same second.
+            controller.setOnlineStream(true)
+            beginResolvedPlayback(pbWithQualities, startMs, stream.headers)
+            return
+        }
         val separateAudio = stream.audioUrl
         if (separateAudio != null) {
             controller.setOnlineStream(true, listOf(OnlineAudioSource(separateAudio, "Audio", "")), 0, null)
@@ -610,6 +626,19 @@ fun VideoPlayerScreen(
         }
         controller.setNetworkRequestHeaders(stream.headers)
         controller.loadVideo(stream.videoUrl, startMs)
+        controller.play()
+    }
+
+    /** Torrent / magnet video: the torrent engine starts downloading it in playback order and serves it on a local http URL. */
+    suspend fun startTorrentPlayback(torrentPath: String, startMs: Long, key: String) {
+        controller.setOnlineStream(true)
+        val url = com.example.util.TorrentStreamEngine.prepareStream(context, torrentPath)
+        if (lastLoadedVideoKey != key) return
+        if (url == null) {
+            Toast.makeText(context, "Could not start this torrent video. Check your internet connection.", Toast.LENGTH_LONG).show()
+            return
+        }
+        controller.loadVideo(url, startMs)
         controller.play()
     }
 
@@ -1739,7 +1768,7 @@ fun VideoPlayerScreen(
         }
 
         // 7. Load into MPV engine & initiate playback
-        if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || path.startsWith("http://") || path.startsWith("https://"))) {
+        if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || path.startsWith("http://") || path.startsWith("https://") || targetVideo.isTorrentStream)) {
             val key = "${targetVideo.id}_${path}_$validIndex"
             lastLoadedVideoKey = key
             // A subtitle choice the user made for THIS video must not be overridden (or flashed
@@ -1769,6 +1798,9 @@ fun VideoPlayerScreen(
                     controller.setDirectStream(true)
                     controller.loadVideo(path, startPositionMs = initialPos)
                     controller.play()
+                } else if (targetVideo.isTorrentStream) {
+                    onlinePlayback = null
+                    startTorrentPlayback(path, initialPos, key)
                 } else if (targetVideo.isNetworkStream) {
                     onlinePlayback = null
                     startNetworkPlayback(path, initialPos, key)
@@ -1797,7 +1829,7 @@ fun VideoPlayerScreen(
     LaunchedEffect(currentVideoIndex, currentPlaylist) {
         val targetVideo = currentPlaylist.getOrNull(currentVideoIndex) ?: video ?: return@LaunchedEffect
         val path = getPlayableFilePath(context, targetVideo.uri, targetVideo.path)
-        if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || (targetVideo.isOnline && path.startsWith("http")))) {
+        if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || targetVideo.isTorrentStream || (targetVideo.isOnline && path.startsWith("http")))) {
             val key = "${targetVideo.id}_${path}_$currentVideoIndex"
             if (lastLoadedVideoKey != key) {
                 playEpisodeAtIndex(currentVideoIndex)
@@ -2140,6 +2172,7 @@ fun VideoPlayerScreen(
         selectedOnlineQuality = q.label
         val audios = if (q.isVideoOnly) pb.audios.map { OnlineAudioSource(it.url, it.title, it.language) } else emptyList()
         controller.setOnlineStream(true, audios, audioIdx, onlineChaptersOf(pb))
+        if (networkRequestHeaders.isNotEmpty()) controller.setNetworkRequestHeaders(networkRequestHeaders)
         controller.loadVideo(q.url, pos)
         controller.play()
     }

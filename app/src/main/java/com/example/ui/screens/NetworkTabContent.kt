@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -27,6 +29,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -64,6 +67,12 @@ import com.example.ui.theme.LightGlassSurface
 import com.example.ui.theme.LightTextPrimary
 import com.example.ui.theme.LightTextSecondary
 import com.example.util.NetworkStreamResolver
+import com.example.util.RecentStreamEntry
+import com.example.util.RecentStreamStore
+import com.example.util.TorrentLibrary
+import com.example.util.TorrentOpenResult
+import com.example.util.TorrentSource
+import com.example.util.TorrentStreamEngine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -87,6 +96,9 @@ fun NetworkTabContent(
     var url by rememberSaveable { mutableStateOf("") }
     var isResolving by remember { mutableStateOf(false) }
     var pasteFlash by remember { mutableStateOf(false) }
+    var resolvingLabel by remember { mutableStateOf("Loading link…") }
+    val recentTick by RecentStreamStore.changes.collectAsState()
+    val recents = remember(recentTick) { RecentStreamStore.getAll(context) }
 
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
@@ -103,14 +115,69 @@ fun NetworkTabContent(
 
     val canPlay = url.isNotBlank() && !isResolving
 
-    fun play() {
+    /** Magnet link or .torrent file: only the torrent info is loaded; a single video plays, several videos become a playlist. */
+    fun openTorrent(source: TorrentSource, recentKey: String?) {
+        focusManager.clearFocus()
+        resolvingLabel = "Fetching torrent info… (can take up to a minute)"
+        isResolving = true
+        scope.launch {
+            val result = try {
+                TorrentStreamEngine.open(context, source)
+            } catch (t: Throwable) {
+                TorrentOpenResult.Failure(t.message ?: "Could not open the torrent")
+            }
+            isResolving = false
+            when (result) {
+                is TorrentOpenResult.Failure ->
+                    Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                is TorrentOpenResult.Single -> {
+                    val item = TorrentLibrary.videoItem(context, TorrentLibrary.pathFor(result.summary.infoHash, result.file.index))
+                    if (item != null) onPlayVideo(item, listOf(item))
+                }
+                is TorrentOpenResult.Multiple -> {
+                    if (recentKey != null) {
+                        RecentStreamStore.record(context, recentKey, result.summary.name, "Torrent playlist · ${result.videoCount} videos")
+                    }
+                    Toast.makeText(
+                        context,
+                        "Playlist \"${result.playlistName}\" created with ${result.videoCount} videos. Open it from the Playlists tab.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    fun playLink(raw: String) {
         if (isResolving) return
-        val normalized = NetworkStreamResolver.normalizeUrl(url)
+        val trimmed = raw.trim()
+        // one video of an already opened torrent (Recent Streams)
+        if (trimmed.startsWith(TorrentLibrary.PATH_PREFIX)) {
+            val item = TorrentLibrary.videoItem(context, trimmed)
+            if (item == null) {
+                RecentStreamStore.remove(context, trimmed)
+                Toast.makeText(context, "This torrent is no longer saved. Open its magnet / .torrent again.", Toast.LENGTH_LONG).show()
+            } else {
+                onPlayVideo(item, listOf(item))
+            }
+            return
+        }
+        val magnet = Regex("magnet:\\?\\S+", RegexOption.IGNORE_CASE).find(trimmed)?.value
+        if (magnet != null) {
+            openTorrent(TorrentSource.Magnet(magnet), magnet)
+            return
+        }
+        val normalized = NetworkStreamResolver.normalizeUrl(raw)
         if (normalized == null) {
             Toast.makeText(context, "Enter a valid link", Toast.LENGTH_SHORT).show()
             return
         }
+        if (normalized.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)) {
+            openTorrent(TorrentSource.RemoteFile(normalized), normalized)
+            return
+        }
         focusManager.clearFocus()
+        resolvingLabel = "Loading link…"
         isResolving = true
         scope.launch {
             val stream = try {
@@ -133,6 +200,7 @@ fun NetworkTabContent(
                 if (stream.tracks.isNotEmpty()) {
                     // Spotify & playlist links: queue the tracks, each is matched to its audio when it starts.
                     val queue = stream.tracks.map { it.toAudioTrackItem() }
+                    RecentStreamStore.record(context, normalized, stream.title, stream.uploader)
                     try {
                         AudioPlaybackManager.openFullScreen()
                         AudioPlaybackManager.playTrack(context = context, track = queue.first(), newQueue = queue)
@@ -153,6 +221,7 @@ fun NetworkTabContent(
                     format = "STREAM",
                     thumbnailUrl = stream.thumbnailUrl
                 )
+                RecentStreamStore.record(context, normalized, stream.title, stream.uploader)
                 try {
                     AudioPlaybackManager.openFullScreen()
                     AudioPlaybackManager.playTrack(context = context, track = track, newQueue = listOf(track))
@@ -178,6 +247,8 @@ fun NetworkTabContent(
         }
     }
 
+    fun play() = playLink(url)
+
     Column(modifier = modifier.fillMaxSize()) {
         // Same gradient "liquid" underline + slide animation as the Saved / Favourite tabs of a playlist.
         PlaylistFilterTabs(
@@ -188,9 +259,14 @@ fun NetworkTabContent(
             modifier = Modifier.padding(horizontal = 4.dp).padding(top = 4.dp, bottom = 12.dp)
         )
 
-        Crossfade(targetState = section, animationSpec = tween(220), label = "NetworkSection") { current ->
+        Crossfade(
+            targetState = section,
+            animationSpec = tween(220),
+            label = "NetworkSection",
+            modifier = Modifier.weight(1f).fillMaxWidth()
+        ) { current ->
             if (current == 0) {
-                Column(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.fillMaxSize()) {
                     // outer rounded card
                     Row(
                         modifier = Modifier
@@ -317,11 +393,58 @@ fun NetworkTabContent(
                     }
                     if (isResolving) {
                         Text(
-                            text = "Loading link…",
+                            text = resolvingLabel,
                             fontSize = 12.5.sp,
                             color = secondaryText,
                             modifier = Modifier.padding(start = 18.dp, top = 10.dp)
                         )
+                    }
+
+                    // ---- Recent Streams: everything played from here (links, torrent videos) so it can be reopened ----
+                    if (recents.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 18.dp, end = 12.dp, top = 22.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Recent Streams",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = primaryText,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "Clear all",
+                                fontSize = 13.sp,
+                                color = AccentSkyBlue,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) { RecentStreamStore.clear(context) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(recents, key = { it.url }) { entry ->
+                                RecentStreamRow(
+                                    entry = entry,
+                                    primaryText = primaryText,
+                                    secondaryText = secondaryText,
+                                    surfaceColor = surfaceColor,
+                                    borderColor = borderColor,
+                                    onClick = { playLink(entry.url) },
+                                    onRemove = { RecentStreamStore.remove(context, entry.url) }
+                                )
+                            }
+                            item { Spacer(modifier = Modifier.height(24.dp)) }
+                        }
                     }
                 }
             } else {
@@ -335,6 +458,77 @@ fun NetworkTabContent(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun RecentStreamRow(
+    entry: RecentStreamEntry,
+    primaryText: Color,
+    secondaryText: Color,
+    surfaceColor: Color,
+    borderColor: Color,
+    onClick: () -> Unit,
+    onRemove: () -> Unit
+) {
+    val subtitle = entry.subtitle
+        ?: if (entry.isTorrent) "Torrent" else entry.url.substringAfter("://").substringBefore('/')
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(surfaceColor)
+            .border(1.dp, borderColor, RoundedCornerShape(20.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        StyledIcon(
+            drawableRes = R.drawable.lumora_play_circle,
+            contentDescription = null,
+            tint = AccentSkyBlue,
+            modifier = Modifier.size(26.dp)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = entry.title,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                color = primaryText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = subtitle,
+                fontSize = 12.sp,
+                color = secondaryText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onRemove
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            StyledIcon(
+                drawableRes = R.drawable.lumora_close_circle,
+                contentDescription = "Remove from recent",
+                tint = secondaryText.copy(alpha = 0.8f),
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }
