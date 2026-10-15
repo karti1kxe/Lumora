@@ -35,27 +35,20 @@
 
 
 # yt-dlp for Android (Network tab)
--keep class com.yausername.youtubedl_android.** { *; }
--dontwarn com.yausername.youtubedl_android.**
--keep class com.fasterxml.jackson.** { *; }
--dontwarn com.fasterxml.jackson.**
--dontwarn org.apache.commons.io.**
-
-# yt-dlp for Android: the library unzips Python/yt-dlp with commons-compress/xz/commons-io and maps JSON with Jackson.
-# R8 must not rename/strip them, otherwise yt-dlp "could not start" in the release APK.
+# R8 (release build) used to rename / strip parts of the library, so yt-dlp "could not start" with an obfuscated
+# exception name. Everything the library touches (its own packages, the zip / io helpers it uses to unpack Python and
+# yt-dlp, and Jackson for the JSON it parses) is therefore kept completely.
 -keep class com.yausername.** { *; }
 -dontwarn com.yausername.**
--keep class org.apache.commons.compress.** { *; }
--dontwarn org.apache.commons.compress.**
--keep class org.apache.commons.io.** { *; }
+-keep class org.apache.commons.** { *; }
+-dontwarn org.apache.commons.**
+-keep class com.fasterxml.jackson.** { *; }
+-dontwarn com.fasterxml.jackson.**
+-keep class kotlin.Metadata { *; }
+# readable exception names in the "Could not play this link: ..." message
+-keepnames class * extends java.lang.Throwable
 -dontwarn org.tukaani.xz.**
--keep class org.tukaani.xz.** { *; }
 -dontwarn com.github.luben.zstd.**
 -dontwarn org.brotli.dec.**
--dontwarn javax.annotation.**
--dontwarn org.slf4j.**
--keepattributes *Annotation*, Signature, InnerClasses, EnclosingMethod
-# readable exception names in error messages
--keepnames class * extends java.lang.Throwable
-# never fail the release build on optional classes referenced by these libraries
--ignorewarnings
+-dontwarn java.lang.management.**
+-dontwarn javax.naming.**

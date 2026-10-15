@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- yt-dlp is read by the library through R.raw.ytdlp (generated at build time, see app/build.gradle.kts);
+     the resource shrinker must never remove it. -->
+<resources
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@raw/ytdlp,@string/bundled_ytdlp_version" />

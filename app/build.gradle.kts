@@ -1,3 +1,7 @@
+import java.net.HttpURLConnection
+import java.net.URI
+import java.util.zip.ZipFile
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
@@ -125,9 +129,10 @@ val downloadYtDlp by tasks.registering {
     val tmp = File(res, "raw/ytdlp.part")
     var ok = false
     var lastError: Throwable? = null
-    for (attempt in 1..3) {
+    for (attempt in 1..4) {
+      if (attempt > 1) Thread.sleep(3000L * attempt)
       try {
-        val conn = java.net.URI("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp").toURL().openConnection() as java.net.HttpURLConnection
+        val conn = URI("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp").toURL().openConnection() as HttpURLConnection
         conn.instanceFollowRedirects = true
         conn.connectTimeout = 30000
         conn.readTimeout = 60000
@@ -141,13 +146,15 @@ val downloadYtDlp by tasks.registering {
       tmp.copyTo(rawFile, overwrite = true)
       tmp.delete()
     } else if (!rawFile.exists()) {
-      throw GradleException("Could not download yt-dlp from GitHub", lastError)
+      // GitHub was unreachable: build anyway with the yt-dlp that ships inside youtubedl-android; the app updates
+      // itself to the newest yt-dlp on first use (NetworkStreamResolver.updateYtDlp).
+      logger.warn("yt-dlp download failed (${lastError?.message}), using the library's built-in copy")
     } else {
       logger.warn("yt-dlp download failed, reusing the previously downloaded copy")
     }
     var version = "unknown"
     try {
-      java.util.zip.ZipFile(rawFile).use { zf ->
+      ZipFile(rawFile).use { zf ->
         val entry = zf.getEntry("yt_dlp/version.py")
         if (entry != null) {
           val text = zf.getInputStream(entry).bufferedReader().readText()
@@ -155,26 +162,14 @@ val downloadYtDlp by tasks.registering {
         }
       }
     } catch (_: Throwable) {}
-    // stop the release resource shrinker from dropping the yt-dlp binary / version (only referenced from library code)
-    File(res, "raw/ytdlp_keep.xml").writeText(
-      "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources xmlns:tools=\"http://schemas.android.com/tools\" tools:keep=\"@raw/ytdlp,@string/bundled_ytdlp_version\" />\n"
-    )
     valuesFile.writeText(
       "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n    <string name=\"bundled_ytdlp_version\" translatable=\"false\">$version</string>\n</resources>\n"
     )
     logger.lifecycle("yt-dlp bundled: $version")
   }
 }
-android.sourceSets.getByName("main").res.srcDir(ytdlpGenDir)
-// every task that reads the resource folders must run after the download
-tasks.configureEach {
-  val n = name
-  if (n != "downloadYtDlp" && (n == "preBuild" || n.contains("Resources") || n.contains("ResValues") ||
-      n.contains("RFile") || n.startsWith("lint") || n.contains("ShrinkRes") || n.contains("shrink") ||
-      n.contains("Manifest"))) {
-    dependsOn(downloadYtDlp)
-  }
-}
+android.sourceSets.getByName("main").res.srcDir(ytdlpGenDir.get().asFile)
+tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(downloadYtDlp) }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
 // to match the convention used in Web projects.

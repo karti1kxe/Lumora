@@ -33,8 +33,9 @@ data class NetworkStream(
 /**
  * Network tab: turns a pasted link into a playable stream.
  *  - plain media links (.mp4 / .mkv / .m3u8 / .mp3 ...) are used directly,
- *  - everything else (YouTube and the many other sites yt-dlp supports) is resolved with yt-dlp
- *    (youtubedl-android), with NewPipe as a second chance for YouTube.
+ *  - YouTube / YouTube Music links go to NewPipe first (same engine as the app's Online tabs, no Python needed)
+ *    and fall back to yt-dlp,
+ *  - everything else (the many other sites yt-dlp supports) is resolved with yt-dlp (youtubedl-android).
  * The bundled yt-dlp is updated first when it is old (sites change constantly, an old yt-dlp simply fails),
  * and a failed attempt triggers one update + retry. The resolved stream is cached for a short time so the
  * player can resolve the same link again instantly.
@@ -46,6 +47,10 @@ object NetworkStreamResolver {
     private const val KEY_LAST_YTDLP_UPDATE = "last_ytdlp_update"
     private const val UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000L
     private const val RETRY_UPDATE_MIN_GAP_MS = 10 * 60 * 1000L
+    private const val KEY_LAST_YTDLP_ATTEMPT = "last_ytdlp_update_attempt"
+    private const val UPDATE_ATTEMPT_GAP_MS = 30 * 60 * 1000L
+    private const val UPDATE_TIMEOUT_SEC = 25L
+    private const val YTDLP_BASE_DIR = "youtubedl-android"
     private const val KEY_BUNDLED_YTDLP = "bundled_ytdlp_version"
 
 
@@ -92,6 +97,11 @@ object NetworkStreamResolver {
 
     private fun isMusicHost(url: String): Boolean = hostOf(url) == "music.youtube.com"
 
+    private fun isYoutubeHost(url: String): Boolean {
+        val h = hostOf(url)
+        return h == "youtu.be" || h == "youtube.com" || h.endsWith(".youtube.com") || h.endsWith("youtube-nocookie.com")
+    }
+
     fun cached(url: String): NetworkStream? =
         cache[url]?.takeIf { System.currentTimeMillis() - it.first < CACHE_TTL_MS }?.second
 
@@ -106,8 +116,12 @@ object NetworkStreamResolver {
                     resolveSpotify(url)
                 } else if (isDirectMediaUrl(url)) {
                     directStream(url)
+                } else if (isYoutubeHost(url)) {
+                    // YouTube changes its player constantly; the NewPipe path is what Online Music/Video already use,
+                    // so it goes first and yt-dlp is the second chance.
+                    resolveWithNewPipe(appCtx, url) ?: resolveWithYtDlp(appCtx, url)
                 } else {
-                    resolveWithYtDlp(appCtx, url) ?: resolveWithNewPipe(appCtx, url)
+                    resolveWithYtDlp(appCtx, url)
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "resolve failed for $url", t)
@@ -145,16 +159,38 @@ object NetworkStreamResolver {
         if (ytdlpReady) return true
         synchronized(initLock) {
             if (ytdlpReady) return true
-            return try {
-                installBundledYtDlpIfNew(context)
-                YoutubeDL.getInstance().init(context)
-                ytdlpReady = true
-                true
-            } catch (t: Throwable) {
-                Log.w(TAG, "yt-dlp init failed", t)
-                lastError = "yt-dlp could not start (${shortReason(t)})"
-                false
+            var failure: Throwable? = null
+            // Attempt 2 starts from a clean slate: a half-extracted Python / yt-dlp folder (killed app, update, full
+            // storage) is the classic reason init keeps failing forever.
+            for (attempt in 0..1) {
+                try {
+                    if (attempt == 1) wipeYtDlpFiles(context, everything = true)
+                    installBundledYtDlpIfNew(context)
+                    YoutubeDL.getInstance().init(context)
+                    ytdlpReady = true
+                    return true
+                } catch (t: Throwable) {
+                    failure = t
+                    Log.w(TAG, "yt-dlp init failed (attempt ${attempt + 1})", t)
+                }
             }
+            lastError = "yt-dlp could not start (${describeFailure(failure)})"
+            return false
+        }
+    }
+
+    /** Removes the extracted yt-dlp copy (or, with [everything], the whole extracted yt-dlp + Python runtime). */
+    private fun wipeYtDlpFiles(context: Context, everything: Boolean) {
+        try {
+            val base = java.io.File(context.noBackupFilesDir, YTDLP_BASE_DIR)
+            if (everything) {
+                base.deleteRecursively()
+            } else {
+                java.io.File(base, "yt-dlp").deleteRecursively()
+                java.io.File(base, "packages/yt-dlp").deleteRecursively()
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not remove old yt-dlp files", t)
         }
     }
 
@@ -167,11 +203,7 @@ object NetworkStreamResolver {
         // Version of the official yt-dlp downloaded from GitHub when this APK was built (see app/build.gradle.kts).
         val bundledVersion = try { context.getString(com.example.R.string.bundled_ytdlp_version) } catch (_: Throwable) { return }
         if (prefs.getString(KEY_BUNDLED_YTDLP, null) == bundledVersion) return
-        try {
-            java.io.File(context.noBackupFilesDir, "youtubedl-android/yt-dlp").deleteRecursively()
-        } catch (t: Throwable) {
-            Log.w(TAG, "could not remove old yt-dlp", t)
-        }
+        wipeYtDlpFiles(context, everything = false)
         prefs.edit()
             .putString(KEY_BUNDLED_YTDLP, bundledVersion)
             // the freshly extracted copy is already the newest release
@@ -182,16 +214,25 @@ object NetworkStreamResolver {
     /**
      * The yt-dlp that ships inside the app is only as new as the app build, and YouTube & co. break old versions
      * every few weeks. So it is refreshed before use when older than 12 hours ([force] = right now, after a failure).
+     * The download is capped at [UPDATE_TIMEOUT_SEC] seconds so a slow network can never block playback, and a failed
+     * attempt is not repeated on every tap.
      */
     private fun updateYtDlp(context: Context, force: Boolean): Boolean {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         synchronized(updateLock) {
-            val last = prefs.getLong(KEY_LAST_YTDLP_UPDATE, 0L)
-            val age = System.currentTimeMillis() - last
-            if (!force && age < UPDATE_INTERVAL_MS) return false
-            if (force && age < RETRY_UPDATE_MIN_GAP_MS) return false
-            return try {
+            val now = System.currentTimeMillis()
+            val age = now - prefs.getLong(KEY_LAST_YTDLP_UPDATE, 0L)
+            val sinceAttempt = now - prefs.getLong(KEY_LAST_YTDLP_ATTEMPT, 0L)
+            if (!force && (age < UPDATE_INTERVAL_MS || sinceAttempt < UPDATE_ATTEMPT_GAP_MS)) return false
+            if (force && (age < RETRY_UPDATE_MIN_GAP_MS || sinceAttempt < RETRY_UPDATE_MIN_GAP_MS)) return false
+            prefs.edit().putLong(KEY_LAST_YTDLP_ATTEMPT, now).apply()
+            val task = java.util.concurrent.FutureTask<Boolean>(java.util.concurrent.Callable {
                 YoutubeDL.getInstance().updateYoutubeDL(context, YoutubeDL.UpdateChannel.STABLE)
+                true
+            })
+            Thread(task, "ytdlp-update").apply { isDaemon = true }.start()
+            return try {
+                task.get(UPDATE_TIMEOUT_SEC, java.util.concurrent.TimeUnit.SECONDS)
                 prefs.edit().putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
                 true
             } catch (t: Throwable) {
@@ -455,10 +496,28 @@ object NetworkStreamResolver {
         }
     }
 
+    /** Readable "Class: message < Cause: message" chain (max 3 levels) so a failure can be diagnosed from the toast. */
+    private fun describeFailure(t: Throwable?): String {
+        if (t == null) return "unknown error"
+        val parts = ArrayList<String>()
+        var cur: Throwable? = t
+        var depth = 0
+        while (cur != null && depth < 3) {
+            val name = cur.javaClass.name.substringAfterLast('.')
+            val cause = cur.cause?.takeIf { it !== cur }
+            val msg = cur.message?.lineSequence()?.map { it.trim() }?.firstOrNull { it.isNotEmpty() }
+            // Throwable(cause) copies cause.toString() into its message: do not print the same thing twice.
+            val duplicate = msg != null && cause != null && msg == cause.toString().lineSequence().firstOrNull()?.trim()
+            parts += if (msg.isNullOrBlank() || duplicate || msg == cur.javaClass.name) name else "$name: $msg"
+            cur = cause
+            depth++
+        }
+        return parts.joinToString(" < ").take(220)
+    }
+
     /** First meaningful line of an error (yt-dlp prints "ERROR: ..."), capped so it fits a toast. */
     private fun shortReason(t: Throwable): String {
-        val raw = (t.message?.takeIf { it.isNotBlank() }
-            ?: (t.javaClass.name.substringAfterLast('.') + (t.cause?.let { ": " + (it.message ?: it.javaClass.name.substringAfterLast('.')) } ?: ""))).trim()
+        val raw = (t.message ?: t.javaClass.simpleName).trim()
         val line = raw.lineSequence().map { it.trim() }.firstOrNull { it.startsWith("ERROR", true) }
             ?: raw.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
             ?: raw
