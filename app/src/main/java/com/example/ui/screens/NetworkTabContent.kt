@@ -557,7 +557,10 @@ private fun RecentStreamRow(
 
 @Composable
 private fun NetworkDownloadsPage(isDark: Boolean) {
+    val context = LocalContext.current
     val downloads by NetworkDownloadManager.items.collectAsState()
+    var selectedIds by rememberSaveable { mutableStateOf(setOf<String>()) }
+    LaunchedEffect(Unit) { NetworkDownloadManager.restore(context) }
     val textColor = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
     val surface = if (isDark) DarkGlassSurface else LightGlassSurface
@@ -565,6 +568,12 @@ private fun NetworkDownloadsPage(isDark: Boolean) {
     Column(Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
         Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 6.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Downloads", color = textColor, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            TextButton(onClick = { selectedIds = if (selectedIds.size == downloads.size) emptySet() else downloads.map { it.id }.toSet() }) {
+                Text(if (downloads.isNotEmpty() && selectedIds.size == downloads.size) "Deselect all" else "Select all", color = AccentSkyBlue)
+            }
+            TextButton(onClick = { NetworkDownloadManager.deleteSelected(selectedIds); selectedIds = emptySet() }) { Text("Delete", color = secondary) }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
             TextButton(onClick = { NetworkDownloadManager.deleteCompleted() }) { Text("Clear completed", color = AccentSkyBlue) }
         }
         if (downloads.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No downloads yet", color = secondary) }
@@ -572,14 +581,20 @@ private fun NetworkDownloadsPage(isDark: Boolean) {
             items(downloads, key = { it.id }) { item ->
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(surface).padding(14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.Checkbox(checked = item.id in selectedIds, onCheckedChange = { checked -> selectedIds = if (checked) selectedIds + item.id else selectedIds - item.id })
                         Column(Modifier.weight(1f)) {
                             Text(item.title, color = textColor, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text(item.status, color = secondary, fontSize = 12.sp)
                         }
-                        TextButton(onClick = { NetworkDownloadManager.delete(item) }) { Text("Delete", color = secondary) }
+                        if (item.status == "Downloading" || item.status == "Queued") {
+                            TextButton(onClick = { NetworkDownloadManager.pause(item) }) { Text("Pause", color = secondary) }
+                        } else if (item.status == "Paused" || item.status.startsWith("Failed")) {
+                            TextButton(onClick = { NetworkDownloadManager.resume(context, item) }) { Text("Resume", color = AccentSkyBlue) }
+                        }
+                        TextButton(onClick = { NetworkDownloadManager.delete(item); selectedIds = selectedIds - item.id }) { Text("Delete", color = secondary) }
                     }
-                    if (item.status == "Downloading") LinearProgressIndicator(progress = { item.progress }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
-                    Text("${formatBytes(item.bytes)} / ${if (item.totalBytes > 0) formatBytes(item.totalBytes) else "size unknown"}  •  ${if (item.bytesPerSecond > 0) "${formatBytes(item.bytesPerSecond)}/s" else "speed calculating"}  •  ${if (item.etaSeconds >= 0) "${item.etaSeconds}s left" else "ETA calculating"}", color = secondary, fontSize = 11.sp)
+                    if (item.status == "Downloading" || item.status == "Queued" || item.status == "Paused") LinearProgressIndicator(progress = { item.progress }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+                    Text("${(item.progress * 100).toInt()}%  •  ${formatBytes(item.bytes)} / ${if (item.totalBytes > 0) formatBytes(item.totalBytes) else "size unknown"}  •  ${if (item.bytesPerSecond > 0) "${formatBytes(item.bytesPerSecond)}/s" else "speed calculating"}  •  ${if (item.etaSeconds >= 0) "${item.etaSeconds}s left" else "ETA calculating"}", color = secondary, fontSize = 11.sp)
                 }
             }
         }
