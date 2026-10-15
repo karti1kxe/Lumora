@@ -1683,7 +1683,13 @@ fun HomeScreen(
                                 }
                             } else null
                             NavigationTab.RECENTS -> if (selectedRecentsFolder != null) { { selectedRecentsFolder = null } } else null
-                            NavigationTab.NETWORK -> null
+                            NavigationTab.NETWORK -> if (showDownloads) {
+                                {
+                                    searchQuery = ""
+                                    isSearchActive = false
+                                    showDownloads = false
+                                }
+                            } else null
                             NavigationTab.PLAYLISTS -> if (selectedPlaylist != null) {
                                 {
                                     searchQuery = ""

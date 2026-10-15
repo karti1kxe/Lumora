@@ -25,7 +25,9 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Download page engine.
  *  - links (YouTube, Instagram, direct files, ... everything yt-dlp supports) are downloaded with yt-dlp, 16 fragments in
- *    parallel; the original file / container is kept (no conversion, no ffmpeg: keeps the app small),
+ *    parallel; the original streams are kept (no conversion, no ffmpeg: keeps the app small). Qualities that exist only
+ *    as separate video + audio streams (1080p60 ... 2160p60 of YouTube) are downloaded as two files and joined without
+ *    re-encoding by [MediaMuxHelper] (Android's MediaMuxer); audio files get their thumbnail embedded as cover art,
  *  - torrent / magnet videos are downloaded with libtorrent4j (only the chosen file),
  *  - the finished file is moved to Movies/Lumora (Music/Lumora for audio) so it appears in the app's library.
  * Progress, speed and the time left are measured here (bytes on disk / verified torrent pieces), not parsed from tool output.
@@ -90,7 +92,8 @@ object DownloadManager {
                 isTorrent = false,
                 title = entry.title,
                 subtitle = entry.subtitle,
-                isAudio = looksAudio(source)
+                isAudio = looksAudio(source),
+                thumbnailUrl = entry.thumbnail?.takeIf { it.startsWith("http") }
             )
         }
         DownloadStore.add(app, item)
@@ -131,7 +134,8 @@ object DownloadManager {
                 isAudio = req.isAudio,
                 totalBytes = req.estimatedBytes,
                 formatSpec = req.formatSpec,
-                container = req.container
+                container = req.container,
+                thumbnailUrl = req.thumbnailUrl
             )
         )
         start(app, id)
@@ -309,6 +313,20 @@ object DownloadManager {
     private fun formatFor(audio: Boolean): String =
         if (audio) "ba[ext=m4a]/ba/b" else "b[height<=1080]/b"
 
+    /** "videoId+audioId" chosen in the options sheet: two separate streams that the app joins itself (MediaMuxer). */
+    private fun splitSpec(item: DownloadItem): Pair<String, String>? {
+        val custom = item.formatSpec ?: return null
+        if (item.isAudio || !custom.contains('+')) return null
+        val v = custom.substringBefore('+').trim()
+        val a = custom.substringAfter('+').substringBefore('/').trim()
+        return if (v.isNotEmpty() && a.isNotEmpty()) v to a else null
+    }
+
+    private fun finished(dir: File, prefix: String): File? =
+        dir.listFiles()
+            ?.filter { it.isFile && it.name.startsWith("$prefix.") && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl") && !it.name.contains(".part-") }
+            ?.maxByOrNull { it.length() }
+
     private suspend fun runLink(app: Context, id: String) {
         val item = DownloadStore.get(id) ?: return
         val dir = linkDir(app, id).apply { mkdirs() }
@@ -316,22 +334,32 @@ object DownloadManager {
         val ready = withContext(Dispatchers.IO) { NetworkStreamResolver.prepareYtDlpForDownload(app) }
         if (!ready) throw IllegalStateException(NetworkStreamResolver.lastError ?: "yt-dlp could not start")
         if (stops.containsKey(id)) return
+        val split = splitSpec(item)
         val format = effectiveFormat(item)
         val pid = processId(id)
 
         val total = AtomicLong(item.totalBytes)
         val mergeNote = AtomicReference<String?>(null)
         val monitor = scope.launch { monitorLoop(app, id, dir, total, mergeNote) }
-        val probe = scope.launch { probeSize(item.source, format, "$pid-probe", total) }
+        val probe = scope.launch { probeSize(item.source, if (split != null) item.formatSpec!! else format, "$pid-probe", total) }
         try {
             withContext(Dispatchers.IO) {
+                fun runOnce() {
+                    if (split != null) {
+                        downloadOnce(item, split.first, dir, pid, mergeNote, "video")
+                        if (stops.containsKey(id)) return
+                        downloadOnce(item, split.second, dir, pid, mergeNote, "audio")
+                    } else {
+                        downloadOnce(item, format, dir, pid, mergeNote, "media")
+                    }
+                }
                 try {
-                    downloadOnce(item, format, dir, pid, mergeNote)
+                    runOnce()
                 } catch (t: Throwable) {
                     // sites change all the time: one more try with the newest yt-dlp before giving up
                     if (stops.containsKey(id)) throw t
                     if (!NetworkStreamResolver.forceYtDlpUpdate(app)) throw t
-                    downloadOnce(item, format, dir, pid, mergeNote)
+                    runOnce()
                 }
             }
         } finally {
@@ -341,10 +369,45 @@ object DownloadManager {
         }
         if (stops.containsKey(id)) return
 
-        val out = dir.listFiles()
-            ?.filter { it.isFile && Regex("^media\\.[A-Za-z0-9]+$").matches(it.name) }
-            ?.maxByOrNull { it.length() }
-            ?: throw IllegalStateException("Nothing was downloaded")
+        val isCancelled = { stops.containsKey(id) }
+        var out: File
+        if (split != null) {
+            val v = finished(dir, "video") ?: throw IllegalStateException("The video part was not downloaded")
+            val a = finished(dir, "audio") ?: throw IllegalStateException("The audio part was not downloaded")
+            DownloadStore.update(app, id, persist = true) {
+                it.copy(status = DownloadStatus.PROCESSING, speedBps = 0L, etaSec = -1L, note = "Merging video and audio…")
+            }
+            val ext = if (v.extension.equals("webm", ignoreCase = true)) "webm" else "mp4"
+            out = File(dir, "media.$ext")
+            withContext(Dispatchers.IO) {
+                try {
+                    MediaMuxHelper.mux(v, a, out, isCancelled)
+                } catch (c: MediaMuxHelper.Cancelled) {
+                    out.delete()
+                    return@withContext
+                } catch (t: Throwable) {
+                    out.delete()
+                    throw IllegalStateException("Could not join video and audio: " + (t.message ?: t.javaClass.simpleName))
+                }
+                v.delete()
+                a.delete()
+            }
+            if (stops.containsKey(id)) return
+        } else {
+            out = dir.listFiles()
+                ?.filter { it.isFile && Regex("^media\\.[A-Za-z0-9]+$").matches(it.name) }
+                ?.maxByOrNull { it.length() }
+                ?: throw IllegalStateException("Nothing was downloaded")
+        }
+
+        if (item.isAudio) {
+            DownloadStore.update(app, id, persist = true) {
+                it.copy(status = DownloadStatus.PROCESSING, speedBps = 0L, etaSec = -1L, note = "Adding cover picture…")
+            }
+            out = withContext(Dispatchers.IO) { addCover(out, item, dir, isCancelled) }
+            if (stops.containsKey(id)) return
+        }
+
         val ext = out.extension
         DownloadStore.update(app, id, persist = true) {
             it.copy(status = DownloadStatus.PROCESSING, speedBps = 0L, etaSec = -1L, note = "Saving to your library…")
@@ -357,11 +420,48 @@ object DownloadManager {
         try { dir.deleteRecursively() } catch (_: Throwable) {}
     }
 
+    /**
+     * Audio downloads keep their thumbnail: the picture is written into the file itself (m4a / mp3) so every player
+     * and this app's own library show it. Never fails the download: without a cover the plain file is saved.
+     */
+    private suspend fun addCover(file: File, item: DownloadItem, dir: File, isCancelled: () -> Boolean): File {
+        val ext = file.extension.lowercase()
+        if (ext != "m4a" && ext != "mp3") return file
+        val bitmap = try {
+            val url = item.thumbnailUrl ?: return file
+            com.example.ui.components.loadRemoteAudioThumbnail(url, 1000)
+        } catch (_: Throwable) { null } ?: return file
+        val cover = MediaMuxHelper.coverJpeg(bitmap) ?: return file
+        val artist = item.subtitle
+        return try {
+            if (ext == "mp3") {
+                MediaMuxHelper.embedMp3Cover(file, cover, item.title, artist)
+                file
+            } else {
+                // a clean (non fragmented) m4a first: the cover can then be added without touching any other data
+                val clean = File(dir, "media_clean.m4a")
+                MediaMuxHelper.remuxAudio(file, clean, isCancelled)
+                if (isCancelled()) { clean.delete(); return file }
+                if (MediaMuxHelper.embedCoverAndTags(clean, cover, item.title, artist)) {
+                    file.delete()
+                    val finalFile = File(dir, "media.m4a")
+                    if (clean.renameTo(finalFile)) finalFile else clean
+                } else {
+                    clean.delete()
+                    file
+                }
+            }
+        } catch (_: Throwable) {
+            File(dir, "media_clean.m4a").delete()
+            file
+        }
+    }
+
     private fun effectiveFormat(item: DownloadItem): String {
         val custom = item.formatSpec
-        // an old saved choice that needs merging ("137+ba") falls back to its video part + any single file
+        // "video+audio" is downloaded as two files (see splitSpec); here it is only used to ask for the size
         return if (custom.isNullOrBlank()) formatFor(item.isAudio)
-        else if (custom.contains('+')) custom.substringBefore('+').substringBefore('/') + "/" + formatFor(item.isAudio)
+        else if (custom.contains('+') && item.isAudio) custom.substringBefore('+').substringBefore('/') + "/" + formatFor(true)
         else custom
     }
 
@@ -370,7 +470,8 @@ object DownloadManager {
         format: String,
         dir: File,
         pid: String,
-        mergeNote: AtomicReference<String?>
+        mergeNote: AtomicReference<String?>,
+        outName: String
     ) {
         val req = YoutubeDLRequest(item.source)
         req.addOption("--no-playlist")
@@ -385,7 +486,7 @@ object DownloadManager {
         req.addOption("-N", 16)
         req.addOption("--http-chunk-size", "10M")
         req.addOption("-f", format)
-        req.addOption("-o", File(dir, "media.%(ext)s").absolutePath)
+        req.addOption("-o", File(dir, "$outName.%(ext)s").absolutePath)
         YoutubeDL.getInstance().execute(req, pid) { _, _, line ->
             val l = line.orEmpty()
             if (l.contains("[Merger]") || l.contains("[VideoRemuxer]") || l.contains("[Fixup")) {

@@ -167,6 +167,7 @@ fun OnlineVideoPanel(
     var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     if (actionTarget != null) lastActionTarget = actionTarget
     var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    var downloadTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     LaunchedEffect(Unit) {
         OnlineMediaLibrary.attach(context)
         st.watchLater = withContext(Dispatchers.IO) { OnlineMediaLibrary.watchLater(context, OnlineMediaLibrary.KIND_VIDEO) }
@@ -558,9 +559,26 @@ fun OnlineVideoPanel(
                     onShare = {
                         shareOnlineLink(context, t.title, t.videoUrl)
                         actionTarget = null
+                    },
+                    onDownload = {
+                        downloadTarget = t
+                        actionTarget = null
                     }
                 )
             }
+        }
+
+        downloadTarget?.let { t ->
+            OnlineDownloadSheet(
+                isDark = isDark,
+                glassBlurTransparency = glassBlurTransparency,
+                url = t.videoUrl,
+                title = t.title,
+                author = t.artist,
+                thumbnailUrl = t.thumbnailUrl,
+                audioOnly = false,
+                onDismiss = { downloadTarget = null }
+            )
         }
 
         playlistTarget?.let { t ->

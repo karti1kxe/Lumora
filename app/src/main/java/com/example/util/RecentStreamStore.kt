@@ -12,7 +12,9 @@ data class RecentStreamEntry(
     val url: String,
     val title: String,
     val subtitle: String?,
-    val playedAt: Long
+    val playedAt: Long,
+    /** Thumbnail of the link: an image URL, or the path of a frame saved from the video (no thumbnail attached). */
+    val thumbnail: String? = null
 ) {
     val isTorrent: Boolean get() = url.startsWith(TorrentLibrary.PATH_PREFIX) || url.startsWith("magnet:", true)
 }
@@ -44,7 +46,8 @@ object RecentStreamStore {
                     url = url,
                     title = o.optString("t").ifBlank { url },
                     subtitle = o.optString("s").ifBlank { null },
-                    playedAt = o.optLong("p", 0L)
+                    playedAt = o.optLong("p", 0L),
+                    thumbnail = o.optString("th").ifBlank { null }
                 )
             }
         } catch (_: Throwable) {
@@ -54,11 +57,29 @@ object RecentStreamStore {
 
     /** Adds (or moves to the top) one played stream. */
     @Synchronized
-    fun record(context: Context, url: String, title: String?, subtitle: String? = null) {
+    fun record(context: Context, url: String, title: String?, subtitle: String? = null, thumbnail: String? = null) {
         if (url.isBlank()) return
+        val old = getAll(context).firstOrNull { it.url == url }
         val list = getAll(context).filter { it.url != url }.toMutableList()
-        list.add(0, RecentStreamEntry(url, title?.takeIf { it.isNotBlank() } ?: url, subtitle?.takeIf { it.isNotBlank() }, System.currentTimeMillis()))
+        list.add(
+            0,
+            RecentStreamEntry(
+                url,
+                title?.takeIf { it.isNotBlank() } ?: url,
+                subtitle?.takeIf { it.isNotBlank() },
+                System.currentTimeMillis(),
+                thumbnail?.takeIf { it.isNotBlank() } ?: old?.thumbnail
+            )
+        )
         save(context, list.take(MAX_ENTRIES))
+    }
+
+    /** Sets the thumbnail of an entry that is already in the list (used when a frame is saved a bit later). */
+    @Synchronized
+    fun setThumbnail(context: Context, url: String, thumbnail: String) {
+        val list = getAll(context)
+        if (list.none { it.url == url }) return
+        save(context, list.map { if (it.url == url) it.copy(thumbnail = thumbnail) else it })
     }
 
     @Synchronized
@@ -80,6 +101,7 @@ object RecentStreamStore {
                     .put("t", e.title)
                     .put("s", e.subtitle ?: "")
                     .put("p", e.playedAt)
+                    .put("th", e.thumbnail ?: "")
             )
         }
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

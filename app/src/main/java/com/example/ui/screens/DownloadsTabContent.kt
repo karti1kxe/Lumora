@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.R
 import com.example.player.AudioPlaybackManager
+import com.example.ui.components.LinkThumbnail
 import com.example.ui.components.SortDirection
 import com.example.ui.components.SortField
 import com.example.ui.components.StyledIcon
@@ -182,11 +183,21 @@ private fun DownloadCard(
             .padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 6.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            StyledIcon(
-                drawableRes = if (done) R.drawable.lumora_play_circle else R.drawable.lumora_download_minimalistic,
-                contentDescription = null,
-                tint = if (failed) Color(0xFFEF4444) else AccentSkyBlue,
-                modifier = Modifier.size(26.dp)
+            // thumbnail attached to the link; a finished video without one shows a frame of the file itself
+            val localUri = if (done && !d.isAudio) d.fileUri?.let { Uri.parse(it) } else null
+            LinkThumbnail(
+                thumbnail = d.thumbnailUrl,
+                localVideoUri = localUri,
+                localVideoPath = if (localUri != null) d.filePath else null,
+                modifier = Modifier.size(width = 64.dp, height = 40.dp).clip(RoundedCornerShape(10.dp)),
+                fallback = {
+                    StyledIcon(
+                        drawableRes = if (done) R.drawable.lumora_play_circle else R.drawable.lumora_download_minimalistic,
+                        contentDescription = null,
+                        tint = if (failed) Color(0xFFEF4444) else AccentSkyBlue,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
             )
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {

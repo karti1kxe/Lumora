@@ -150,6 +150,7 @@ fun OnlineMusicPanel(
     var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     if (actionTarget != null) lastActionTarget = actionTarget
     var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    var downloadTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var watchLaterTracks by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
     var hiddenVersion by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) {
@@ -765,9 +766,26 @@ fun OnlineMusicPanel(
                     onShare = {
                         shareOnlineLink(context, t.title, t.videoUrl)
                         actionTarget = null
+                    },
+                    onDownload = {
+                        downloadTarget = t
+                        actionTarget = null
                     }
                 )
             }
+        }
+
+        downloadTarget?.let { t ->
+            OnlineDownloadSheet(
+                isDark = isDark,
+                glassBlurTransparency = glassBlurTransparency,
+                url = t.videoUrl,
+                title = t.title,
+                author = t.artist,
+                thumbnailUrl = t.thumbnailUrl,
+                audioOnly = true,
+                onDismiss = { downloadTarget = null }
+            )
         }
 
         playlistTarget?.let { t ->

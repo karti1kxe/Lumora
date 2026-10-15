@@ -1,13 +1,18 @@
 package com.example.util
 
 import android.content.Context
+import android.os.Build
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-/** One selectable quality of a link (video or audio) as the yt-dlp format list reports it. */
+/**
+ * One selectable quality of a link (video or audio) as the yt-dlp format list reports it.
+ * [id] is a single yt-dlp format id, or "videoId+audioId" when the video and the sound are separate streams: the app
+ * downloads both and joins them itself with Android's built-in MediaMuxer (no ffmpeg, no re-encoding).
+ */
 data class FormatOption(
     val id: String,
     val label: String,
@@ -23,7 +28,8 @@ data class LinkInfo(
     val uploader: String?,
     val durationSec: Long,
     val videoFormats: List<FormatOption>,
-    val audioFormats: List<FormatOption>
+    val audioFormats: List<FormatOption>,
+    val thumbnailUrl: String? = null
 )
 
 /** What the user chose in the download options sheet. */
@@ -36,7 +42,9 @@ data class DownloadRequest(
     val formatSpec: String?,
     /** Output container (mp4 / mkv / webm for video, mp3 / m4a / opus / wav for audio); null = default. */
     val container: String?,
-    val estimatedBytes: Long
+    val estimatedBytes: Long,
+    /** Cover / thumbnail of the link (embedded into downloaded audio, shown on the Download page). */
+    val thumbnailUrl: String? = null
 )
 
 /** Loads the quality list of a link with yt-dlp (used by the download options sheet). */
@@ -75,6 +83,10 @@ object DownloadProbe {
         // best candidate per quality step (height / fps / codec family)
         val videoBest = LinkedHashMap<String, Pair<Double, FormatOption>>()
         val audioBest = LinkedHashMap<String, Pair<Double, FormatOption>>()
+        // video-only streams (the high qualities of YouTube) and the best audio per container, joined later by the app
+        val videoOnly = ArrayList<VideoOnly>()
+        var bestM4a: AudioOnly? = null
+        var bestWebm: AudioOnly? = null
 
         if (arr != null) {
             for (i in 0 until arr.length()) {
@@ -100,9 +112,23 @@ object DownloadProbe {
                 if (size <= 0L) size = f.optLong("filesize_approx", 0L)
                 if (size <= 0L && tbr > 0.0 && duration > 0.0) size = (tbr * 125.0 * duration).toLong()
 
+                val protocol = str(f, "protocol")
+                val plainHttp = protocol.isEmpty() || protocol == "https" || protocol == "http" || protocol == "http_dash_segments"
+                if (hasV && !hasA) {
+                    if (plainHttp && h > 0) {
+                        videoOnly.add(VideoOnly(id, ext, h, w, fps, codecFamily(vcodec), size, if (tbr > 0.0) tbr else size.toDouble()))
+                    }
+                    continue
+                }
+                if (hasA && !hasV && plainHttp) {
+                    val kbpsNow = if (abr > 0.0) abr else tbr
+                    val cand = AudioOnly(id, ext, kbpsNow, size)
+                    val curM4a = bestM4a
+                    val curWebm = bestWebm
+                    if (ext == "m4a" && (curM4a == null || kbpsNow > curM4a.kbps)) bestM4a = cand
+                    if ((ext == "webm" || ext == "opus") && (curWebm == null || kbpsNow > curWebm.kbps)) bestWebm = cand
+                }
                 if (hasV) {
-                    // video-only formats would need ffmpeg to be merged with audio: not offered
-                    if (!hasA) continue
                     val family = codecFamily(vcodec)
                     val fpsPart = if (fps > 30.0) fps.toInt().toString() else ""
                     val label = if (h > 0) "${h}p$fpsPart" + (if (w > 0) " (${w}x$h)" else "")
@@ -122,6 +148,32 @@ object DownloadProbe {
                 }
             }
         }
+        // every height / frame rate that only exists as separate video + audio streams becomes one selectable quality
+        val m4aAudio = bestM4a
+        val webmAudio = bestWebm
+        val haveKeys = videoBest.values.map { heightOf(it.second.label) to fpsOf(it.second.label) }.toHashSet()
+        val groups = videoOnly.groupBy { it.height to (if (it.fps > 30.0) it.fps.toInt() else 0) }
+        for ((key, list) in groups) {
+            if (key in haveKeys) continue
+            val pick = list
+                .mapNotNull { v ->
+                    val isMp4 = v.ext == "mp4" || v.ext == "m4v"
+                    val isWebm = v.ext == "webm"
+                    when {
+                        isMp4 && v.family == "AV1" && Build.VERSION.SDK_INT < 34 -> null
+                        isMp4 && m4aAudio != null -> Triple(v, m4aAudio, "mp4")
+                        isWebm && (v.family == "VP9" || v.family == "VP8") && webmAudio != null -> Triple(v, webmAudio, "webm")
+                        else -> null
+                    }
+                }
+                .minWithOrNull(compareBy<Triple<VideoOnly, AudioOnly, String>> { familyRank(it.first.family) }.thenByDescending { it.first.score })
+                ?: continue
+            val (v, a, container) = pick
+            val fpsPart = if (v.fps > 30.0) v.fps.toInt().toString() else ""
+            val label = "${v.height}p$fpsPart" + (if (v.width > 0) " (${v.width}x${v.height})" else "")
+            val total = if (v.size > 0L && a.size > 0L) v.size + a.size else 0L
+            videoBest["m|${key.first}|${key.second}"] = v.score to FormatOption(v.id + "+" + a.id, label, container, v.family, total, true)
+        }
         video.addAll(
             videoBest.values.map { it.second }.sortedWith(
                 compareByDescending<FormatOption> { heightOf(it.label) }
@@ -135,8 +187,24 @@ object DownloadProbe {
             uploader = (str(root, "uploader").ifBlank { str(root, "channel") }).ifBlank { null },
             durationSec = duration.toLong(),
             videoFormats = video,
-            audioFormats = audio
+            audioFormats = audio,
+            thumbnailUrl = str(root, "thumbnail").ifBlank { null }
         )
+    }
+
+    private class VideoOnly(
+        val id: String, val ext: String, val height: Int, val width: Int, val fps: Double,
+        val family: String, val size: Long, val score: Double
+    )
+
+    private class AudioOnly(val id: String, val ext: String, val kbps: Double, val size: Long)
+
+    /** Smaller = preferred: H.264 plays everywhere, VP9 is the next best (1440p / 2160p exist only as VP9 / AV1). */
+    private fun familyRank(family: String): Int = when (family) {
+        "AVC" -> 0
+        "VP9" -> 1
+        "HEVC" -> 2
+        else -> 3
     }
 
     private fun heightOf(label: String): Int = Regex("^(\\d+)p").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 0

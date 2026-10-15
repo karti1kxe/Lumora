@@ -33,7 +33,9 @@ data class DownloadItem(
     /** yt-dlp "-f" expression chosen in the options sheet (null = default quality). */
     val formatSpec: String? = null,
     /** Chosen output container (mp4 / mkv / webm / mp3 / m4a / opus / wav), null = default. */
-    val container: String? = null
+    val container: String? = null,
+    /** Cover / thumbnail link of the media (embedded into audio files, shown on the Download page). */
+    val thumbnailUrl: String? = null
 ) {
     val isActive: Boolean
         get() = status == DownloadStatus.QUEUED || status == DownloadStatus.DOWNLOADING || status == DownloadStatus.PROCESSING
@@ -158,7 +160,8 @@ object DownloadStore {
                     fileUri = o.optString("fu").ifBlank { null },
                     createdAt = o.optLong("c", 0L),
                     formatSpec = o.optString("fmt").ifBlank { null },
-                    container = o.optString("cont").ifBlank { null }
+                    container = o.optString("cont").ifBlank { null },
+                    thumbnailUrl = o.optString("th").ifBlank { null }
                 )
             }
         } catch (_: Throwable) {
@@ -186,6 +189,7 @@ object DownloadStore {
                     .put("c", e.createdAt)
                     .put("fmt", e.formatSpec ?: "")
                     .put("cont", e.container ?: "")
+                    .put("th", e.thumbnailUrl ?: "")
             )
         }
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

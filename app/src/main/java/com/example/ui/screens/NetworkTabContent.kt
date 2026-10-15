@@ -55,6 +55,7 @@ import com.example.R
 import com.example.player.AudioPlaybackManager
 import com.example.ui.components.toAudioTrackItem
 import com.example.ui.components.DownloadOptionsSheet
+import com.example.ui.components.LinkThumbnail
 import com.example.ui.components.PlaylistFilterTabs
 import com.example.ui.components.StyledIcon
 import com.example.ui.theme.AccentGradient
@@ -71,6 +72,7 @@ import com.example.util.DownloadManager
 import com.example.util.NetworkStreamResolver
 import com.example.util.RecentStreamEntry
 import com.example.util.RecentStreamStore
+import com.example.util.RecentThumbnails
 import com.example.util.TorrentLibrary
 import com.example.util.TorrentOpenResult
 import com.example.util.TorrentSource
@@ -205,7 +207,7 @@ fun NetworkTabContent(
                 if (stream.tracks.isNotEmpty()) {
                     // Spotify & playlist links: queue the tracks, each is matched to its audio when it starts.
                     val queue = stream.tracks.map { it.toAudioTrackItem() }
-                    RecentStreamStore.record(context, normalized, stream.title, stream.uploader)
+                    RecentStreamStore.record(context, normalized, stream.title, stream.uploader, stream.thumbnailUrl)
                     try {
                         AudioPlaybackManager.openFullScreen()
                         AudioPlaybackManager.playTrack(context = context, track = queue.first(), newQueue = queue)
@@ -226,7 +228,7 @@ fun NetworkTabContent(
                     format = "STREAM",
                     thumbnailUrl = stream.thumbnailUrl
                 )
-                RecentStreamStore.record(context, normalized, stream.title, stream.uploader)
+                RecentStreamStore.record(context, normalized, stream.title, stream.uploader, stream.thumbnailUrl)
                 try {
                     AudioPlaybackManager.openFullScreen()
                     AudioPlaybackManager.playTrack(context = context, track = track, newQueue = listOf(track))
@@ -248,6 +250,11 @@ fun NetworkTabContent(
                 channelName = stream.uploader,
                 isNetworkStream = true
             )
+            RecentStreamStore.record(context, normalized, stream.title, stream.uploader, stream.thumbnailUrl)
+            // no thumbnail attached to this video: a frame from a random point of it is used instead
+            if (stream.thumbnailUrl.isNullOrBlank() && stream.videoUrl.startsWith("http")) {
+                RecentThumbnails.captureRandomFrame(context, normalized, stream.videoUrl, stream.durationSec)
+            }
             onPlayVideo(item, listOf(item))
         }
     }
@@ -494,6 +501,7 @@ fun NetworkTabContent(
             url = entry.url,
             initialTitle = entry.title,
             initialAuthor = entry.subtitle,
+            initialThumbnail = entry.thumbnail?.takeIf { it.startsWith("http") },
             startWithAudio = isMusic,
             onDismiss = { optionsEntry = null },
             onDownload = { request ->
@@ -537,11 +545,17 @@ private fun RecentStreamRow(
             .padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        StyledIcon(
-            drawableRes = R.drawable.lumora_link,
-            contentDescription = null,
-            tint = secondaryText.copy(alpha = 0.9f),
-            modifier = Modifier.size(22.dp)
+        LinkThumbnail(
+            thumbnail = entry.thumbnail,
+            modifier = Modifier.size(width = 64.dp, height = 40.dp).clip(RoundedCornerShape(10.dp)),
+            fallback = {
+                StyledIcon(
+                    drawableRes = R.drawable.lumora_link,
+                    contentDescription = null,
+                    tint = secondaryText.copy(alpha = 0.9f),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {

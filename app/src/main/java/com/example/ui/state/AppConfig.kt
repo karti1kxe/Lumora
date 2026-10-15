@@ -1458,7 +1458,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 com.example.util.RecentStreamStore.record(
                     getApplication<android.app.Application>(), video.path, video.displayName,
-                    if (video.isTorrentStream) "Torrent" else video.channelName
+                    if (video.isTorrentStream) "Torrent" else video.channelName,
+                    video.thumbnailUrl
                 )
             } catch (_: Throwable) {}
         }

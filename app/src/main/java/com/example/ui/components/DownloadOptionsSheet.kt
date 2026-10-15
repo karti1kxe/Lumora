@@ -122,14 +122,18 @@ fun DownloadOptionsSheet(
     initialAuthor: String?,
     startWithAudio: Boolean,
     onDismiss: () -> Unit,
-    onDownload: (DownloadRequest) -> Unit
+    onDownload: (DownloadRequest) -> Unit,
+    /** true = only audio can be downloaded (opened from the online audio player): no Video tab. */
+    audioOnly: Boolean = false,
+    /** Thumbnail of the link, embedded into a downloaded audio as its cover picture. */
+    initialThumbnail: String? = null
 ) {
     val context = LocalContext.current
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
     val fieldBg = if (isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9)
 
-    var tab by remember { mutableStateOf(if (startWithAudio) 0 else 1) }
+    var tab by remember { mutableStateOf(if (startWithAudio || audioOnly) 0 else 1) }
     var title by remember { mutableStateOf(initialTitle) }
     var titleEdited by remember { mutableStateOf(false) }
     var author by remember { mutableStateOf(initialAuthor.orEmpty()) }
@@ -175,7 +179,8 @@ fun DownloadOptionsSheet(
             isAudio = isAudio,
             formatSpec = spec,
             container = null,
-            estimatedBytes = estimate
+            estimatedBytes = estimate,
+            thumbnailUrl = info?.thumbnailUrl ?: initialThumbnail
         )
     }
 
@@ -212,13 +217,17 @@ fun DownloadOptionsSheet(
         }
 
         // ---- Audio | Video with the app's gradient liquid underline ----
-        PlaylistFilterTabs(
-            tabs = listOf("Audio", "Video"),
-            selectedIndex = tab,
-            isDark = isDark,
-            onSelect = { tab = it },
-            modifier = Modifier.padding(top = 14.dp, bottom = 12.dp)
-        )
+        if (audioOnly) {
+            Spacer(modifier = Modifier.height(14.dp))
+        } else {
+            PlaylistFilterTabs(
+                tabs = listOf("Audio", "Video"),
+                selectedIndex = tab,
+                isDark = isDark,
+                onSelect = { tab = it },
+                modifier = Modifier.padding(top = 14.dp, bottom = 12.dp)
+            )
+        }
 
         // ---- name ----
         OutlinedTextField(
@@ -271,7 +280,7 @@ fun DownloadOptionsSheet(
                 color = secondaryText
             )
             options.isEmpty() -> Text(text = "Only the default quality is available for this link.", fontSize = 12.sp, color = secondaryText)
-            else -> Text(text = "Tap to choose another quality (${options.size} available)", fontSize = 12.sp, color = secondaryText)
+            else -> Text(text = "Tap to choose a quality (${options.size} available, sizes are approximate)", fontSize = 12.sp, color = secondaryText)
         }
 
         // ---- where it is saved ----
