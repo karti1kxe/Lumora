@@ -323,6 +323,157 @@ object TorrentStreamEngine {
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Downloads (Download page): a whole file is downloaded into a folder of the app, independent of the streamed torrent
+    // ---------------------------------------------------------------------------------------------
+
+    /** Progress of one downloading torrent file, counted in verified pieces. */
+    class TorrentDlProgress(val doneBytes: Long, val totalBytes: Long, val complete: Boolean)
+
+    private class DlTorrent(
+        val infoHash: String,
+        val info: TorrentInfo,
+        val handle: TorrentHandle,
+        val saveDir: File
+    ) {
+        val wanted: MutableSet<Int> = java.util.Collections.synchronizedSet(HashSet<Int>())
+    }
+
+    private val dlTorrents = java.util.concurrent.ConcurrentHashMap<String, DlTorrent>()
+
+    /** Torrent info (name + files) of a magnet / .torrent link WITHOUT creating a playlist: used by the Download page. */
+    suspend fun fetchSummary(context: Context, source: TorrentSource): Pair<TorrentSummary?, String?> = withContext(Dispatchers.IO) {
+        val app = context.applicationContext
+        try {
+            val bytes: ByteArray = when (source) {
+                is TorrentSource.Bytes -> source.data
+                is TorrentSource.LocalFile -> readUriBytes(app, source.uri)
+                    ?: return@withContext Pair<TorrentSummary?, String?>(null, "Could not read the torrent file")
+                is TorrentSource.RemoteFile -> downloadBytes(source.url)
+                    ?: return@withContext Pair<TorrentSummary?, String?>(null, "Could not download the torrent file")
+                is TorrentSource.Magnet -> {
+                    val wanted = magnetInfoHash(source.uri)
+                    val saved = wanted?.let { TorrentLibrary.loadBytes(app, it) }
+                    saved ?: fetchMagnet(app, source.uri)
+                        ?: return@withContext Pair<TorrentSummary?, String?>(null, "Could not get the torrent info. No peers found or no internet.")
+                }
+            }
+            val info = try { TorrentInfo(bytes) } catch (t: Throwable) {
+                Log.w(TAG, "invalid torrent data", t)
+                return@withContext Pair<TorrentSummary?, String?>(null, "This is not a valid torrent")
+            }
+            val summary = summaryOf(info)
+            TorrentLibrary.save(app, summary, bytes)
+            Pair<TorrentSummary?, String?>(summary, null)
+        } catch (t: Throwable) {
+            Log.e(TAG, "fetchSummary failed", t)
+            Pair<TorrentSummary?, String?>(null, t.message?.takeIf { it.isNotBlank() }?.take(120) ?: "Could not open the torrent")
+        }
+    }
+
+    private fun setDownloadPriority(h: TorrentHandle, fileIndex: Int) {
+        val p = playPriority ?: return
+        try { h.filePriority(fileIndex, p) } catch (_: Throwable) {}
+    }
+
+    /**
+     * Starts (or continues) downloading ONE file of a saved torrent into [saveDir]; every other file is skipped.
+     * Several files of the same torrent share one torrent handle and the same [saveDir].
+     */
+    fun beginDownload(context: Context, infoHash: String, fileIndex: Int, saveDir: File): Boolean {
+        try {
+            synchronized(lock) {
+                val existing = dlTorrents[infoHash]
+                if (existing != null) {
+                    if (fileIndex < 0 || fileIndex >= existing.info.files().numFiles()) return false
+                    existing.wanted.add(fileIndex)
+                    setDownloadPriority(existing.handle, fileIndex)
+                    return true
+                }
+                val app = context.applicationContext
+                val sm = ensureSession(app) ?: return false
+                val bytes = TorrentLibrary.loadBytes(app, infoHash) ?: return false
+                val info = TorrentInfo(bytes)
+                val n = info.files().numFiles()
+                if (fileIndex < 0 || fileIndex >= n) return false
+                // a stream of the same torrent would clash with the download
+                if (active?.infoHash == infoHash) dropActive(sm)
+                saveDir.mkdirs()
+                sm.download(info, saveDir)
+                var handle: TorrentHandle? = null
+                var waited = 0
+                while (waited < 5000) {
+                    val h = sm.find(info.infoHash())
+                    if (h != null && h.isValid) { handle = h; break }
+                    Thread.sleep(50)
+                    waited += 50
+                }
+                val found = handle ?: return false
+                for (i in 0 until n) {
+                    if (i != fileIndex) {
+                        try { found.filePriority(i, Priority.IGNORE) } catch (_: Throwable) {}
+                    }
+                }
+                setDownloadPriority(found, fileIndex)
+                val dl = DlTorrent(infoHash, info, found, saveDir)
+                dl.wanted.add(fileIndex)
+                dlTorrents[infoHash] = dl
+                return true
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "beginDownload failed", t)
+            return false
+        }
+    }
+
+    fun downloadProgress(infoHash: String, fileIndex: Int): TorrentDlProgress? {
+        val dl = dlTorrents[infoHash] ?: return null
+        try {
+            val fs = dl.info.files()
+            val size = fs.fileSize(fileIndex)
+            if (size <= 0L) return TorrentDlProgress(0L, 0L, true)
+            val pieceLen = dl.info.pieceLength().toLong()
+            val numPieces = dl.info.numPieces()
+            val offset = fs.fileOffset(fileIndex)
+            val first = (offset / pieceLen).toInt()
+            val last = ((offset + size - 1) / pieceLen).toInt().coerceAtMost(numPieces - 1)
+            var have = 0L
+            for (p in first..last) {
+                if (dl.handle.havePiece(p)) have++
+            }
+            val totalPieces = (last - first + 1).toLong()
+            val complete = have >= totalPieces
+            val done = if (complete) size else minOf(size, have * pieceLen)
+            return TorrentDlProgress(done, size, complete)
+        } catch (_: Throwable) {
+            return null
+        }
+    }
+
+    /** The downloaded file on disk (only meaningful once [downloadProgress] says it is complete). */
+    fun downloadedFile(infoHash: String, fileIndex: Int): File? {
+        val dl = dlTorrents[infoHash] ?: return null
+        return try {
+            File(dl.saveDir, dl.info.files().filePath(fileIndex)).takeIf { it.exists() }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** Stops downloading one file; the torrent leaves the session when its last wanted file is released. */
+    fun endDownload(infoHash: String, fileIndex: Int) {
+        synchronized(lock) {
+            val dl = dlTorrents[infoHash] ?: return
+            dl.wanted.remove(fileIndex)
+            if (dl.wanted.isEmpty()) {
+                dlTorrents.remove(infoHash)
+                try { session?.remove(dl.handle) } catch (_: Throwable) {}
+            } else {
+                try { dl.handle.filePriority(fileIndex, Priority.IGNORE) } catch (_: Throwable) {}
+            }
+        }
+    }
+
     /** Stops the torrent session and deletes the downloaded data (called when the app closes). */
     fun release() {
         synchronized(lock) {
@@ -330,6 +481,8 @@ object TorrentStreamEngine {
             try { if (sm != null) dropActive(sm) } catch (_: Throwable) {}
             try { server?.close() } catch (_: Throwable) {}
             server = null
+            // Videos of the Download page are still downloading: keep the session (the download service keeps the app alive).
+            if (dlTorrents.isNotEmpty()) return
             session = null
             try { sm?.stop() } catch (_: Throwable) {}
             val root = dataRoot

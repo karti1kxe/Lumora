@@ -227,6 +227,8 @@ dependencies {
   implementation(libs.mpv.android.lib)
   // yt-dlp for Android (Network tab): resolves YouTube and the other sites yt-dlp supports to playable stream URLs.
   implementation(libs.youtubedl.android.library)
+  // ffmpeg module of youtubedl-android: merges video + audio of the Download page (started by reflection in DownloadManager).
+  implementation(libs.youtubedl.android.ffmpeg)
   // libtorrent4j (github.com/aldenml/libtorrent4j): Torrent / magnet video streaming (util/TorrentStreamEngine.kt).
   // The Java API plus one native library per ABI (the APK splits above pick the matching one).
   implementation(libs.libtorrent4j)

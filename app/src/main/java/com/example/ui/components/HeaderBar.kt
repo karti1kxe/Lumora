@@ -28,7 +28,6 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SortByAlpha
-import androidx.compose.material.icons.outlined.Download
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -64,9 +63,9 @@ fun HeaderBar(
     onBackClick: (() -> Unit)? = null,
     onSearchClick: (() -> Unit)? = null,
     onSortClick: (() -> Unit)? = null,
-    onDownloadClick: (() -> Unit)? = null,
     onCopyClick: (() -> Unit)? = null,
     onShareClick: (() -> Unit)? = null,
+    onDownloadClick: (() -> Unit)? = null,
     backgroundColor: Color? = null,
     showBorder: Boolean = true,
     elevation: Dp = 6.dp
@@ -198,14 +197,6 @@ fun HeaderBar(
                     )
                 }
                 Spacer(modifier = Modifier.width(2.dp))
-            } else if (onDownloadClick != null) {
-                Box(
-                    modifier = Modifier.size(38.dp).testTag("download_button").clip(CircleShape).bounceClick(onClick = onDownloadClick),
-                    contentAlignment = Alignment.Center
-                ) {
-                    StyledIcon(imageVector = Icons.Outlined.Download, contentDescription = "Downloads", tint = textColor, modifier = Modifier.size(22.dp))
-                }
-                Spacer(modifier = Modifier.width(2.dp))
             } else if (onSortClick != null) {
                 Box(
                     modifier = Modifier
@@ -218,6 +209,23 @@ fun HeaderBar(
                     StyledIcon(
                         imageVector = Icons.Outlined.SortByAlpha,
                         contentDescription = "Sort & View Options",
+                        tint = textColor,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(2.dp))
+            } else if (onDownloadClick != null) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("download_button")
+                        .clip(CircleShape)
+                        .bounceClick(onClick = onDownloadClick),
+                    contentAlignment = Alignment.Center
+                ) {
+                    StyledIcon(
+                        drawableRes = R.drawable.lumora_download_minimalistic,
+                        contentDescription = "Downloads",
                         tint = textColor,
                         modifier = Modifier.size(22.dp)
                     )

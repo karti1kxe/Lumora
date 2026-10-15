@@ -320,7 +320,10 @@ fun HomeScreen(
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var showLastWatchedDialog by remember { mutableStateOf(false) }
     var showSortAndViewDialog by remember { mutableStateOf(false) }
-    var showNetworkDownloads by rememberSaveable { mutableStateOf(false) }
+    // Network tab: the download button of its header opens the Download page (same header, same tab slot)
+    var showDownloads by rememberSaveable { mutableStateOf(false) }
+    var downloadsSortField by remember { mutableStateOf(SortField.DATE) }
+    var downloadsSortDirection by remember { mutableStateOf(SortDirection.DESCENDING) }
     var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     val searchFocusRequester = remember { FocusRequester() }
@@ -365,11 +368,6 @@ fun HomeScreen(
 
     BackHandler(enabled = effectiveSelectedTab != NavigationTab.HOME && activeTabs.contains(NavigationTab.HOME)) {
         currentBottomTab = NavigationTab.HOME
-    }
-    BackHandler(enabled = effectiveSelectedTab == NavigationTab.NETWORK && showNetworkDownloads) {
-        showNetworkDownloads = false
-        isSearchActive = false
-        searchQuery = ""
     }
 
     // Per-Tab Sort & View Options State (persisted across app restarts, decoupled for folder vs content)
@@ -481,6 +479,14 @@ fun HomeScreen(
     var isInsideRecentsFolder by remember { mutableStateOf(false) }
     var isInsidePlaylistDetail by remember { mutableStateOf(selectedPlaylist != null) }
 
+    LaunchedEffect(effectiveSelectedTab) {
+        if (effectiveSelectedTab != NavigationTab.NETWORK) showDownloads = false
+    }
+    BackHandler(enabled = effectiveSelectedTab == NavigationTab.NETWORK && showDownloads) {
+        showDownloads = false
+        searchQuery = ""
+        isSearchActive = false
+    }
     BackHandler(enabled = effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder != null) {
         searchQuery = ""
         isSearchActive = false
@@ -1621,7 +1627,7 @@ fun HomeScreen(
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Online" else (currentFolder?.name ?: AppStrings.getTitle(lang))
                         NavigationTab.MUSIC -> selectedMusicFolder?.name ?: "Music & Audio"
                         NavigationTab.RECENTS -> selectedRecentsFolder?.name ?: "Recently Played"
-                        NavigationTab.NETWORK -> if (showNetworkDownloads) "Downloads" else "Network"
+                        NavigationTab.NETWORK -> if (showDownloads) "Download" else "Network"
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.name ?: "Playlists"
                     }
                     val headerSubtitle = when (effectiveSelectedTab) {
@@ -1644,7 +1650,7 @@ fun HomeScreen(
                         NavigationTab.RECENTS -> selectedRecentsFolder?.let {
                             "${it.records.size} video${if (it.records.size != 1) "s" else ""} in folder"
                         } ?: "Resume your watch history"
-                        NavigationTab.NETWORK -> if (showNetworkDownloads) "Your downloads" else "Play links from the internet"
+                        NavigationTab.NETWORK -> if (showDownloads) "Download videos" else "Play links from the internet"
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.let {
                             val count = it.videoPaths.size
                             val type = if (it.isAudio) "Audio" else "Video"
@@ -1677,7 +1683,7 @@ fun HomeScreen(
                                 }
                             } else null
                             NavigationTab.RECENTS -> if (selectedRecentsFolder != null) { { selectedRecentsFolder = null } } else null
-                            NavigationTab.NETWORK -> if (showNetworkDownloads) { { showNetworkDownloads = false; isSearchActive = false; searchQuery = "" } } else null
+                            NavigationTab.NETWORK -> null
                             NavigationTab.PLAYLISTS -> if (selectedPlaylist != null) {
                                 {
                                     searchQuery = ""
@@ -1691,8 +1697,14 @@ fun HomeScreen(
                             isSearchActive = !isSearchActive
                             if (!isSearchActive) searchQuery = ""
                         },
-                        onSortClick = if (effectiveSelectedTab == NavigationTab.NETWORK && !showNetworkDownloads) null else { { showSortAndViewDialog = true } },
-                        onDownloadClick = if (effectiveSelectedTab == NavigationTab.NETWORK && !showNetworkDownloads) { { showNetworkDownloads = true; isSearchActive = false; searchQuery = "" } } else null,
+                        onSortClick = if (effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads) null else { { showSortAndViewDialog = true } },
+                        onDownloadClick = if (effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads) {
+                            {
+                                searchQuery = ""
+                                isSearchActive = false
+                                showDownloads = true
+                            }
+                        } else null,
                         onSettingsClick = { showSettingsSheet = true }
                     )
                 }
@@ -1727,7 +1739,7 @@ fun HomeScreen(
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Search videos, channels online..." else if (currentFolder != null) "Search in ${currentFolder.name}..." else "Search videos, or /playlist (e.g. /Op Anime)..."
                         NavigationTab.MUSIC -> if (selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) "Search songs, albums, artists online..." else "Search songs, albums, artists..."
                         NavigationTab.RECENTS -> "Search watch history..."
-                        NavigationTab.NETWORK -> "Enter stream URL..."
+                        NavigationTab.NETWORK -> if (showDownloads) "Search downloads..." else "Enter stream URL..."
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.let { "Search in ${it.name}..." } ?: "Search playlists..."
                     }
                     Box(
@@ -1899,13 +1911,27 @@ fun HomeScreen(
                         )
                     }
                     NavigationTab.NETWORK -> {
-                        NetworkTabContent(
-                            isDark = isDark,
-                            onPlayVideo = onPlayVideo,
-                            showDownloads = showNetworkDownloads,
-                            onOpenDownloads = { showNetworkDownloads = true },
-                            modifier = Modifier.fillMaxWidth().weight(1f)
-                        )
+                        if (showDownloads) {
+                            DownloadsTabContent(
+                                isDark = isDark,
+                                searchQuery = searchQuery,
+                                sortField = downloadsSortField,
+                                sortDirection = downloadsSortDirection,
+                                onPlayVideo = onPlayVideo,
+                                modifier = Modifier.fillMaxWidth().weight(1f)
+                            )
+                        } else {
+                            NetworkTabContent(
+                                isDark = isDark,
+                                onPlayVideo = onPlayVideo,
+                                modifier = Modifier.fillMaxWidth().weight(1f),
+                                onOpenDownloads = {
+                                    searchQuery = ""
+                                    isSearchActive = false
+                                    showDownloads = true
+                                }
+                            )
+                        }
                     }
                     NavigationTab.PLAYLISTS -> {
                         CustomPlaylistsTabContent(
@@ -3319,8 +3345,20 @@ fun HomeScreen(
                 )
             }
 
+            // D0. Sort & View of the Download page
+            if (showSortAndViewDialog && effectiveSelectedTab == NavigationTab.NETWORK && showDownloads) {
+                DownloadSortDialog(
+                    isDark = isDark,
+                    sortField = downloadsSortField,
+                    sortDirection = downloadsSortDirection,
+                    onSortFieldChange = { downloadsSortField = it },
+                    onSortDirectionChange = { downloadsSortDirection = it },
+                    onDismiss = { showSortAndViewDialog = false }
+                )
+            }
+
             // D. Sort & View Options Liquid Glass Popup
-            if (showSortAndViewDialog) {
+            if (showSortAndViewDialog && !(effectiveSelectedTab == NavigationTab.NETWORK && showDownloads)) {
                 val isInsideFolder = when (effectiveSelectedTab) {
                     NavigationTab.HOME -> currentFolder != null || activeViewMode == ViewMode.LIBRARY
                     NavigationTab.MUSIC -> isInsideMusicFolder || activeViewMode == ViewMode.LIBRARY

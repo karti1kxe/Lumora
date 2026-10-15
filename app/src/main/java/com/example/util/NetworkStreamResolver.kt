@@ -247,6 +247,16 @@ object NetworkStreamResolver {
         }
     }
 
+    /** Download page: starts yt-dlp (and refreshes it when it is old) before a download begins. */
+    internal fun prepareYtDlpForDownload(context: Context): Boolean {
+        if (!ensureYtDlp(context)) return false
+        updateYtDlp(context, force = false)
+        return true
+    }
+
+    /** Download page: one forced yt-dlp update after a failed attempt (sites change, old yt-dlp versions break). */
+    internal fun forceYtDlpUpdate(context: Context): Boolean = updateYtDlp(context, force = true)
+
     private fun resolveWithYtDlp(context: Context, url: String): NetworkStream? {
         if (!ensureYtDlp(context)) return null
         updateYtDlp(context, force = false)
