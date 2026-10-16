@@ -13,34 +13,36 @@ import kotlinx.coroutines.CancellationException
 /** Turns a plugin's stream into something the app's own player / playlists / downloader understand. */
 object MediaPlayback {
 
-    /** Prefer adaptive streaming when a provider offers it; fall back to direct media files. */
-    fun pickBest(streams: List<MediaStream>): MediaStream? {
-        fun rank(s: MediaStream): Int {
-            val path = s.link.substringBefore('?').substringBefore('#').lowercase()
-            val type = s.type.lowercase()
-            return when {
-                type == "m3u8" || type == "hls" || path.endsWith(".m3u8") -> 0
-                type == "mpd" || type == "dash" || path.endsWith(".mpd") -> 1
-                type == "mp4" || path.endsWith(".mp4") -> 2
-                type == "webm" || path.endsWith(".webm") -> 3
-                type == "mkv" || path.endsWith(".mkv") -> 4
-                else -> 5
-            }
+    private fun rank(s: MediaStream): Int {
+        val path = s.link.substringBefore('?').substringBefore('#').lowercase()
+        val type = s.type.lowercase()
+        return when {
+            type == "m3u8" || type == "hls" || path.endsWith(".m3u8") -> 0
+            type == "mpd" || type == "dash" || path.endsWith(".mpd") -> 1
+            type == "mp4" || path.endsWith(".mp4") -> 2
+            type == "webm" || path.endsWith(".webm") -> 3
+            type == "mkv" || path.endsWith(".mkv") -> 4
+            else -> 5
         }
-        return streams.minByOrNull { rank(it) }
     }
+
+    /** Prefer adaptive streaming when a provider offers it; fall back to direct media files. */
+    fun pickBest(streams: List<MediaStream>): MediaStream? = streams.minByOrNull { rank(it) }
 
     /** Asks the plugin for the playable link of [link]. [forDownload] lets the plugin return a downloadable server. */
     suspend fun resolve(context: Context, plugin: MediaPluginInfo, link: String, type: String, forDownload: Boolean = false): Result<MediaStream> {
         return try {
             val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, forDownload)
-            val best = pickBest(streams)
+            val ranked = streams.sortedBy { rank(it) }
+            val best = ranked.firstOrNull()
             if (best == null) {
                 Result.failure(PluginException("no playable link was found"))
             } else {
                 // every subtitle the plugin listed (on any server) is offered in the player, without duplicates
                 val allSubs = streams.flatMap { it.subtitles }.distinctBy { it.uri }
-                Result.success(if (allSubs.size > best.subtitles.size) best.copy(subtitles = allSubs) else best)
+                // the other servers stay available: the player's Server list, and the fallback when this one cannot be played
+                val others = ranked.drop(1).filter { it.link != best.link }.distinctBy { it.link }
+                Result.success(best.copy(subtitles = if (allSubs.size > best.subtitles.size) allSubs else best.subtitles, alternatives = others))
             }
         } catch (e: CancellationException) {
             throw e
@@ -62,7 +64,16 @@ object MediaPlayback {
         session: PluginPlaybackSession? = null
     ): VideoItem {
         if (session != null) {
-            session.subtitles = stream.subtitles
+            val known = session.servers.indexOfFirst { it.link == stream.link }
+            if (known >= 0) {
+                session.selectedServer = known
+            } else {
+                // a freshly resolved movie / episode: this stream plus the other servers of the same answer
+                session.servers = listOf(stream.copy(alternatives = emptyList())) + stream.alternatives
+                session.selectedServer = 0
+            }
+            // another server of the same episode may list no subtitles of its own: the ones already known stay
+            if (stream.subtitles.isNotEmpty() || known < 0) session.subtitles = stream.subtitles
             PluginPlaybackSessions.put(stream.link, session)
         }
         val isTorrent = stream.link.startsWith("torrent://", ignoreCase = true)
@@ -176,7 +187,10 @@ class PluginPlaybackSession(
     val isSeries: Boolean,
     val choices: List<PluginQualityChoice>,
     @Volatile var selectedQuality: String,
-    @Volatile var subtitles: List<MediaSubtitle> = emptyList()
+    @Volatile var subtitles: List<MediaSubtitle> = emptyList(),
+    /** The servers of this movie / episode (the playing one and its alternatives) and which one plays. */
+    @Volatile var servers: List<MediaStream> = emptyList(),
+    @Volatile var selectedServer: Int = 0
 )
 
 /** Stream URL -> session, so the player (which only gets a VideoItem) can find it. Small, in memory only. */
@@ -187,4 +201,66 @@ object PluginPlaybackSessions {
 
     @Synchronized fun put(url: String, session: PluginPlaybackSession) { map[url] = session }
     @Synchronized fun get(url: String): PluginPlaybackSession? = map[url]
+}
+
+
+/**
+ * One episode of a series that is queued behind the one that was opened. It is only a placeholder (a VideoItem with a
+ * "pluginqueue://" path) until the player reaches it: then [resolve] asks the plugin for its stream, like tapping it.
+ */
+class PluginQueuedEpisode(
+    val plugin: MediaPluginInfo,
+    val playerTitle: String,
+    val poster: String,
+    val link: String,
+    val type: String,
+    val episodeIndex: Int,
+    val episodeTitle: String,
+    val isSeries: Boolean,
+    val choices: List<PluginQualityChoice>,
+    val selectedQuality: String
+)
+
+object PluginQueuedEpisodes {
+    const val SCHEME = "pluginqueue://"
+    private val map = java.util.concurrent.ConcurrentHashMap<String, PluginQueuedEpisode>()
+
+    fun isQueued(path: String?): Boolean = path != null && path.startsWith(SCHEME)
+
+    /** The placeholder item shown in the player's playlist / used by Next. */
+    fun placeholder(ep: PluginQueuedEpisode): VideoItem {
+        val key = SCHEME + ep.plugin.value + "/" + kotlin.math.abs((ep.plugin.value + "|" + ep.link).hashCode()) + "/" + ep.episodeIndex
+        map[key] = ep
+        return VideoItem(
+            id = -(kotlin.math.abs(key.hashCode().toLong())) - 1L,
+            uri = Uri.parse(key),
+            displayName = ep.playerTitle,
+            path = key,
+            sizeBytes = 0L,
+            durationMs = 0L,
+            dateModified = System.currentTimeMillis() / 1000L,
+            isOnline = true,
+            thumbnailUrl = ep.poster.ifBlank { null },
+            channelName = ep.plugin.name,
+            isDirectStream = true,
+            isTorrentStream = false
+        )
+    }
+
+    /** Gets the real stream of a queued episode and returns the item the player can open. */
+    suspend fun resolve(context: Context, path: String): Result<VideoItem> {
+        val ep = map[path] ?: return Result.failure(PluginException("this episode is no longer queued"))
+        val result = MediaPlayback.resolve(context, ep.plugin, ep.link, ep.type, false)
+        val stream = result.getOrNull() ?: return Result.failure(result.exceptionOrNull() ?: PluginException("no playable link was found"))
+        val session = PluginPlaybackSession(
+            plugin = ep.plugin,
+            episodeIndex = ep.episodeIndex,
+            episodeTitle = ep.episodeTitle,
+            isSeries = ep.isSeries,
+            choices = ep.choices,
+            selectedQuality = ep.selectedQuality,
+            subtitles = stream.subtitles
+        )
+        return Result.success(MediaPlayback.toVideoItem(context, ep.plugin, ep.playerTitle, ep.poster, stream, session))
+    }
 }

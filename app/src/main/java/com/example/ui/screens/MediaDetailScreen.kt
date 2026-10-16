@@ -79,6 +79,8 @@ import com.example.util.media.MediaLink
 import com.example.util.media.MediaPlayback
 import com.example.util.media.MediaPluginInfo
 import com.example.util.media.PluginPlaybackSession
+import com.example.util.media.PluginQueuedEpisode
+import com.example.util.media.PluginQueuedEpisodes
 import com.example.util.media.PluginQualityChoice
 import com.example.util.media.MediaPost
 import com.example.util.media.MediaProviderRepository
@@ -367,7 +369,29 @@ fun MediaDetailScreen(
                 context,
                 MediaWatchedTitle(plugin.value, title, post.link, poster.ifBlank { post.image })
             )
-            onPlayVideo(item, listOf(item))
+            // A series opens with the whole episode list queued: Next / auto-play continue with the following episodes
+            // (each one gets its stream only when the player reaches it).
+            val qualityChoices = optionList.map { PluginQualityChoice(it.label, it.link.episodesLink, it.link.directLinks) }
+            val queue = if (isSeries && allVideos.size > 1) {
+                allVideos.mapIndexed { idx, d ->
+                    if (d.link == v.link) item
+                    else PluginQueuedEpisodes.placeholder(
+                        PluginQueuedEpisode(
+                            plugin = plugin,
+                            playerTitle = playerTitle(d),
+                            poster = d.poster,
+                            link = d.link,
+                            type = d.type,
+                            episodeIndex = idx,
+                            episodeTitle = d.title,
+                            isSeries = isSeries,
+                            choices = qualityChoices,
+                            selectedQuality = option?.label.orEmpty()
+                        )
+                    )
+                }
+            } else listOf(item)
+            onPlayVideo(item, queue)
         }
     }
 

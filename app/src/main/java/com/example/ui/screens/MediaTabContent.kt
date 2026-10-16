@@ -293,6 +293,9 @@ fun MediaPluginManager(
             }
         }
 
+        Spacer(modifier = Modifier.height(10.dp))
+        com.example.ui.components.NetworkBypassCard(isDark = isDark)
+
         errorText?.let {
             Text(
                 text = it,

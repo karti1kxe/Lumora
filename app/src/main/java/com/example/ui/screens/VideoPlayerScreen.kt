@@ -531,6 +531,16 @@ fun VideoPlayerScreen(
         currentVideo?.takeIf { it.isDirectStream }?.let { com.example.util.media.PluginPlaybackSessions.get(it.path) }
     }
     var pluginQuality by remember(currentVideo) { mutableStateOf(pluginSession?.selectedQuality) }
+    // Provider stream: server that plays, HLS renditions (the Quality list), and which of them plays ("auto" or "hls:<bandwidth>:<height>")
+    // (not keyed by the video: they are written from the coroutine that opens the stream, which starts before the
+    // screen has recomposed for the new episode; every open of a provider stream sets them again)
+    var pluginServerIndex by remember { mutableIntStateOf(pluginSession?.selectedServer ?: 0) }
+    var hlsVariants by remember { mutableStateOf<List<com.example.util.media.HlsVariant>>(emptyList()) }
+    var hlsSelectedKey by remember { mutableStateOf("auto") }
+    var hlsCurrentBandwidth by remember { mutableStateOf<Long?>(null) }
+    val pluginVideoPrefs = remember { context.getSharedPreferences("lumora_plugin_video", android.content.Context.MODE_PRIVATE) }
+    // queued episodes (series) that are being resolved right now, so a double tap on Next does not open one twice
+    val resolvingQueued = remember { HashSet<String>() }
 
 
     // Video thumbnail / first frame state
@@ -612,6 +622,88 @@ fun VideoPlayerScreen(
                     } catch (_: Throwable) {}
                 }
             }
+        }
+    }
+
+    fun hlsKey(v: com.example.util.media.HlsVariant) = "hls:${v.bandwidth}:${v.height}"
+
+    /** The headers (User-Agent / Referer / ...) the provider gave for [link]. */
+    fun providerHeaders(link: String): Map<String, String> {
+        val meta = com.example.util.StreamEntryStore.get(link) ?: return emptyMap()
+        val m = LinkedHashMap<String, String>()
+        meta.userAgent?.takeIf { it.isNotBlank() }?.let { m["User-Agent"] = it }
+        meta.referrer?.takeIf { it.isNotBlank() }?.let { m["Referer"] = it }
+        m.putAll(meta.extraHeaders)
+        return m
+    }
+
+    /** Auto: the best rendition the connection can hold (about 60% of the link speed, 30% spare), the lowest one when nothing fits. */
+    fun pickAutoHlsVariant(variants: List<com.example.util.media.HlsVariant>): com.example.util.media.HlsVariant? {
+        if (variants.isEmpty()) return null
+        val kbps = try {
+            val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            cm.getNetworkCapabilities(cm.activeNetwork)?.linkDownstreamBandwidthKbps ?: 0
+        } catch (_: Throwable) { 0 }
+        if (kbps <= 0) return variants.firstOrNull { it.height in 1..480 } ?: variants.last()
+        val usableBps = kbps * 1000.0 * 0.6
+        return variants.firstOrNull { it.height <= 1080 && it.bandwidth * 1.3 <= usableBps } ?: variants.last()
+    }
+
+    /** Loads [link] with the HLS rendition [v] (null = mpv's own choice) at [posMs]. */
+    fun applyHlsVariant(v: com.example.util.media.HlsVariant?, posMs: Long) {
+        hlsCurrentBandwidth = v?.bandwidth
+        controller.setHlsBitrate(v?.bandwidth)
+        controller.reloadCurrentStream(posMs)
+        controller.play()
+        pluginSession?.let { attachPluginSubtitles(it.subtitles, lastLoadedVideoKey) }
+    }
+
+    /**
+     * Opens a provider stream. An HLS stream first has its quality list read, so Auto (or the quality chosen earlier)
+     * starts at a rate the connection can hold instead of mpv's default of the highest one.
+     */
+    suspend fun openPluginStream(stream: com.example.util.media.MediaStream, startMs: Long, key: String?) {
+        var variants: List<com.example.util.media.HlsVariant> = emptyList()
+        if (com.example.util.media.HlsVariants.looksLikeHls(stream.link, stream.type)) {
+            variants = withContext(Dispatchers.IO) {
+                val headers = if (stream.headers.isNotEmpty()) stream.headers else providerHeaders(stream.link)
+                com.example.util.media.HlsVariants.fetch(stream.link, headers, com.example.util.NetworkBypass.okHttpProxy(context))
+                    .ifEmpty { com.example.util.media.HlsVariants.fetch(stream.link, headers, null) }
+            }
+        }
+        if (key != null && lastLoadedVideoKey != key) return
+        hlsVariants = variants
+        com.example.util.media.PluginPlaybackSessions.get(stream.link)?.let { pluginServerIndex = it.selectedServer }
+        val pref = pluginVideoPrefs.getString("hls_pref", "auto") ?: "auto"
+        val chosen: com.example.util.media.HlsVariant? = when {
+            variants.isEmpty() -> null
+            pref == "auto" -> pickAutoHlsVariant(variants)
+            else -> {
+                val h = pref.toIntOrNull() ?: 0
+                variants.firstOrNull { it.height in 1..h } ?: variants.last()
+            }
+        }
+        hlsSelectedKey = if (variants.isEmpty() || pref == "auto") "auto" else chosen?.let { hlsKey(it) } ?: "auto"
+        hlsCurrentBandwidth = chosen?.bandwidth
+        controller.setOnlineStream(true)
+        controller.setDirectStream(true)
+        controller.setHlsBitrate(chosen?.bandwidth)
+        controller.loadVideo(stream.link, startMs)
+        controller.play()
+    }
+
+    /** Opens a direct stream: a provider (media plugin) stream with its quality list, or an imported IPTV channel as before. */
+    suspend fun openDirectStream(path: String, startMs: Long, key: String) {
+        val session = com.example.util.media.PluginPlaybackSessions.get(path)
+        val stream = session?.servers?.firstOrNull { it.link == path }
+        if (session == null || stream == null) {
+            controller.setOnlineStream(true)
+            controller.setDirectStream(true)
+            controller.loadVideo(path, startPositionMs = startMs)
+            controller.play()
+        } else {
+            openPluginStream(stream, startMs, key)
+            attachPluginSubtitles(session.subtitles, key)
         }
     }
 
@@ -1740,6 +1832,32 @@ fun VideoPlayerScreen(
         if (currentPlaylist.isEmpty()) return
         val validIndex = targetIndex.coerceIn(0, currentPlaylist.size - 1)
 
+        // A series opened from a provider queues all its episodes: this one is only a placeholder until now, so its
+        // stream is requested from the website first (like tapping it), then it opens through the normal path below.
+        val queuedTarget = currentPlaylist.getOrNull(validIndex)
+        if (queuedTarget != null && com.example.util.media.PluginQueuedEpisodes.isQueued(queuedTarget.path)) {
+            val queuedPath = queuedTarget.path
+            if (!resolvingQueued.add(queuedPath)) return
+            Toast.makeText(context, "Loading ${queuedTarget.displayName}…", Toast.LENGTH_SHORT).show()
+            coroutineScope.launch {
+                val result = try {
+                    com.example.util.media.PluginQueuedEpisodes.resolve(context, queuedPath)
+                } finally {
+                    resolvingQueued.remove(queuedPath)
+                }
+                val real = result.getOrNull()
+                if (real == null) {
+                    Toast.makeText(context, "Could not get this episode: " + (result.exceptionOrNull()?.message ?: "unknown error"), Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                val at = currentPlaylist.indexOfFirst { it.path == queuedPath }
+                if (at < 0) return@launch
+                currentPlaylist = currentPlaylist.toMutableList().also { it[at] = real }
+                playEpisodeAtIndex(at)
+            }
+            return
+        }
+
         // 1. Save position of current episode before navigating away
         persistPlaybackPosition()
 
@@ -1860,11 +1978,7 @@ fun VideoPlayerScreen(
                     // Imported M3U / IPTV stream: the real stream URL goes straight into the existing mpv player
                     // (with the stream's own User-Agent / headers); no YouTube resolving.
                     onlinePlayback = null
-                    controller.setOnlineStream(true)
-                    controller.setDirectStream(true)
-                    controller.loadVideo(path, startPositionMs = initialPos)
-                    controller.play()
-                    com.example.util.media.PluginPlaybackSessions.get(path)?.let { attachPluginSubtitles(it.subtitles, key) }
+                    openDirectStream(path, initialPos, key)
                 } else if (targetVideo.isTorrentStream) {
                     onlinePlayback = null
                     startTorrentPlayback(path, initialPos, key)
@@ -2265,11 +2379,103 @@ fun VideoPlayerScreen(
             com.example.util.media.MediaPlayback.toVideoItem(context, session.plugin, video.displayName, video.thumbnailUrl.orEmpty(), stream, session)
             session.selectedQuality = label
             pluginQuality = label
-            controller.setOnlineStream(true)
-            controller.setDirectStream(true)
-            controller.loadVideo(stream.link, pos)
-            controller.play()
+            pluginServerIndex = session.selectedServer
+            openPluginStream(stream, pos, loadKey)
             attachPluginSubtitles(stream.subtitles, loadKey)
+        }
+    }
+
+    /** Server list: plays the same movie / episode from another source of the website, from the same second. */
+    fun switchPluginServer(index: Int, automatic: Boolean = false) {
+        val session = pluginSession ?: return
+        val video = currentVideo ?: return
+        val st = session.servers.getOrNull(index) ?: return
+        if (index == session.selectedServer && !automatic) return
+        val pos = controller.currentPositionMs.value
+        val loadKey = lastLoadedVideoKey
+        coroutineScope.launch {
+            Toast.makeText(context, (if (automatic) "Could not play, trying " else "Switching to ") + st.server + "…", Toast.LENGTH_SHORT).show()
+            // registers this server's headers (User-Agent / Referer) like the first load
+            com.example.util.media.MediaPlayback.toVideoItem(context, session.plugin, video.displayName, video.thumbnailUrl.orEmpty(), st, session)
+            pluginServerIndex = session.selectedServer
+            controller.clearError()
+            openPluginStream(st, pos, loadKey)
+            attachPluginSubtitles(session.subtitles, loadKey)
+        }
+    }
+
+    /** Quality list of an HLS provider stream: "auto" (adaptive bitrate) or one rendition; remembered for the next episodes. */
+    fun switchHlsQuality(key: String) {
+        val variants = hlsVariants
+        if (variants.isEmpty() || key == hlsSelectedKey) return
+        val pos = controller.currentPositionMs.value
+        if (key == "auto") {
+            hlsSelectedKey = "auto"
+            pluginVideoPrefs.edit().putString("hls_pref", "auto").apply()
+            applyHlsVariant(pickAutoHlsVariant(variants), pos)
+            return
+        }
+        val v = variants.firstOrNull { hlsKey(it) == key } ?: return
+        hlsSelectedKey = key
+        pluginVideoPrefs.edit().putString("hls_pref", v.height.toString()).apply()
+        applyHlsVariant(v, pos)
+    }
+
+    // When a server cannot be played (the player gave up on it) the next server of the website is tried by itself.
+    val streamError by controller.errorMessage.collectAsState()
+    LaunchedEffect(streamError, pluginServerIndex, pluginSession) {
+        val session = pluginSession ?: return@LaunchedEffect
+        controller.directStreamMaxRetries = if (session.selectedServer + 1 < session.servers.size) 1 else 3
+        if (streamError != null && session.selectedServer + 1 < session.servers.size) {
+            switchPluginServer(session.selectedServer + 1, automatic = true)
+        }
+    }
+
+    // Auto (adaptive bitrate) for HLS: one step down when playback keeps stalling, one step up when the read-ahead stays full.
+    LaunchedEffect(hlsVariants, hlsSelectedKey) {
+        if (hlsSelectedKey != "auto" || hlsVariants.size < 2) return@LaunchedEffect
+        val ladder = hlsVariants.sortedByDescending { it.bandwidth }
+        var lastSwitchAt = System.currentTimeMillis()
+        var bufferingSince = 0L
+        var healthySince = 0L
+        val failedUp = HashMap<Long, Long>()
+        while (true) {
+            delay(1000L)
+            val now = System.currentTimeMillis()
+            val curBw = hlsCurrentBandwidth ?: continue
+            val idx = ladder.indexOfFirst { it.bandwidth == curBw }
+            if (idx < 0) continue
+            val buffering = controller.isBuffering.value
+            val ahead = controller.bufferedPositionMs.value - controller.currentPositionMs.value
+            if (now - lastSwitchAt < 15000L) { bufferingSince = 0L; healthySince = 0L; continue }
+            if (buffering && ahead < 2000L) {
+                if (bufferingSince == 0L) bufferingSince = now
+                healthySince = 0L
+            } else {
+                bufferingSince = 0L
+            }
+            if (bufferingSince != 0L && now - bufferingSince >= 4000L) {
+                val lower = ladder.getOrNull(idx + 1)
+                if (lower != null) {
+                    failedUp[curBw] = now
+                    applyHlsVariant(lower, controller.currentPositionMs.value)
+                    lastSwitchAt = now
+                }
+                bufferingSince = 0L
+            } else if (!buffering && controller.isPlaying.value && ahead >= 20_000L) {
+                if (healthySince == 0L) healthySince = now
+                if (now - healthySince >= 25_000L) {
+                    val higher = ladder.getOrNull(idx - 1)
+                    val blockedUntil = higher?.let { failedUp[it.bandwidth] }?.let { it + 180_000L } ?: 0L
+                    if (higher != null && higher.height <= 1080 && now >= blockedUntil) {
+                        applyHlsVariant(higher, controller.currentPositionMs.value)
+                        lastSwitchAt = now
+                    }
+                    healthySince = 0L
+                }
+            } else if (!buffering) {
+                healthySince = 0L
+            }
         }
     }
 
@@ -3179,14 +3385,47 @@ fun VideoPlayerScreen(
             isLiveStream = controllerIsLive,
             liveSeekStartMs = controllerLiveRange?.startMs ?: 0L,
             liveSeekEndMs = controllerLiveRange?.endMs ?: 0L,
+            pluginStreamPanel = if (pluginSession == null) null else com.example.ui.components.PluginStreamPanelData(
+                servers = pluginSession.servers.mapIndexed { i, st ->
+                    val kind = when {
+                        st.type == "m3u8" || st.type == "hls" || st.link.substringBefore('?').lowercase().endsWith(".m3u8") -> "HLS"
+                        st.type == "mpd" || st.type == "dash" -> "DASH"
+                        st.type.isNotBlank() -> st.type.uppercase()
+                        else -> ""
+                    }
+                    com.example.ui.components.PlayerServerOption(
+                        key = i.toString(),
+                        title = st.server.ifBlank { "Server ${i + 1}" },
+                        info = listOf(kind, st.quality.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
+                    )
+                },
+                selectedServerKey = pluginServerIndex.toString(),
+                qualities = if (hlsVariants.isNotEmpty()) {
+                    listOf(com.example.ui.components.PlayerQualityOption("auto", "Auto", "Adaptive bitrate", null)) +
+                        hlsVariants.map { com.example.ui.components.PlayerQualityOption(hlsKey(it), it.label, it.info, it.badge) }
+                } else {
+                    pluginSession.choices.map { com.example.ui.components.PlayerQualityOption(it.quality, it.quality, "", null) }
+                },
+                selectedQualityKey = if (hlsVariants.isNotEmpty()) hlsSelectedKey else pluginQuality
+            ),
+            onSelectStreamServer = { key -> key.toIntOrNull()?.let { switchPluginServer(it) } },
             availableVideoQualities = if (pluginSession != null) {
                 pluginSession.choices.map { it.quality }
             } else {
                 onlinePlayback?.qualities?.map { it.label }?.let { listOf(OnlineVideoService.AUTO_QUALITY) + it } ?: emptyList()
             },
-            selectedVideoQuality = if (pluginSession != null) pluginQuality
+            selectedVideoQuality = if (pluginSession != null) {
+                    if (hlsVariants.isNotEmpty()) {
+                        val cur = hlsVariants.firstOrNull { it.bandwidth == hlsCurrentBandwidth }?.label
+                        if (hlsSelectedKey == "auto") "Auto (${cur ?: "…"})" else cur ?: hlsVariants.firstOrNull { hlsKey(it) == hlsSelectedKey }?.label
+                    } else pluginQuality
+                }
                 else if (onlineAutoMode) "${OnlineVideoService.AUTO_QUALITY} (${selectedOnlineQuality ?: "…"})" else selectedOnlineQuality,
-            onSelectVideoQuality = { label -> if (pluginSession != null) switchPluginQuality(label) else switchOnlineQuality(label) },
+            onSelectVideoQuality = { label ->
+                if (pluginSession != null && (label == "auto" || label.startsWith("hls:"))) switchHlsQuality(label)
+                else if (pluginSession != null) switchPluginQuality(label)
+                else switchOnlineQuality(label)
+            },
             showBufferedRange = uiState.playerSettings.showBufferedRange || currentVideo?.isOnline == true,
             thumbFastPreview = uiState.playerSettings.thumbFastPreview,
             previewVideoUri = currentVideo?.uri,

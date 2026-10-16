@@ -53,6 +53,7 @@ import com.example.util.AppStorageManager
 import com.example.util.CustomSubtitlePersistenceManager
 import com.example.util.SubtitleSessionMemory
 import com.example.util.MkvManagerEngine
+import com.example.util.NetworkBypass
 import com.example.util.StreamRequestOptions
 import com.example.ai.AiFeaturesSettings
 import com.example.ai.SubtitleTranslationService
@@ -313,6 +314,12 @@ class MpvPlayerController {
     @Volatile private var lastLiveReconnectAt = 0L
     @Volatile private var isRetryLoad = false
     @Volatile private var streamOptionsApplied = false
+    /** "http_proxy=..." of the local AntiDPI / DNS-over-HTTPS proxy for the stream being opened (null = direct connection). */
+    @Volatile private var bypassProxyOption: String? = null
+    /** Silent retries of a direct stream that never starts, before the error is shown (the player lowers it when another server can take over). */
+    @Volatile var directStreamMaxRetries: Int = 3
+    /** mpv's hls-bitrate: "max" (default) or the BANDWIDTH of the HLS rendition the user / Auto picked. */
+    @Volatile private var hlsBitrate: String = "max"
     /** Headers (User-Agent / Referer / ...) a Network-tab link needs; set after [setOnlineStream], cleared by it. */
     @Volatile private var networkRequestOptions: StreamRequestOptions.Options? = null
     /** True when the previously opened file was a live/IPTV stream (its last frame must not linger on the next channel). */
@@ -400,6 +407,7 @@ class MpvPlayerController {
     ) {
         directStreamMode = false
         networkRequestOptions = null
+        hlsBitrate = "max"
         onlineStreamMode = enabled
         onlineAudioSources = if (enabled) audios else emptyList()
         onlineAudioSelectedIndex = selectedAudioIndex.coerceIn(0, (audios.size - 1).coerceAtLeast(0))
@@ -420,6 +428,24 @@ class MpvPlayerController {
         }
     }
 
+    /**
+     * HLS quality: [bandwidth] = BANDWIDTH of the rendition to play (mpv picks the best one not above it), null = the best
+     * one. Applies to the NEXT [loadVideo]; call [setOnlineStream] first (it resets this) and load afterwards.
+     */
+    /** Opens the stream that is loaded again at [positionMs] (HLS quality change). mpv drops external tracks on a reload, so they may be added again. */
+    fun reloadCurrentStream(positionMs: Long) {
+        val path = currentFilePath ?: return
+        loadedExternalSubtitles.clear()
+        loadedExternalAudios.clear()
+        externalAudiosMap.clear()
+        externalAudiosLangMap.clear()
+        loadVideo(path, positionMs)
+    }
+
+    fun setHlsBitrate(bandwidth: Long?) {
+        hlsBitrate = bandwidth?.takeIf { it > 0L }?.toString() ?: "max"
+    }
+
     /** Applies the stream's own User-Agent / referrer / headers (and clears them again for the next, different file). */
     /** Network tab: remember the HTTP headers the resolved link needs (call after [setOnlineStream], before [loadVideo]). */
     fun setNetworkRequestHeaders(headers: Map<String, String>) {
@@ -428,7 +454,7 @@ class MpvPlayerController {
         val ref = headers.entries.firstOrNull { it.key.equals("Referer", true) || it.key.equals("Referrer", true) }?.value?.takeIf { it.isNotBlank() }
         val fields = headers.entries
             .filter { !it.key.equals("User-Agent", true) && !it.key.equals("Referer", true) && !it.key.equals("Referrer", true) && it.key.isNotBlank() && it.value.isNotBlank() }
-            .joinToString(",") { "${it.key}: ${it.value.replace(",", "%2C")}" }
+            .joinToString(",") { StreamRequestOptions.mpvListItem("${it.key}: ${it.value}") }
             .takeIf { it.isNotBlank() }
         networkRequestOptions = if (ua == null && ref == null && fields == null) null else StreamRequestOptions.Options(ua, ref, fields)
     }
@@ -452,10 +478,10 @@ class MpvPlayerController {
         if (!directStreamStarted) {
             val waited = System.currentTimeMillis() - directStreamLoadStartedAt
             val idle = try { view.mpv.getPropertyBoolean("idle-active") == true } catch (_: Throwable) { false }
-            if (!directStreamErrorShown && ((idle && waited > 4000L) || waited > 20000L)) {
+            if (!directStreamErrorShown && ((idle && waited > 4000L) || waited > 30000L)) {
                 // Internet can be briefly slow/unstable: silently retry the stream (up to 3 times, spinner stays on)
                 // before telling the user the stream cannot be played.
-                if (onlineLoadRetries < 3) {
+                if (onlineLoadRetries < directStreamMaxRetries) {
                     onlineLoadRetries++
                     val retryPath = currentFilePath
                     if (!retryPath.isNullOrBlank()) {
@@ -578,14 +604,15 @@ class MpvPlayerController {
                     view.mpv.setPropertyString("demuxer-max-bytes", "64MiB")
                     view.mpv.setPropertyString("demuxer-max-back-bytes", "8MiB")
                     view.mpv.setPropertyString("cache-pause-wait", "3")
-                    view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=4")
+                    val proxyOpt = bypassProxyOption?.let { "," + it }.orEmpty()
+                    view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=4" + proxyOpt)
                     try { view.mpv.setPropertyString("tls-verify", "no") } catch (_: Throwable) {}
                     try { view.mpv.setPropertyString("stream-buffer-size", "1MiB") } catch (_: Throwable) {}
                     try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "2") } catch (_: Throwable) {}
                     try { view.mpv.setPropertyString("demuxer-lavf-probesize", "2000000") } catch (_: Throwable) {}
                     // HLS channels whose segments use odd file extensions (.jpg/.txt/none) are refused by ffmpeg
                     // unless extensions are allowed - a common reason why "some channels never play".
-                    try { view.mpv.setPropertyString("demuxer-lavf-o", "allowed_extensions=ALL,fflags=+discardcorrupt") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-o", "allowed_extensions=ALL,fflags=+discardcorrupt" + proxyOpt) } catch (_: Throwable) {}
                 } else {
                     view.mpv.setPropertyString("cache-pause-wait", "3")
                     view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx,5xx,reconnect_at_eof=1,reconnect_delay_max=5,multiple_requests=1")
@@ -1298,8 +1325,13 @@ class MpvPlayerController {
                 view.mpv.setPropertyString("sid", "auto")
                 view.mpv.setPropertyString("secondary-sid", "no")
             } catch (_: Throwable) {}
+            // Provider / IPTV streams go through the app's AntiDPI + DNS-over-HTTPS proxy (Network settings) when it is on.
+            bypassProxyOption = if (directStreamMode && !filePath.startsWith("http://127.0.0.1") && !filePath.startsWith("http://localhost")) {
+                try { NetworkBypass.ffmpegProxyOption(view.context) } catch (_: Throwable) { null }
+            } else null
             applyStreamingProfile(view, onlineStreamMode)
             applyStreamRequestOptions(view, filePath)
+            try { view.mpv.setPropertyString("hls-bitrate", if (directStreamMode) hlsBitrate else "max") } catch (_: Throwable) {}
             if (directStreamMode || lastLoadWasDirect) {
                 // Channel switch: fully close the previous channel FIRST. This (1) drops its last frame so the new
                 // channel starts from a black screen + buffering spinner, and (2) closes its connection before the

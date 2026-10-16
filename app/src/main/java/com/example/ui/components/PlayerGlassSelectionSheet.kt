@@ -7123,6 +7123,199 @@ fun PlayerLayoutSelectionPanel(
     }
 }
 
+/** One quality row of a provider stream: "Auto", or an HLS rendition (title "1080p", info "4.1 Mbps · 1920x1080 · avc1.640028"). */
+data class PlayerQualityOption(
+    val key: String,
+    val title: String,
+    val info: String,
+    /** HD / SD / 2K / 4K tile shown in front of the row; null for "Auto". */
+    val badge: String?
+)
+
+/** One server (stream source) a provider returned for the movie / episode. */
+data class PlayerServerOption(val key: String, val title: String, val info: String)
+
+/** Everything the "Server | Quality" panel of a provider video shows. */
+data class PluginStreamPanelData(
+    val servers: List<PlayerServerOption>,
+    val selectedServerKey: String?,
+    val qualities: List<PlayerQualityOption>,
+    val selectedQualityKey: String?
+)
+
+@Composable
+private fun StreamChoiceRow(
+    iconRes: Int?,
+    icon: ImageVector?,
+    badge: String?,
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(14.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(if (selected) ActiveItemBg else Color.Transparent)
+            .border(if (selected) 1.5.dp else 1.dp, if (selected) ActiveHighlightColor else SecondaryTextColor.copy(alpha = 0.28f), shape)
+            .cardBounceClick(scaleDown = 0.98f, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (badge != null) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF64748B)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(text = badge, color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.ExtraBold)
+                }
+            } else if (iconRes != null) {
+                Icon(
+                    painter = androidx.compose.ui.res.painterResource(iconRes),
+                    contentDescription = null,
+                    tint = if (selected) ActiveHighlightColor else Color(0xFF475569),
+                    modifier = Modifier.size(26.dp)
+                )
+            } else if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (selected) ActiveHighlightColor else Color(0xFF475569),
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    color = if (selected) ActiveHighlightColor else NormalItemColor,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.5.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (subtitle.isNotBlank()) {
+                    Text(
+                        text = subtitle,
+                        color = SecondaryTextColor,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 12.sp,
+                        lineHeight = 15.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            if (selected) {
+                Box(
+                    modifier = Modifier.size(24.dp).clip(CircleShape).background(ActiveHighlightColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(imageVector = Icons.Outlined.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Three-dot menu > Video settings of a provider (media plugin) video: "Server" (the sources the website gave, the player
+ * switches to the next one by itself when one cannot be played) next to "Quality" (Auto = adaptive bitrate, or one fixed
+ * HLS rendition with its bitrate, resolution and codec).
+ */
+@Composable
+fun PluginStreamPanel(
+    data: PluginStreamPanelData,
+    onSelectServer: (String) -> Unit,
+    onSelectQuality: (String) -> Unit,
+    isLandscape: Boolean,
+    glassBlurTransparency: Float = 85f,
+    onDismissRequest: () -> Unit
+) {
+    PlayerGlassModalSheet(
+        panelKey = "plugin_stream_panel",
+        isLandscape = isLandscape,
+        heightFraction = if (isLandscape) 0.80f else 0.70f,
+        glassBlurTransparency = glassBlurTransparency,
+        onDismissRequest = onDismissRequest,
+        headerStartContent = {
+            Text(
+                text = "Video Settings",
+                fontSize = 15.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = NormalItemColor
+            )
+        }
+    ) {
+        val serverList: @Composable () -> Unit = {
+            data.servers.forEach { sv ->
+                StreamChoiceRow(
+                    iconRes = null,
+                    icon = Icons.Outlined.Dns,
+                    badge = null,
+                    title = sv.title,
+                    subtitle = sv.info,
+                    selected = sv.key == data.selectedServerKey,
+                    onClick = { onSelectServer(sv.key); onDismissRequest() }
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+        }
+        val qualityList: @Composable () -> Unit = {
+            data.qualities.forEach { q ->
+                StreamChoiceRow(
+                    iconRes = if (q.badge == null) com.example.R.drawable.lumora_video_setting else null,
+                    icon = null,
+                    badge = q.badge,
+                    title = q.title,
+                    subtitle = q.info,
+                    selected = q.key == data.selectedQualityKey,
+                    onClick = { onSelectQuality(q.key); onDismissRequest() }
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+        }
+        @Composable
+        fun ColumnTitle(text: String) {
+            Text(
+                text = text,
+                color = NormalItemColor,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+        }
+        if (isLandscape) {
+            Row(modifier = Modifier.fillMaxWidth().weight(1f, fill = false), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (data.servers.isNotEmpty()) {
+                    Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                        ColumnTitle("Server")
+                        serverList()
+                    }
+                }
+                Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                    ColumnTitle("Quality")
+                    qualityList()
+                }
+            }
+        } else {
+            Column(modifier = Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                if (data.servers.isNotEmpty()) {
+                    ColumnTitle("Server")
+                    serverList()
+                }
+                ColumnTitle("Quality")
+                qualityList()
+            }
+        }
+    }
+}
+
 @Composable
 fun VideoQualitySelectionPanel(
     qualities: List<String>,

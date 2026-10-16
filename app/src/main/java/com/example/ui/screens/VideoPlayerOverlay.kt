@@ -587,6 +587,9 @@ fun VideoPlayerOverlay(
     subtitleTracks: List<com.example.player.PlayerMediaTrack> = emptyList(),
     availableVideoQualities: List<String> = emptyList(),
     selectedVideoQuality: String? = null,
+    /** Provider (media plugin) video: Server + Quality panel with the full stream information. */
+    pluginStreamPanel: com.example.ui.components.PluginStreamPanelData? = null,
+    onSelectStreamServer: ((String) -> Unit)? = null,
     onSelectVideoQuality: ((String) -> Unit)? = null,
     onRemoveSubtitleTrack: (Int) -> Unit = {},
     onRemoveAudioTrack: (Int) -> Unit = {},
@@ -2958,14 +2961,23 @@ fun VideoPlayerOverlay(
                     onTogglePiP = onTogglePiP,
                     onToggleOrientation = onToggleOrientation,
                     onOpenPlayerLayoutDialog = { openPanel(PlayerPanelType.PLAYER_LAYOUT) },
-                    onOpenVideoQualityDialog = if (availableVideoQualities.isNotEmpty()) { { openPanel(PlayerPanelType.VIDEO_QUALITY) } } else null,
+                    onOpenVideoQualityDialog = if (availableVideoQualities.isNotEmpty() || pluginStreamPanel != null) { { openPanel(PlayerPanelType.VIDEO_QUALITY) } } else null,
                     selectedOnlineQuality = selectedVideoQuality,
                     isLandscape = isLandscape,
                     glassBlurTransparency = glassBlurTransparency,
                     onDismissRequest = { dismissCurrentPanel() }
                 )
             }
-            PlayerPanelType.VIDEO_QUALITY -> {
+            PlayerPanelType.VIDEO_QUALITY -> if (pluginStreamPanel != null) {
+                com.example.ui.components.PluginStreamPanel(
+                    data = pluginStreamPanel,
+                    onSelectServer = { key -> onSelectStreamServer?.invoke(key) },
+                    onSelectQuality = { key -> onSelectVideoQuality?.invoke(key) },
+                    isLandscape = isLandscape,
+                    glassBlurTransparency = glassBlurTransparency,
+                    onDismissRequest = { dismissCurrentPanel() }
+                )
+            } else {
                 com.example.ui.components.VideoQualitySelectionPanel(
                     qualities = availableVideoQualities,
                     selectedQuality = selectedVideoQuality,

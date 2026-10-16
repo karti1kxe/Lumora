@@ -9,6 +9,7 @@ import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.example.util.NetworkBypass
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -239,7 +240,20 @@ object PluginJsEngine {
 
         var c = client.newBuilder().followRedirects(follow).followSslRedirects(follow)
         if (timeoutSec > 0) c = c.callTimeout(timeoutSec, TimeUnit.SECONDS).readTimeout(timeoutSec, TimeUnit.SECONDS)
-        return c.build().newCall(builder.build()).execute().use { resp ->
+        val request = builder.build()
+        // AntiDPI / DNS-over-HTTPS (Network settings): blocked provider sites go through the local bypass proxy first;
+        // if that attempt fails the same request is repeated once on the normal connection.
+        val bypass = appContext?.let { NetworkBypass.okHttpProxy(it) }
+        val response = if (bypass != null) {
+            try {
+                c.proxy(bypass).build().newCall(request).execute()
+            } catch (_: java.io.IOException) {
+                c.build().newCall(request).execute()
+            }
+        } else {
+            c.build().newCall(request).execute()
+        }
+        return response.use { resp ->
             val out = JSONObject()
             out.put("status", resp.code)
             out.put("statusText", resp.message)
