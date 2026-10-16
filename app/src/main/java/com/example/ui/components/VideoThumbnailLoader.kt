@@ -90,17 +90,18 @@ object ThumbnailCache {
 }
 
 /**
- * Persistent thumbnail cache. Files live under Context.cacheDir, so Android may evict them when
- * storage is under pressure, but a normal process/app restart reuses already generated thumbnails.
- * The cache key includes the source signature, strategy, quality and requested second, so changing
- * any thumbnail setting cannot accidentally reuse an incompatible image.
+ * Local media thumbnails are persisted under filesDir/thumbnails/video and survive normal cache
+ * clearing and app restarts. Remote/provider thumbnails remain in cacheDir so they can be evicted.
+ * The cache key includes the source signature and thumbnail settings to avoid stale reuse.
  */
 private object VideoThumbnailDiskCache {
     private const val CACHE_VERSION = "v3"
     private const val MAX_CACHE_BYTES = 256L * 1024L * 1024L
 
-    private fun directory(context: Context): File =
-        File(context.cacheDir, "video_thumbnail_cache").apply { mkdirs() }
+    private fun directory(context: Context, persistent: Boolean): File =
+        if (persistent) File(context.filesDir, "thumbnails/video")
+            .apply { mkdirs() }
+        else File(context.cacheDir, "video_thumbnail_cache").apply { mkdirs() }
 
     fun key(
         videoId: Long,
@@ -131,8 +132,8 @@ private object VideoThumbnailDiskCache {
     // Lazy lists can request several settings during recomposition and deleting the other
     // entries here was the reason cached thumbnails disappeared while scrolling.
 
-    fun read(context: Context, key: String): Bitmap? {
-        val file = File(directory(context), "$key.png")
+    fun read(context: Context, key: String, persistent: Boolean): Bitmap? {
+        val file = File(directory(context, persistent), "$key.png")
         if (!file.isFile || file.length() <= 0L) return null
         return try {
             BitmapFactory.decodeFile(file.absolutePath)?.takeUnless { it.isRecycled }
@@ -142,8 +143,8 @@ private object VideoThumbnailDiskCache {
         }
     }
 
-    fun write(context: Context, key: String, bitmap: Bitmap) {
-        val dir = directory(context)
+    fun write(context: Context, key: String, bitmap: Bitmap, persistent: Boolean) {
+        val dir = directory(context, persistent)
         val target = File(dir, "$key.png")
         if (target.isFile && target.length() > 0L) return
         val temp = File(dir, "$key.tmp")
@@ -159,7 +160,8 @@ private object VideoThumbnailDiskCache {
             try { temp.delete() } catch (_: Throwable) {}
             return
         }
-        trim(dir)
+        // Persistent local-media thumbnails are intentionally not subject to cache eviction.
+        if (!persistent) trim(dir)
     }
 
     private fun trim(dir: File) {
@@ -216,11 +218,21 @@ suspend fun loadVideoThumbnail(
         quality = quality,
         fallbackSecond = diskFallbackSecond
     )
+    val persistentLocalThumbnail = !isNetworkUri
     val cacheKey = "video_thumbnail_$diskKey"
     ThumbnailCache.memoryCache.get(cacheKey)?.let { return@withContext it }
-    VideoThumbnailDiskCache.read(context, diskKey)?.let { cached ->
+    VideoThumbnailDiskCache.read(context, diskKey, persistentLocalThumbnail)?.let { cached ->
         ThumbnailCache.memoryCache.put(cacheKey, cached)
         return@withContext cached
+    }
+    // Migrate thumbnails produced by older versions from cacheDir to filesDir. Once migrated,
+    // ordinary Android cache clearing no longer removes thumbnails for local/downloaded media.
+    if (persistentLocalThumbnail) {
+        VideoThumbnailDiskCache.read(context, diskKey, persistent = false)?.let { legacy ->
+            VideoThumbnailDiskCache.write(context, diskKey, legacy, persistent = true)
+            ThumbnailCache.memoryCache.put(cacheKey, legacy)
+            return@withContext legacy
+        }
     }
 
     fun cache(bitmap: Bitmap): Bitmap {
@@ -236,7 +248,7 @@ suspend fun loadVideoThumbnail(
             ThumbnailCache.memoryCache.put("${path}_$aliasSuffix", bitmap)
         }
         // Persist only successfully extracted/generated images. A placeholder/gradient is never cached.
-        VideoThumbnailDiskCache.write(context, diskKey, bitmap)
+        VideoThumbnailDiskCache.write(context, diskKey, bitmap, persistentLocalThumbnail)
         return bitmap
     }
 

@@ -13,16 +13,18 @@ import kotlinx.coroutines.CancellationException
 /** Turns a plugin's stream into something the app's own player / playlists / downloader understand. */
 object MediaPlayback {
 
-    /** Picks the stream most likely to play: plain files first, then HLS. */
+    /** Prefer adaptive streaming when a provider offers it; fall back to direct media files. */
     fun pickBest(streams: List<MediaStream>): MediaStream? {
         fun rank(s: MediaStream): Int {
             val path = s.link.substringBefore('?').substringBefore('#').lowercase()
+            val type = s.type.lowercase()
             return when {
-                s.type == "mp4" || path.endsWith(".mp4") -> 0
-                s.type == "mkv" || path.endsWith(".mkv") -> 1
-                s.type == "m3u8" || s.type == "hls" || path.endsWith(".m3u8") -> 2
-                s.type == "webm" || path.endsWith(".webm") -> 3
-                else -> 4
+                type == "m3u8" || type == "hls" || path.endsWith(".m3u8") -> 0
+                type == "mpd" || type == "dash" || path.endsWith(".mpd") -> 1
+                type == "mp4" || path.endsWith(".mp4") -> 2
+                type == "webm" || path.endsWith(".webm") -> 3
+                type == "mkv" || path.endsWith(".mkv") -> 4
+                else -> 5
             }
         }
         return streams.minByOrNull { rank(it) }

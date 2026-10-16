@@ -258,6 +258,9 @@ private object LocalAudioThumbnailDiskCache {
     private const val MAX_BYTES = 48L * 1024L * 1024L
 
     private fun dir(context: Context): File =
+        File(context.filesDir, "thumbnails/audio").apply { mkdirs() }
+
+    private fun legacyDir(context: Context): File =
         File(context.cacheDir, "local_audio_thumbnail_cache").apply { mkdirs() }
 
     private fun key(audioId: Long, uri: Uri, path: String, targetSizePx: Int): String {
@@ -275,11 +278,17 @@ private object LocalAudioThumbnailDiskCache {
     }
 
     fun read(context: Context, audioId: Long, uri: Uri, path: String, targetSizePx: Int): Bitmap? {
-        val file = File(dir(context), "${key(audioId, uri, path, targetSizePx)}.png")
-        if (!file.isFile || file.length() <= 0L) return null
-        return runCatching {
-            BitmapFactory.decodeFile(file.absolutePath)?.takeUnless { it.isRecycled }
-        }.getOrNull()
+        val name = "${key(audioId, uri, path, targetSizePx)}.png"
+        val file = File(dir(context), name)
+        if (file.isFile && file.length() > 0L) {
+            return runCatching { BitmapFactory.decodeFile(file.absolutePath)?.takeUnless { it.isRecycled } }.getOrNull()
+        }
+        // Migrate the old cache entry into persistent app storage before returning it.
+        val legacy = File(legacyDir(context), name)
+        if (!legacy.isFile || legacy.length() <= 0L) return null
+        val bitmap = runCatching { BitmapFactory.decodeFile(legacy.absolutePath)?.takeUnless { it.isRecycled } }.getOrNull()
+        if (bitmap != null) write(context, audioId, uri, path, targetSizePx, bitmap)
+        return bitmap
     }
 
     fun write(context: Context, audioId: Long, uri: Uri, path: String, targetSizePx: Int, bitmap: Bitmap) {
@@ -293,13 +302,6 @@ private object LocalAudioThumbnailDiskCache {
             if (!temp.renameTo(target)) {
                 target.delete()
                 temp.renameTo(target)
-            }
-            val files = folder.listFiles { f -> f.isFile && f.extension.equals("png", true) }.orEmpty()
-            var total = files.sumOf { it.length() }
-            for (file in files.sortedBy { it.lastModified() }) {
-                if (total <= MAX_BYTES) break
-                total -= file.length()
-                file.delete()
             }
         }.onFailure { runCatching { temp.delete() } }
     }
