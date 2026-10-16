@@ -20,7 +20,10 @@ data class FormatOption(
     val codec: String,
     val sizeBytes: Long,
     /** true = the format already contains sound (no audio has to be merged). */
-    val hasAudio: Boolean
+    val hasAudio: Boolean,
+    /** Frame height in pixels (0 = unknown / audio). */
+    val height: Int = 0,
+    val fps: Int = 0
 )
 
 data class LinkInfo(
@@ -74,10 +77,30 @@ object DownloadProbe {
         }
     }
 
+    /**
+     * The quality the app downloads when the user did not pick one ("Auto"): the best picture up to 1080p (highest
+     * height, then highest frame rate, H.264 preferred because it plays everywhere). Picking the real best stream
+     * matters: the old single-file selector ended up with the 360p file of YouTube, which looked blurry.
+     */
+    fun pickAutoVideo(info: LinkInfo): FormatOption? {
+        val list = info.videoFormats
+        if (list.isEmpty()) return null
+        val capped = list.filter { it.height in 1..1080 }
+        val pool = if (capped.isNotEmpty()) capped else list
+        val topH = pool.maxOf { it.height }
+        val topFps = pool.filter { it.height == topH }.maxOf { it.fps }
+        return pool.filter { it.height == topH && it.fps == topFps }
+            .minWithOrNull(compareBy<FormatOption> { familyRank(it.codec) }.thenByDescending { it.sizeBytes })
+    }
+
+    /** Best audio for an audio download: the highest bit rate, m4a first (its cover picture can be embedded). */
+    fun pickAutoAudio(info: LinkInfo): FormatOption? =
+        info.audioFormats.firstOrNull { it.ext.equals("m4a", true) } ?: info.audioFormats.firstOrNull()
+
     private fun str(o: JSONObject, key: String): String =
         if (o.isNull(key)) "" else o.optString(key, "")
 
-    private fun parse(root: JSONObject): LinkInfo {
+    internal fun parse(root: JSONObject): LinkInfo {
         val duration = root.optDouble("duration", 0.0).let { if (it.isNaN()) 0.0 else it }
         val arr = root.optJSONArray("formats")
         val video = ArrayList<FormatOption>()
@@ -135,7 +158,7 @@ object DownloadProbe {
                     val fpsPart = if (fps > 30.0) fps.toInt().toString() else ""
                     val label = if (h > 0) "${h}p$fpsPart" + (if (w > 0) " (${w}x$h)" else "")
                     else str(f, "format_note").ifBlank { "Best available" }
-                    val opt = FormatOption(id, label, ext.ifBlank { "mp4" }, family, size, hasA)
+                    val opt = FormatOption(id, label, ext.ifBlank { "mp4" }, family, size, hasA, h, fps.toInt())
                     val key = "$h|${fps.toInt()}|$family|$hasA"
                     val score = if (tbr > 0.0) tbr else size.toDouble()
                     val old = videoBest[key]
@@ -174,7 +197,7 @@ object DownloadProbe {
             val fpsPart = if (v.fps > 30.0) v.fps.toInt().toString() else ""
             val label = "${v.height}p$fpsPart" + (if (v.width > 0) " (${v.width}x${v.height})" else "")
             val total = if (v.size > 0L && a.size > 0L) v.size + a.size else 0L
-            videoBest["m|${key.first}|${key.second}"] = v.score to FormatOption(v.id + "+" + a.id, label, container, v.family, total, true)
+            videoBest["m|${key.first}|${key.second}"] = v.score to FormatOption(v.id + "+" + a.id, label, container, v.family, total, true, v.height, v.fps.toInt())
         }
         video.addAll(
             videoBest.values.map { it.second }.sortedWith(

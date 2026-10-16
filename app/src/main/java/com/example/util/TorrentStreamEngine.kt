@@ -53,8 +53,28 @@ object TorrentStreamEngine {
     private const val TAG = "TorrentStreamEngine"
     private const val MAGNET_TIMEOUT_SEC = 90
     private const val MAX_TORRENT_FILE_BYTES = 16 * 1024 * 1024
+    /** Playback starts after this share of the file (max [PREBUFFER_HEAD_BYTES]) is there: ~5%, never hundreds of MB. */
     private const val PREBUFFER_PERCENT = 5
-    private const val PREBUFFER_TIMEOUT_MS = 180_000L
+    private const val PREBUFFER_HEAD_BYTES = 32L * 1024 * 1024
+    private const val PREBUFFER_MIN_HEAD_BYTES = 6L * 1024 * 1024
+    /** End of the file (index of mp4 / avi, cues of mkv): needed to open some formats and to seek. */
+    private const val PREBUFFER_TAIL_BYTES = 4L * 1024 * 1024
+    /** After this time playback starts as soon as the first pieces (container header + tracks) are there. */
+    private const val PREBUFFER_SOFT_TIMEOUT_MS = 45_000L
+    private const val PREBUFFER_TIMEOUT_MS = 150_000L
+
+    /** Public trackers added to every torrent: magnet links often carry none, which means very few peers (= slow). */
+    private val EXTRA_TRACKERS = listOf(
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://exodus.desync.com:6969/announce",
+        "udp://tracker.openbittorrent.com:6969/announce",
+        "udp://open.demonii.com:1337/announce",
+        "udp://tracker.dler.org:6969/announce",
+        "udp://opentracker.io:6969/announce",
+        "https://tracker.tamersunion.org:443/announce"
+    )
 
     private val lock = Any()
 
@@ -87,6 +107,8 @@ object TorrentStreamEngine {
         val saveDir: File
     ) {
         @Volatile var selectedFile: Int = -1
+        /** 0..100: how far the start-up buffer (header + end of the file) is filled; 100 = playback can begin. */
+        @Volatile var prebufferPct: Int = 0
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -244,12 +266,64 @@ object TorrentStreamEngine {
             dataRoot = root
             val sm = SessionManager()
             sm.start()
+            tuneSession(sm)
             session = sm
             sm
         } catch (t: Throwable) {
             Log.e(TAG, "torrent session could not start", t)
             null
         }
+    }
+
+    /**
+     * Full-speed settings. libtorrent's defaults are made for a desktop client with a download queue: only 3 torrents
+     * may be active at once (a stream and two downloads at the same time made one of them wait silently) and the
+     * connection count is modest. The setters are looked up by name so a different libtorrent4j release can never
+     * break the build; a setting that does not exist is simply skipped.
+     */
+    private fun tuneSession(sm: SessionManager) {
+        try {
+            val sp = org.libtorrent4j.SettingsPack()
+            fun setInt(name: String, value: Int) {
+                try { sp.javaClass.getMethod(name, Int::class.javaPrimitiveType).invoke(sp, value) } catch (_: Throwable) {}
+            }
+            fun setBool(name: String, value: Boolean) {
+                try { sp.javaClass.getMethod(name, Boolean::class.javaPrimitiveType).invoke(sp, value) } catch (_: Throwable) {}
+            }
+            // no queueing: every torrent the app starts really runs
+            setInt("activeDownloads", 50)
+            setInt("activeSeeds", 50)
+            setInt("activeLimit", 200)
+            setInt("activeChecking", 4)
+            // as fast as the line allows
+            setInt("downloadRateLimit", 0)
+            setInt("uploadRateLimit", 0)
+            setInt("connectionsLimit", 400)
+            setInt("connectionSpeed", 60)
+            setInt("maxPeerlistSize", 3000)
+            setInt("maxQueuedDiskBytes", 16 * 1024 * 1024)
+            setInt("sendBufferWatermark", 1024 * 1024)
+            setInt("requestTimeout", 20)
+            setInt("peerConnectTimeout", 10)
+            setBool("setEnableDht", true)
+            setBool("setEnableLsd", true)
+            sm.applySettings(sp)
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not tune the torrent session", t)
+        }
+    }
+
+    private fun addExtraTrackers(h: TorrentHandle) {
+        try {
+            val cls = Class.forName("org.libtorrent4j.AnnounceEntry")
+            val ctor = cls.getConstructor(String::class.java)
+            val add = h.javaClass.getMethod("addTracker", cls)
+            for (t in EXTRA_TRACKERS) {
+                try { add.invoke(h, ctor.newInstance(t)) } catch (_: Throwable) {}
+            }
+        } catch (_: Throwable) {
+        }
+        try { h.javaClass.getMethod("forceReannounce").invoke(h) } catch (_: Throwable) {}
     }
 
     private fun activate(context: Context, infoHash: String): ActiveTorrent? = synchronized(lock) {
@@ -275,6 +349,8 @@ object TorrentStreamEngine {
             waited += 50
         }
         val found = handle ?: return null
+        try { found.resume() } catch (_: Throwable) {}
+        addExtraTrackers(found)
         val a = ActiveTorrent(infoHash, info, found, saveDir)
         active = a
         return a
@@ -331,6 +407,7 @@ object TorrentStreamEngine {
     fun fileProgressPercent(torrentPath: String): Int {
         val (hash, index) = TorrentLibrary.parsePath(torrentPath) ?: return 0
         val a = active?.takeIf { it.infoHash == hash } ?: return 0
+        if (a.prebufferPct in 0..99 && a.selectedFile == index) return a.prebufferPct
         return try {
             val fs = a.info.files()
             val size = fs.fileSize(index)
@@ -345,41 +422,80 @@ object TorrentStreamEngine {
     }
 
     /**
-     * Waits until the first ~[PREBUFFER_PERCENT]% of the file is downloaded (the part that holds the container header,
-     * the audio / subtitle tracks and the embedded fonts), so the player opens a file that has all its tracks at once.
-     * The rest keeps downloading in the background while the video plays. Gives up after [PREBUFFER_TIMEOUT_MS] and lets
-     * the player wait on its own.
+     * Start-up buffer: waits until the first ~[PREBUFFER_PERCENT]% of the file (at most [PREBUFFER_HEAD_BYTES]) and the
+     * end of the file are downloaded. The head holds the container header with ALL audio / subtitle tracks, the chapter
+     * list and the embedded fonts, so the player opens the file with every track at once. The rest keeps downloading in
+     * the background while the video plays.
+     *
+     * The old version waited for 5% of the WHOLE file (hundreds of MB for a big movie) and for the last pieces of the
+     * file, up to 3 minutes - and when a piece never came, playback was started blind. Now the wait is limited in bytes
+     * and it never blocks longer than needed: after [PREBUFFER_SOFT_TIMEOUT_MS] playback starts as soon as the container
+     * header is there; the loopback server then waits for each further piece with top priority.
      */
     private suspend fun prebuffer(a: ActiveTorrent, fileIndex: Int) {
+        a.prebufferPct = 0
         val fs = a.info.files()
         val size = fs.fileSize(fileIndex)
-        if (size <= 0L) return
+        if (size <= 0L) { a.prebufferPct = 100; return }
         val pieceLen = a.info.pieceLength().toLong()
         val first = (fs.fileOffset(fileIndex) / pieceLen).toInt()
         val last = ((fs.fileOffset(fileIndex) + size - 1) / pieceLen).toInt().coerceAtMost(a.info.numPieces() - 1)
         val total = last - first + 1
-        val target = Math.ceil(total * PREBUFFER_PERCENT / 100.0).toInt().coerceIn(minOf(3, total), total)
+        val headBytes = (size * PREBUFFER_PERCENT / 100L).coerceIn(minOf(PREBUFFER_MIN_HEAD_BYTES, size), PREBUFFER_HEAD_BYTES)
+        val headPieces = Math.ceil(headBytes.toDouble() / pieceLen).toInt().coerceIn(minOf(3, total), total)
+        // the very first pieces hold the track list: these are the minimum to open the file
+        val coreHead = minOf(headPieces, maxOf(1, Math.ceil(2L * 1024 * 1024 / pieceLen.toDouble()).toInt()))
+        val tailPieceCount = Math.ceil(PREBUFFER_TAIL_BYTES.toDouble() / pieceLen).toInt().coerceIn(1, 4)
+        val tailFirst = maxOf(first + headPieces, last - tailPieceCount + 1)
+        val tailPieces = if (tailFirst <= last) (tailFirst..last).toList() else emptyList()
         val name = fs.filePath(fileIndex).lowercase()
-        // mp4 / mov keep the index at the end of the file; without it they cannot start
-        val needTail = name.endsWith(".mp4") || name.endsWith(".m4v") || name.endsWith(".mov")
-        val tailPieces = if (needTail) (maxOf(0, last - 1)..last).filter { it >= first + target } else emptyList()
+        // mp4 / mov / avi keep their index at the end: without it they cannot start. mkv / webm / ts play without it.
+        val needTail = name.endsWith(".mp4") || name.endsWith(".m4v") || name.endsWith(".mov") || name.endsWith(".avi")
+
+        fun schedule() {
+            for (i in 0 until headPieces) {
+                try { if (!a.handle.havePiece(first + i)) a.handle.setPieceDeadline(first + i, 100 + i * 60) } catch (_: Throwable) {}
+            }
+            for ((k, p) in tailPieces.withIndex()) {
+                try { if (!a.handle.havePiece(p)) a.handle.setPieceDeadline(p, 1500 + k * 100) } catch (_: Throwable) {}
+            }
+        }
         try { a.handle.clearPieceDeadlines() } catch (_: Throwable) {}
-        for (i in 0 until target) {
-            try { if (!a.handle.havePiece(first + i)) a.handle.setPieceDeadline(first + i, 200 + i * 100) } catch (_: Throwable) {}
-        }
-        // the end of the file (cues / index) is requested early for every format so seeking works soon
-        for (p in maxOf(first + target, last - 1)..last) {
-            try { if (!a.handle.havePiece(p)) a.handle.setPieceDeadline(p, 2000) } catch (_: Throwable) {}
-        }
+        schedule()
+
         val started = System.currentTimeMillis()
-        while (System.currentTimeMillis() - started < PREBUFFER_TIMEOUT_MS) {
+        var lastSchedule = started
+        while (true) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
             if (active !== a) return
-            val ready = try {
-                (0 until target).all { a.handle.havePiece(first + it) } && tailPieces.all { a.handle.havePiece(it) }
-            } catch (_: Throwable) { true }
-            if (ready) return
-            kotlinx.coroutines.delay(250)
+            val elapsed = System.currentTimeMillis() - started
+            var haveHead = 0
+            var haveCore = 0
+            var haveTail = 0
+            try {
+                for (i in 0 until headPieces) if (a.handle.havePiece(first + i)) { haveHead++; if (i < coreHead) haveCore++ }
+                for (p in tailPieces) if (a.handle.havePiece(p)) haveTail++
+            } catch (_: Throwable) {
+                a.prebufferPct = 100
+                return
+            }
+            val tailNeeded = if (needTail) tailPieces.size else 0
+            val wanted = headPieces + tailNeeded
+            val have = haveHead + minOf(haveTail, tailNeeded)
+            a.prebufferPct = if (wanted <= 0) 100 else ((have * 100L) / wanted).toInt().coerceIn(0, 99)
+            val complete = haveHead >= headPieces && haveTail >= tailNeeded
+            // a slow swarm: the container header (all tracks) is enough to open the file
+            val softReady = elapsed > PREBUFFER_SOFT_TIMEOUT_MS && haveCore >= coreHead && (tailNeeded == 0 || haveTail >= tailNeeded)
+            if (complete || softReady || elapsed > PREBUFFER_TIMEOUT_MS) {
+                a.prebufferPct = 100
+                return
+            }
+            if (System.currentTimeMillis() - lastSchedule > 2000L) {
+                // deadlines can expire while peers are slow: ask again
+                schedule()
+                lastSchedule = System.currentTimeMillis()
+            }
+            kotlinx.coroutines.delay(200)
         }
     }
 
@@ -475,6 +591,8 @@ object TorrentStreamEngine {
                     }
                 }
                 setDownloadPriority(found, fileIndex)
+                try { found.resume() } catch (_: Throwable) {}
+                addExtraTrackers(found)
                 val dl = DlTorrent(infoHash, info, found, saveDir)
                 dl.wanted.add(fileIndex)
                 dlTorrents[infoHash] = dl
@@ -676,10 +794,10 @@ object TorrentStreamEngine {
             // a request that starts while nothing else is being served is a fresh seek: forget old deadlines
             if (activeRequests.get() <= 1) { try { a.handle.clearPieceDeadlines() } catch (_: Throwable) {} }
 
-            val windowPieces = (24L * 1024 * 1024 / pieceLen).toInt().coerceIn(4, 60)
+            val windowPieces = (48L * 1024 * 1024 / pieceLen).toInt().coerceIn(4, 96)
             val lastPieceOfFile = ((fileOffset + size - 1) / pieceLen).toInt().coerceAtMost(numPieces - 1)
             var scheduledPiece = -1
-            val buf = ByteArray(64 * 1024)
+            val buf = ByteArray(256 * 1024)
             var pos = start
             var raf: RandomAccessFile? = null
             try {
@@ -701,8 +819,19 @@ object TorrentStreamEngine {
                     var waitedMs = 0L
                     while (!a.handle.havePiece(piece)) {
                         if (closed || active !== a || socket.isClosed) return
-                        Thread.sleep(120)
-                        waitedMs += 120
+                        Thread.sleep(100)
+                        waitedMs += 100
+                        // the wanted piece must never be starved by background pieces: keep it at the very front
+                        if (waitedMs % 1500L == 0L) {
+                            try {
+                                a.handle.setPieceDeadline(piece, 0)
+                                for (i in 1 until 6) {
+                                    val p = piece + i
+                                    if (p > lastPieceOfFile) break
+                                    if (!a.handle.havePiece(p)) a.handle.setPieceDeadline(p, 200 + i * 150)
+                                }
+                            } catch (_: Throwable) {}
+                        }
                         if (waitedMs > 15 * 60 * 1000L) return
                     }
                     if (raf == null) {

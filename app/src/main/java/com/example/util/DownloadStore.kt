@@ -107,9 +107,23 @@ object DownloadStore {
         if (loaded) return
         loaded = true
         // A download that was running when the app process ended is paused now, so it can be resumed with one tap.
+        // (The ids are remembered: DownloadManager.resumeInterrupted continues them automatically on app start.)
         _items.value = read(context.applicationContext).map {
-            if (it.isActive) it.copy(status = DownloadStatus.PAUSED, speedBps = 0L, etaSec = -1L, note = null) else it
+            if (it.isActive) {
+                interrupted.add(it.id)
+                it.copy(status = DownloadStatus.PAUSED, speedBps = 0L, etaSec = -1L, note = null)
+            } else it
         }
+    }
+
+    private val interrupted = ArrayList<String>()
+
+    /** Downloads that were running when the app process ended (returned once). */
+    @Synchronized
+    fun takeInterrupted(): List<String> {
+        val list = interrupted.toList()
+        interrupted.clear()
+        return list
     }
 
     fun get(id: String): DownloadItem? = _items.value.firstOrNull { it.id == id }

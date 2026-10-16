@@ -17,6 +17,8 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -36,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference
 object DownloadManager {
     private const val TAG = "DownloadManager"
     private const val MAX_PARALLEL = 3
+    private const val MAX_AUTO_RETRIES = 4
     private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "ogg", "opus", "wav", "flac")
 
     private enum class Stop { PAUSE, CANCEL }
@@ -139,8 +142,54 @@ object DownloadManager {
                 headers = req.headers
             )
         )
+        // Direct provider links often have no size metadata in the plugin response. Probe the origin in
+        // the background so the Downloads tab can show a real total as soon as the server exposes it.
+        if (req.estimatedBytes <= 0L && (source.startsWith("http://", true) || source.startsWith("https://", true))) {
+            scope.launch { probeDirectSize(app, id, source, req.headers) }
+        }
         start(app, id)
         return "Download started"
+    }
+
+    private fun probeDirectSize(context: Context, id: String, source: String, headers: Map<String, String>) {
+        var connection: HttpURLConnection? = null
+        try {
+            connection = (URL(source).openConnection() as HttpURLConnection).apply {
+                requestMethod = "HEAD"
+                connectTimeout = 8000
+                readTimeout = 8000
+                instanceFollowRedirects = true
+                headers.forEach { (name, value) -> if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value) }
+            }
+            var length = if (connection.responseCode in 200..399) connection.getHeaderFieldLong("Content-Length", -1L) else -1L
+            connection.disconnect()
+            connection = null
+            if (length <= 0L) {
+                connection = (URL(source).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    setRequestProperty("Range", "bytes=0-0")
+                    connectTimeout = 8000
+                    readTimeout = 8000
+                    instanceFollowRedirects = true
+                    headers.forEach { (name, value) -> if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value) }
+                }
+                if (connection.responseCode == 206) {
+                    val range = connection.getHeaderField("Content-Range").orEmpty()
+                    length = range.substringAfterLast('/', "").toLongOrNull() ?: -1L
+                } else if (connection.responseCode in 200..399) {
+                    length = connection.getHeaderFieldLong("Content-Length", -1L)
+                }
+            }
+            if (length > 0L && DownloadStore.get(id) != null) {
+                DownloadStore.update(context, id, persist = true) { item ->
+                    if (item.totalBytes > 0L) item else item.copy(totalBytes = length)
+                }
+            }
+        } catch (_: Throwable) {
+            // Some CDNs deliberately hide Content-Length; progress still uses actual downloaded bytes.
+        } finally {
+            try { connection?.disconnect() } catch (_: Throwable) {}
+        }
     }
 
     fun pause(context: Context, id: String) {
@@ -240,7 +289,29 @@ object DownloadManager {
         jobs[id] = scope.launch {
             try {
                 permits.withPermit {
-                    if (!stops.containsKey(id)) runDownload(app, id)
+                    // A lost connection / a changed link must never throw the download away: it is retried (the data
+                    // that is already on disk is kept and continued) and only fails for good after several tries.
+                    var attempt = 0
+                    while (true) {
+                        try {
+                            if (!stops.containsKey(id)) runDownload(app, id)
+                            break
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (t: Throwable) {
+                            if (stops.containsKey(id)) break
+                            attempt++
+                            if (attempt >= MAX_AUTO_RETRIES || isPermanentFailure(t)) {
+                                fail(app, id, t)
+                                break
+                            }
+                            Log.w(TAG, "download retry $attempt", t)
+                            DownloadStore.update(app, id) {
+                                it.copy(status = DownloadStatus.DOWNLOADING, speedBps = 0L, etaSec = -1L, note = "Connection problem - continuing…")
+                            }
+                            delay(3000L * attempt)
+                        }
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -250,6 +321,37 @@ object DownloadManager {
                 jobs.remove(id)
             }
         }
+    }
+
+    private fun isPermanentFailure(t: Throwable): Boolean {
+        val m = (t.message ?: "").lowercase()
+        return listOf(
+            "unsupported url", "video unavailable", "private video", "is private", "sign in", "no video files",
+            "not a valid", "storage is full", "invalid torrent", "has been removed", "copyright", "age-restricted"
+        ).any { m.contains(it) }
+    }
+
+    /** Called when the app starts: downloads that were running when the app was closed continue where they stopped. */
+    fun resumeInterrupted(context: Context) {
+        val app = context.applicationContext
+        DownloadStore.init(app)
+        for (id in DownloadStore.takeInterrupted()) {
+            try { start(app, id) } catch (_: Throwable) {}
+        }
+    }
+
+    /**
+     * The part of an unfinished link download that is already on disk (null = nothing yet). It can be played like a
+     * normal video: it plays as far as it has been downloaded.
+     */
+    fun partialFile(context: Context, item: DownloadItem): File? {
+        if (item.isTorrent) return null
+        val files = linkDir(context.applicationContext, item.id).listFiles() ?: return null
+        val parts = files.filter {
+            it.isFile && it.length() > 0L &&
+                (it.name.endsWith("." + ParallelDownloader.PART_EXT) || it.name.endsWith(".part"))
+        }
+        return parts.firstOrNull { it.name.startsWith("video.") } ?: parts.maxByOrNull { it.length() }
     }
 
     private suspend fun runDownload(app: Context, id: String) {
@@ -325,7 +427,9 @@ object DownloadManager {
 
     private fun finished(dir: File, prefix: String): File? =
         dir.listFiles()
-            ?.filter { it.isFile && it.name.startsWith("$prefix.") && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl") && !it.name.contains(".part-") }
+            ?.filter { it.isFile && it.name.startsWith("$prefix.") && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl") && !it.name.contains(".part-") &&
+                !it.name.endsWith("." + ParallelDownloader.PART_EXT) && !it.name.endsWith("." + ParallelDownloader.STATE_EXT) &&
+                !it.name.endsWith(".tmp") }
             ?.maxByOrNull { it.length() }
 
     private suspend fun runLink(app: Context, id: String) {
@@ -341,10 +445,59 @@ object DownloadManager {
 
         val total = AtomicLong(item.totalBytes)
         val mergeNote = AtomicReference<String?>(null)
-        val monitor = scope.launch { monitorLoop(app, id, dir, total, mergeNote) }
-        val probe = scope.launch { probeSize(item.source, if (split != null) item.formatSpec!! else format, "$pid-probe", total) }
+        // -1 = the byte counter of the fast downloader is not used (yt-dlp fallback: the folder size is measured)
+        val live = AtomicLong(-1L)
+        var merged = split != null
+        val monitor = scope.launch { monitorLoop(app, id, dir, total, mergeNote, live) }
+        var probe: Job? = null
         try {
             withContext(Dispatchers.IO) {
+                // 1) fast path: plain files are fetched with many connections at once and are resumable
+                var done = false
+                for (attempt in 1..3) {
+                    if (stops.containsKey(id)) return@withContext
+                    val planned: List<DirectFile>? = try {
+                        planDirect(item, pid)
+                    } catch (t: Throwable) {
+                        if (stops.containsKey(id)) return@withContext
+                        Log.w(TAG, "direct plan failed", t)
+                        null
+                    }
+                    val plan = planned ?: break
+                    total.set(plan.sumOf { it.sizeEstimate })
+                    live.set(0L)
+                    try {
+                        for (f in plan) {
+                            ParallelDownloader.download(
+                                url = f.url,
+                                headers = f.headers,
+                                dest = File(dir, f.role + "." + f.ext),
+                                live = live,
+                                onTotal = { actual -> total.addAndGet(actual - f.sizeEstimate) },
+                                isCancelled = { stops.containsKey(id) }
+                            )
+                        }
+                        merged = plan.size > 1
+                        done = true
+                        break
+                    } catch (c: ParallelDownloader.CancelledException) {
+                        return@withContext
+                    } catch (u: ParallelDownloader.UnsupportedException) {
+                        Log.w(TAG, "fast download not possible: ${u.message}")
+                        live.set(-1L)
+                        break
+                    } catch (t: Throwable) {
+                        if (stops.containsKey(id)) return@withContext
+                        if (attempt >= 3) throw t
+                        Log.w(TAG, "fast download retry $attempt", t)
+                        Thread.sleep(2000L * attempt)
+                    }
+                }
+                if (done || stops.containsKey(id)) return@withContext
+
+                // 2) everything else (HLS / DASH fragments, sites without byte ranges): yt-dlp with parallel fragments
+                live.set(-1L)
+                probe = scope.launch { probeSize(item.source, if (split != null) item.formatSpec!! else format, "$pid-probe", total) }
                 fun runOnce() {
                     if (split != null) {
                         downloadOnce(item, split.first, dir, pid, mergeNote, "video")
@@ -365,14 +518,14 @@ object DownloadManager {
             }
         } finally {
             monitor.cancel()
-            probe.cancel()
+            probe?.cancel()
             try { YoutubeDL.getInstance().destroyProcessById("$pid-probe") } catch (_: Throwable) {}
         }
         if (stops.containsKey(id)) return
 
         val isCancelled = { stops.containsKey(id) }
         var out: File
-        if (split != null) {
+        if (merged) {
             val v = finished(dir, "video") ?: throw IllegalStateException("The video part was not downloaded")
             val a = finished(dir, "audio") ?: throw IllegalStateException("The audio part was not downloaded")
             DownloadStore.update(app, id, persist = true) {
@@ -466,6 +619,109 @@ object DownloadManager {
         else custom
     }
 
+    private class DirectFile(
+        val url: String,
+        val headers: Map<String, String>,
+        val ext: String,
+        val sizeEstimate: Long,
+        /** "media" (one file) or "video" / "audio" (two streams that are joined afterwards). */
+        val role: String
+    )
+
+    private val DIRECT_EXT = setOf(
+        "mp4", "m4v", "mkv", "webm", "mov", "avi", "ts", "flv", "wmv", "mpg", "mpeg", "3gp",
+        "mp3", "m4a", "aac", "ogg", "opus", "wav", "flac"
+    )
+
+    private fun directLinkExt(url: String): String? {
+        if (!url.startsWith("http", ignoreCase = true)) return null
+        val ext = url.substringBefore('?').substringBefore('#').substringAfterLast('.', "").lowercase()
+        return ext.takeIf { it in DIRECT_EXT }
+    }
+
+    private fun jsonStr(o: JSONObject, key: String): String = if (o.isNull(key)) "" else o.optString(key, "")
+
+    /**
+     * Works out the real, directly downloadable file(s) of the chosen quality. Returns null when the link needs yt-dlp
+     * itself (HLS / DASH fragments, unknown format ...), then the normal yt-dlp download runs.
+     * Without a chosen quality ("Auto") the BEST stream up to 1080p is used - not the low-resolution single file that
+     * the old "best single file" selector picked (360p on YouTube, which is why downloads looked blurry).
+     */
+    private fun planDirect(item: DownloadItem, pid: String): List<DirectFile>? {
+        val spec = item.formatSpec
+        if (spec.isNullOrBlank() && !item.isAudio) {
+            val ext = directLinkExt(item.source)
+            if (ext != null) return listOf(DirectFile(item.source, item.headers, ext, item.totalBytes, "media"))
+        }
+        val req = YoutubeDLRequest(item.source)
+        req.addOption("--dump-single-json")
+        req.addOption("--no-playlist")
+        req.addOption("--no-warnings")
+        req.addOption("--no-check-certificates")
+        req.addOption("--socket-timeout", 20)
+        for ((hName, hValue) in item.headers) {
+            if (hName.isBlank() || hValue.isBlank()) continue
+            if (hName.equals("User-Agent", ignoreCase = true)) req.addOption("--user-agent", hValue)
+            else req.addOption("--add-header", "$hName:$hValue")
+        }
+        val out = YoutubeDL.getInstance().execute(req, "$pid-probe", null).out
+        val root = JSONObject(out.trim())
+        val list = root.optJSONArray("formats") ?: org.json.JSONArray().put(root)
+
+        val ids: List<String> = if (!spec.isNullOrBlank()) {
+            val head = if (item.isAudio) spec.substringBefore('/') else spec
+            if (!Regex("^[A-Za-z0-9_.\\-]+(\\+[A-Za-z0-9_.\\-]+)?$").matches(head)) return null
+            head.split('+')
+        } else {
+            val info = DownloadProbe.parse(root)
+            val pick = (if (item.isAudio) DownloadProbe.pickAutoAudio(info) else DownloadProbe.pickAutoVideo(info)) ?: return null
+            pick.id.split('+')
+        }
+        if (ids.isEmpty() || ids.size > 2) return null
+
+        val duration = root.optDouble("duration", 0.0).let { if (it.isNaN()) 0.0 else it }
+        class Found(val file: DirectFile, val audioOnly: Boolean)
+        val found = ArrayList<Found>()
+        for (fid in ids) {
+            var f: JSONObject? = null
+            for (i in 0 until list.length()) {
+                val o = list.optJSONObject(i) ?: continue
+                if (jsonStr(o, "format_id") == fid) { f = o; break }
+            }
+            val fo = f ?: return null
+            val url = jsonStr(fo, "url")
+            if (url.isBlank()) return null
+            val protocol = jsonStr(fo, "protocol")
+            if (!(protocol.isEmpty() || protocol == "https" || protocol == "http")) return null
+            val fragments = fo.optJSONArray("fragments")
+            if (fragments != null && fragments.length() > 0) return null
+            val hdrs = LinkedHashMap<String, String>()
+            fo.optJSONObject("http_headers")?.let { h ->
+                val keys = h.keys()
+                while (keys.hasNext()) { val k = keys.next(); hdrs[k] = h.optString(k) }
+            }
+            hdrs.putAll(item.headers)
+            var size = fo.optLong("filesize", 0L)
+            if (size <= 0L) size = fo.optLong("filesize_approx", 0L)
+            if (size <= 0L) {
+                val tbr = fo.optDouble("tbr", 0.0).let { if (it.isNaN()) 0.0 else it }
+                if (tbr > 0.0 && duration > 0.0) size = (tbr * 125.0 * duration).toLong()
+            }
+            val vcodec = jsonStr(fo, "vcodec")
+            val audioOnly = vcodec == "none"
+            val ext = jsonStr(fo, "ext").ifBlank { if (audioOnly) "m4a" else "mp4" }
+            found.add(Found(DirectFile(url, hdrs, ext, size, "media"), audioOnly))
+        }
+        if (found.size == 1) return listOf(found[0].file)
+        val v = found.firstOrNull { !it.audioOnly } ?: return null
+        val a = found.firstOrNull { it.audioOnly } ?: return null
+        if (v === a) return null
+        return listOf(
+            DirectFile(v.file.url, v.file.headers, v.file.ext, v.file.sizeEstimate, "video"),
+            DirectFile(a.file.url, a.file.headers, a.file.ext, a.file.sizeEstimate, "audio")
+        )
+    }
+
     private fun downloadOnce(
         item: DownloadItem,
         format: String,
@@ -486,6 +742,7 @@ object DownloadManager {
         // full speed: 16 fragments of a DASH / HLS video at the same time, big HTTP chunks for everything else
         req.addOption("-N", 16)
         req.addOption("--http-chunk-size", "10M")
+        req.addOption("--buffer-size", "256K")
         req.addOption("-f", format)
         for ((hName, hValue) in item.headers) {
             if (hName.isBlank() || hValue.isBlank()) continue
@@ -548,15 +805,17 @@ object DownloadManager {
         id: String,
         dir: File,
         total: AtomicLong,
-        note: AtomicReference<String?>
+        note: AtomicReference<String?>,
+        live: AtomicLong
     ) {
-        var last = dirSize(dir)
+        fun measured(): Long = if (live.get() >= 0L) live.get() else dirSize(dir)
+        var last = measured()
         var lastTime = SystemClock.elapsedRealtime()
         var speed = 0.0
         while (true) {
             delay(500L)
             val now = SystemClock.elapsedRealtime()
-            val size = dirSize(dir)
+            val size = measured()
             val dt = (now - lastTime).coerceAtLeast(1L)
             val inst = (size - last).coerceAtLeast(0L) * 1000.0 / dt
             speed = if (speed == 0.0) inst else speed * 0.6 + inst * 0.4

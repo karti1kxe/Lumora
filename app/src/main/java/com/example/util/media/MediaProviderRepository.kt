@@ -75,7 +75,11 @@ object MediaProviderRepository {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             val url = o.optString("link", "").trim()
-            if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) continue
+            val isHttp = url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)
+            // Vega-compatible torrent providers may return an app-native torrent path rather than an HTTP URL.
+            // It must be passed to the existing torrent engine, not silently discarded as an unplayable stream.
+            val isTorrentPath = url.startsWith("torrent://", ignoreCase = true)
+            if (!isHttp && !isTorrentPath) continue
             val headers = LinkedHashMap<String, String>()
             o.optJSONObject("headers")?.let { h ->
                 val keys = h.keys()

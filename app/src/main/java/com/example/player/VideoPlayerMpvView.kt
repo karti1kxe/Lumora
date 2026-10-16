@@ -38,6 +38,10 @@ class VideoPlayerMpvView @JvmOverloads constructor(
 
     override fun initOptions() {
         mpv.setOptionString("profile", "fast")
+        // "fast" renders with bilinear scaling, which makes every 720p / 1080p video look soft on a phone screen.
+        // Sharper upscaling (and a normal chroma scaler) costs very little and makes the real quality visible.
+        mpv.setOptionString("scale", "spline36")
+        mpv.setOptionString("cscale", "bilinear")
         mpv.setOptionString("vo", "gpu")
         mpv.setOptionString("gpu-context", "android")
         mpv.setOptionString("hwdec", "mediacodec")

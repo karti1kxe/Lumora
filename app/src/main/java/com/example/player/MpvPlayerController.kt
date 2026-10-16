@@ -600,11 +600,15 @@ class MpvPlayerController {
                 streamingProfileApplied = true
             } else if (streamingProfileApplied) {
                 view.mpv.setPropertyString("cache", "auto")
-                view.mpv.setPropertyString("scale", "bilinear")
+                // local files keep the sharper upscaler too (bilinear made downloaded 720p / 1080p videos look blurry)
+                view.mpv.setPropertyString("scale", "spline36")
                 view.mpv.setPropertyString("dscale", "bilinear")
                 view.mpv.setPropertyString("correct-downscaling", "no")
                 view.mpv.setPropertyString("demuxer-readahead-secs", "1")
                 view.mpv.setPropertyString("cache-pause-wait", "1")
+                // streams / torrents use bigger probes: back to mpv's normal values for local files
+                try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "0") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
                 streamingProfileApplied = false
             }
         } catch (_: Throwable) {}
@@ -1316,6 +1320,13 @@ class MpvPlayerController {
             // swarm, so mpv must not give up after its default 60 s network timeout.
             if (filePath.startsWith("http://127.0.0.1:")) {
                 try { view.mpv.setPropertyString("network-timeout", "900") } catch (_: Throwable) {}
+                // The local torrent server answers every request on its own connection. ffmpeg's keep-alive
+                // ("multiple_requests") / reconnect-at-EOF options only confuse it, so plain reconnect is used.
+                try { view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("cache-pause-wait", "2") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-readahead-secs", "60") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "10") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-probesize", "20000000") } catch (_: Throwable) {}
             }
             try {
                 view.mpv.command("loadfile", filePath, "replace")

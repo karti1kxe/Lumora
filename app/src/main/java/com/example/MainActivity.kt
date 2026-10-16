@@ -170,6 +170,8 @@ class MainActivity : ComponentActivity() {
         // HomeScreen performs the initial silent/cache scan. Do not start a second
         // full-library scan here every time the Activity is recreated.
         com.example.util.AppStorageManager.performBackgroundCleanup(applicationContext)
+        // downloads that were running when the app was closed continue by themselves, from where they stopped
+        try { com.example.util.DownloadManager.resumeInterrupted(applicationContext) } catch (_: Throwable) {}
         PipModeState.requestPipUpdate = { isPlaying, autoPip ->
             updatePipParams(isPlaying, autoPip)
         }

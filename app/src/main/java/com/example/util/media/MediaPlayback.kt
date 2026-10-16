@@ -63,6 +63,7 @@ object MediaPlayback {
             session.subtitles = stream.subtitles
             PluginPlaybackSessions.put(stream.link, session)
         }
+        val isTorrent = stream.link.startsWith("torrent://", ignoreCase = true)
         val ua = stream.headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value
         val ref = stream.headers.entries.firstOrNull { it.key.equals("Referer", true) || it.key.equals("Referrer", true) }?.value
         val extra = LinkedHashMap<String, String>()
@@ -70,10 +71,11 @@ object MediaPlayback {
             if (k.equals("User-Agent", true) || k.equals("Referer", true) || k.equals("Referrer", true)) continue
             extra[k] = v
         }
-        StreamEntryStore.attach(context)
-        StreamEntryStore.putAll(
-            listOf(
-                StreamEntryMeta(
+        if (!isTorrent) {
+            StreamEntryStore.attach(context)
+            StreamEntryStore.putAll(
+                listOf(
+                    StreamEntryMeta(
                     url = stream.link,
                     name = title,
                     logo = poster.ifBlank { null },
@@ -82,8 +84,9 @@ object MediaPlayback {
                     referrer = ref,
                     extraHeaders = extra
                 )
+                )
             )
-        )
+        }
         return VideoItem(
             id = -(kotlin.math.abs(("mediaplugin:" + stream.link).hashCode().toLong())) - 1L,
             uri = Uri.parse(stream.link),
@@ -95,7 +98,8 @@ object MediaPlayback {
             isOnline = true,
             thumbnailUrl = poster.ifBlank { null },
             channelName = plugin.name,
-            isDirectStream = true
+            isDirectStream = !isTorrent,
+            isTorrentStream = isTorrent
         )
     }
 

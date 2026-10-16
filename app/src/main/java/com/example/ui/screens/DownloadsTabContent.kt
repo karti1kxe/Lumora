@@ -345,7 +345,8 @@ private fun DownloadCard(
             .background(surfaceColor)
             .border(1.dp, borderColor, shape)
             .then(
-                if (done) Modifier.clickable(
+                // an unfinished download can be played too: it plays as far as it has been downloaded
+                if (done || (d.downloadedBytes > 0L && !d.isTorrent)) Modifier.clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                     onClick = onPlay
@@ -513,6 +514,10 @@ private fun statusText(d: DownloadItem): String = when (d.status) {
 }
 
 private fun playDownload(context: android.content.Context, d: DownloadItem, onPlayVideo: (VideoItem, List<VideoItem>) -> Unit) {
+    if (d.status != DownloadStatus.COMPLETED) {
+        playPartialDownload(context, d, onPlayVideo)
+        return
+    }
     if (!DownloadFileSaver.exists(context, d)) {
         Toast.makeText(context, "This file was deleted from the phone", Toast.LENGTH_SHORT).show()
         return
@@ -547,6 +552,48 @@ private fun playDownload(context: android.content.Context, d: DownloadItem, onPl
         displayName = d.title,
         path = path,
         sizeBytes = d.totalBytes,
+        durationMs = 0L,
+        dateModified = d.createdAt / 1000L
+    )
+    onPlayVideo(video, listOf(video))
+}
+
+/** Plays the part of a still unfinished download that is already on the phone (as much as has been downloaded). */
+private fun playPartialDownload(context: android.content.Context, d: DownloadItem, onPlayVideo: (VideoItem, List<VideoItem>) -> Unit) {
+    val part = DownloadManager.partialFile(context, d)
+    if (part == null) {
+        Toast.makeText(context, "Nothing downloaded yet", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val uri = Uri.fromFile(part)
+    val mediaId = -(kotlin.math.abs(("download-part:" + d.id).hashCode().toLong())) - 1L
+    if (d.isAudio) {
+        val track = AudioTrackItem(
+            id = mediaId,
+            uri = uri,
+            title = d.title,
+            artist = d.subtitle ?: "Download",
+            album = "Download",
+            durationMs = 0L,
+            path = part.absolutePath,
+            sizeBytes = part.length(),
+            format = "AUDIO",
+            thumbnailUrl = null
+        )
+        try {
+            AudioPlaybackManager.openFullScreen()
+            AudioPlaybackManager.playTrack(context = context, track = track, newQueue = listOf(track))
+        } catch (_: Throwable) {
+            Toast.makeText(context, "Could not start the audio player", Toast.LENGTH_SHORT).show()
+        }
+        return
+    }
+    val video = VideoItem(
+        id = mediaId,
+        uri = uri,
+        displayName = d.title + " (" + DownloadFormat.bytes(d.downloadedBytes) + ")",
+        path = part.absolutePath,
+        sizeBytes = part.length(),
         durationMs = 0L,
         dateModified = d.createdAt / 1000L
     )
