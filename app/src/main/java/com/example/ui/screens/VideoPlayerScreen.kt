@@ -668,8 +668,12 @@ fun VideoPlayerScreen(
         if (com.example.util.media.HlsVariants.looksLikeHls(stream.link, stream.type)) {
             variants = withContext(Dispatchers.IO) {
                 val headers = if (stream.headers.isNotEmpty()) stream.headers else providerHeaders(stream.link)
-                com.example.util.media.HlsVariants.fetch(stream.link, headers, com.example.util.NetworkBypass.okHttpProxy(context))
-                    .ifEmpty { com.example.util.media.HlsVariants.fetch(stream.link, headers, null) }
+                // only the quality list: a short wait, direct first, the proxy only when the request itself failed
+                com.example.util.media.HlsVariants.fetchResult(stream.link, headers, null, 4000)
+                    ?: com.example.util.NetworkBypass.okHttpProxy(context)?.let { px ->
+                        com.example.util.media.HlsVariants.fetchResult(stream.link, headers, px, 4000)
+                    }
+                    ?: emptyList()
             }
         }
         if (key != null && lastLoadedVideoKey != key) return

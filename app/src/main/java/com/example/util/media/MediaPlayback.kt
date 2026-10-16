@@ -8,41 +8,132 @@ import com.example.util.DownloadRequest
 import com.example.util.PlaylistManager
 import com.example.util.StreamEntryMeta
 import com.example.util.StreamEntryStore
+import com.example.util.TorrentFileInfo
+import com.example.util.TorrentLibrary
+import com.example.util.TorrentSource
+import com.example.util.TorrentStreamEngine
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import java.net.HttpURLConnection
+import java.net.URL
 
 /** Turns a plugin's stream into something the app's own player / playlists / downloader understand. */
 object MediaPlayback {
+    /** The browser User-Agent the plugin engine itself used to get the link; used for the player too when the plugin names none. */
+    private const val STREAM_UA =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
     private fun rank(s: MediaStream): Int {
         val path = s.link.substringBefore('?').substringBefore('#').lowercase()
         val type = s.type.lowercase()
         return when {
             type == "m3u8" || type == "hls" || path.endsWith(".m3u8") -> 0
-            type == "mpd" || type == "dash" || path.endsWith(".mpd") -> 1
-            type == "mp4" || path.endsWith(".mp4") -> 2
-            type == "webm" || path.endsWith(".webm") -> 3
-            type == "mkv" || path.endsWith(".mkv") -> 4
+            type == "mp4" || path.endsWith(".mp4") -> 1
+            type == "webm" || path.endsWith(".webm") -> 2
+            type == "mkv" || path.endsWith(".mkv") -> 3
+            // DASH is the least reliable in mpv: after the direct media files
+            type == "mpd" || type == "dash" || path.endsWith(".mpd") -> 4
             else -> 5
         }
+    }
+
+    private val MAGNET_RE = Regex("magnet:\\?\\S+", RegexOption.IGNORE_CASE)
+
+    /** A magnet link or a .torrent file link: it has to be opened with the torrent engine first. */
+    fun needsTorrentEngine(s: MediaStream): Boolean {
+        if (s.link.startsWith("torrent://", ignoreCase = true)) return false
+        return s.link.startsWith("magnet:", ignoreCase = true) ||
+            s.link.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)
+    }
+
+    private val EPISODE_RE = Regex("(?i)s0*(\\d{1,2})\\s*[._ -]?e0*(\\d{1,3})")
+    private val EPISODE_ONLY_RE = Regex("(?i)(?:episode|ep|e)\\s*[._ -]?0*(\\d{1,3})(?![0-9])")
+
+    private fun episodeOf(text: String): Pair<Int?, Int>? {
+        EPISODE_RE.find(text)?.let { m ->
+            val e = m.groupValues[2].toIntOrNull() ?: return null
+            return m.groupValues[1].toIntOrNull() to e
+        }
+        EPISODE_ONLY_RE.find(text)?.let { m ->
+            val e = m.groupValues[1].toIntOrNull() ?: return null
+            return null to e
+        }
+        return null
+    }
+
+    /** The video of a torrent to play: the wanted episode of a season pack, else the biggest video (the movie itself). */
+    private fun pickTorrentFile(videos: List<TorrentFileInfo>, episodeTitle: String, episodeIndex: Int): TorrentFileInfo? {
+        if (videos.size <= 1) return videos.firstOrNull()
+        if (episodeIndex >= 0) {
+            val want = episodeOf(episodeTitle)
+            if (want != null) {
+                val match = videos.firstOrNull { f ->
+                    val got = episodeOf(f.displayName)
+                    got != null && got.second == want.second && (want.first == null || got.first == null || got.first == want.first)
+                }
+                if (match != null) return match
+            }
+            videos.getOrNull(episodeIndex)?.let { return it }
+        }
+        return videos.maxByOrNull { it.size }
+    }
+
+    /** Opens the torrent behind a magnet / .torrent link and returns the stream of its video as a "torrent://" path. */
+    private suspend fun resolveTorrentStream(context: Context, s: MediaStream, episodeTitle: String, episodeIndex: Int): Result<MediaStream> {
+        val magnet = MAGNET_RE.find(s.link)?.value
+        val source = if (magnet != null) TorrentSource.Magnet(magnet) else TorrentSource.RemoteFile(s.link)
+        val (summary, error) = TorrentStreamEngine.fetchSummary(context, source)
+        if (summary == null) return Result.failure(PluginException(error ?: "could not open the torrent"))
+        val file = pickTorrentFile(summary.videoFiles, episodeTitle, episodeIndex)
+            ?: return Result.failure(PluginException("no video file was found in this torrent"))
+        return Result.success(
+            s.copy(
+                link = TorrentLibrary.pathFor(summary.infoHash, file.index),
+                type = "torrent",
+                headers = emptyMap(),
+                alternatives = emptyList()
+            )
+        )
     }
 
     /** Prefer adaptive streaming when a provider offers it; fall back to direct media files. */
     fun pickBest(streams: List<MediaStream>): MediaStream? = streams.minByOrNull { rank(it) }
 
     /** Asks the plugin for the playable link of [link]. [forDownload] lets the plugin return a downloadable server. */
-    suspend fun resolve(context: Context, plugin: MediaPluginInfo, link: String, type: String, forDownload: Boolean = false): Result<MediaStream> {
+    suspend fun resolve(
+        context: Context,
+        plugin: MediaPluginInfo,
+        link: String,
+        type: String,
+        forDownload: Boolean = false,
+        episodeTitle: String = "",
+        episodeIndex: Int = -1
+    ): Result<MediaStream> {
         return try {
             val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, forDownload)
             val ranked = streams.sortedBy { rank(it) }
-            val best = ranked.firstOrNull()
-            if (best == null) {
-                Result.failure(PluginException("no playable link was found"))
+            // direct links first; magnet / .torrent links (torrent providers) are opened with the torrent engine
+            var best: MediaStream? = null
+            var torrentError: Throwable? = null
+            for (candidate in ranked) {
+                if (!needsTorrentEngine(candidate)) { best = candidate; break }
+                val converted = resolveTorrentStream(context, candidate, episodeTitle, episodeIndex)
+                val ok = converted.getOrNull()
+                if (ok != null) { best = ok; break }
+                torrentError = converted.exceptionOrNull()
+            }
+            val chosen = best
+            if (chosen == null) {
+                Result.failure(torrentError ?: PluginException("no playable link was found"))
             } else {
                 // every subtitle the plugin listed (on any server) is offered in the player, without duplicates
                 val allSubs = streams.flatMap { it.subtitles }.distinctBy { it.uri }
                 // the other servers stay available: the player's Server list, and the fallback when this one cannot be played
-                val others = ranked.drop(1).filter { it.link != best.link }.distinctBy { it.link }
-                Result.success(best.copy(subtitles = if (allSubs.size > best.subtitles.size) allSubs else best.subtitles, alternatives = others))
+                val others = ranked.filter { it !== chosen && it.link != chosen.link && !needsTorrentEngine(it) }.distinctBy { it.link }
+                Result.success(chosen.copy(subtitles = if (allSubs.size > chosen.subtitles.size) allSubs else chosen.subtitles, alternatives = others))
             }
         } catch (e: CancellationException) {
             throw e
@@ -77,7 +168,7 @@ object MediaPlayback {
             PluginPlaybackSessions.put(stream.link, session)
         }
         val isTorrent = stream.link.startsWith("torrent://", ignoreCase = true)
-        val ua = stream.headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value
+        val ua = stream.headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value?.takeIf { it.isNotBlank() } ?: STREAM_UA
         val ref = stream.headers.entries.firstOrNull { it.key.equals("Referer", true) || it.key.equals("Referrer", true) }?.value
         val extra = LinkedHashMap<String, String>()
         for ((k, v) in stream.headers) {
@@ -131,12 +222,149 @@ object MediaPlayback {
             fun norm(t: String) = t.lowercase().filter { it.isLetterOrDigit() }
             val target = list.firstOrNull { norm(it.title) == norm(episodeTitle) } ?: list.getOrNull(episodeIndex)
                 ?: return Result.failure(PluginException("this quality does not have the same episode"))
-            resolve(context, plugin, target.link, target.type ?: if (isSeries) "series" else "movie", forDownload)
+            resolve(context, plugin, target.link, target.type ?: if (isSeries) "series" else "movie", forDownload, episodeTitle, if (isSeries) episodeIndex else -1)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             Result.failure(t)
         }
+    }
+
+    /** Every playable source the plugin lists for [link] (all servers, not only the best), for the download list. */
+    suspend fun resolveAll(context: Context, plugin: MediaPluginInfo, link: String, type: String, forDownload: Boolean): Result<List<MediaStream>> {
+        return try {
+            val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, forDownload)
+                .distinctBy { it.link }
+                .sortedBy { rank(it) }
+            if (streams.isEmpty()) Result.failure(PluginException("no playable link was found")) else Result.success(streams)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    /** [resolveAll] for the same movie / episode in another quality option of the title. */
+    suspend fun resolveChoiceAll(
+        context: Context,
+        plugin: MediaPluginInfo,
+        choice: PluginQualityChoice,
+        episodeIndex: Int,
+        episodeTitle: String,
+        isSeries: Boolean,
+        forDownload: Boolean
+    ): Result<List<MediaStream>> {
+        return try {
+            val list = choice.episodesLink?.let { MediaProviderRepository.loadEpisodes(context, plugin.value, it) } ?: choice.directLinks
+            fun norm(t: String) = t.lowercase().filter { it.isLetterOrDigit() }
+            val target = list.firstOrNull { norm(it.title) == norm(episodeTitle) } ?: list.getOrNull(episodeIndex)
+                ?: return Result.failure(PluginException("this quality does not have the same episode"))
+            resolveAll(context, plugin, target.link, target.type ?: if (isSeries) "series" else "movie", forDownload)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    /** One row of the download list: a file the website offers (server, quality, format, size). */
+    data class DownloadOption(val stream: MediaStream, val title: String, val detail: String, val quality: String?)
+
+    private val QUALITY_RE = Regex("(?i)(?<![0-9a-zA-Z])(2160|1440|1080|720|576|480|360|240)p(?![a-zA-Z])")
+
+    private fun qualityOf(s: MediaStream): String? {
+        s.quality?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+        val path = s.link.substringBefore('#')
+        QUALITY_RE.find(path)?.let { return it.groupValues[1] + "p" }
+        if (Regex("(?i)(?<![0-9a-zA-Z])4k(?![a-zA-Z])").containsMatchIn(path)) return "4K"
+        return null
+    }
+
+    private fun heightOf(q: String?): Int {
+        if (q == null) return 0
+        if (q.equals("4K", true)) return 2160
+        return Regex("(\\d{3,4})").find(q)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    }
+
+    private fun formatOf(s: MediaStream): String {
+        val path = s.link.substringBefore('?').substringBefore('#').lowercase()
+        val type = s.type.lowercase()
+        return when {
+            s.link.startsWith("torrent://", ignoreCase = true) || needsTorrentEngine(s) -> "Torrent"
+            HlsVariants.looksLikeHls(s.link, s.type) -> "HLS"
+            type == "mpd" || type == "dash" || path.endsWith(".mpd") -> "DASH"
+            type == "mp4" || path.endsWith(".mp4") -> "MP4"
+            type == "mkv" || path.endsWith(".mkv") -> "MKV"
+            type == "webm" || path.endsWith(".webm") -> "WEBM"
+            type.isNotBlank() -> type.uppercase()
+            else -> "File"
+        }
+    }
+
+    private fun formatSize(bytes: Long): String = when {
+        bytes >= (1L shl 30) -> String.format(java.util.Locale.US, "%.2f GB", bytes / 1073741824.0)
+        bytes >= (1L shl 20) -> String.format(java.util.Locale.US, "%.0f MB", bytes / 1048576.0)
+        else -> String.format(java.util.Locale.US, "%d KB", bytes / 1024L)
+    }
+
+    private fun probeSize(link: String, headers: Map<String, String>): Long {
+        fun open(method: String, range: Boolean): HttpURLConnection = (URL(link).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = 4000
+            readTimeout = 4000
+            instanceFollowRedirects = true
+            for ((k, v) in headers) if (k.isNotBlank() && v.isNotBlank() && !k.equals("Host", true)) { try { setRequestProperty(k, v) } catch (_: Throwable) {} }
+            if (headers.keys.none { it.equals("User-Agent", true) }) setRequestProperty("User-Agent", STREAM_UA)
+            if (range) setRequestProperty("Range", "bytes=0-0")
+        }
+        try {
+            val head = open("HEAD", false)
+            try {
+                val len = if (head.responseCode in 200..399) head.getHeaderFieldLong("Content-Length", -1L) else -1L
+                if (len > 0L) return len
+            } finally { head.disconnect() }
+            val get = open("GET", true)
+            try {
+                if (get.responseCode !in 200..299) return -1L
+                val total = get.getHeaderField("Content-Range")?.substringAfter('/', "")?.trim()?.toLongOrNull()
+                if (total != null && total > 0L) return total
+                return if (get.responseCode == 200) get.getHeaderFieldLong("Content-Length", -1L) else -1L
+            } finally { get.disconnect() }
+        } catch (_: Throwable) {
+            return -1L
+        }
+    }
+
+    private fun optionsOf(s: MediaStream): List<DownloadOption> {
+        val format = formatOf(s)
+        val headers = s.headers
+        if (format == "HLS") {
+            // a master playlist is opened to list its qualities (each one downloads its own rendition)
+            val variants = HlsVariants.fetch(s.link, headers, null, 4000)
+            if (variants.isNotEmpty()) {
+                return variants.map { v ->
+                    DownloadOption(
+                        stream = s.copy(link = v.uri, type = "m3u8", quality = v.label, subtitles = emptyList(), alternatives = emptyList()),
+                        title = s.server,
+                        detail = listOf(v.label, "HLS", v.bitrateText()).filter { it.isNotBlank() }.joinToString(" · "),
+                        quality = v.label
+                    )
+                }
+            }
+        }
+        val quality = qualityOf(s)
+        val size = if (format == "Torrent" || format == "HLS" || format == "DASH") -1L else probeSize(s.link, headers)
+        val detail = listOfNotNull(quality, format, size.takeIf { it > 0L }?.let { formatSize(it) }).joinToString(" · ")
+        return listOf(DownloadOption(s.copy(subtitles = emptyList(), alternatives = emptyList()), s.server, detail, quality))
+    }
+
+    /** The download list of a movie / episode: every file / quality the website offers, best quality first, with sizes when known. */
+    suspend fun downloadOptions(streams: List<MediaStream>): List<DownloadOption> = coroutineScope {
+        val all = streams.map { s -> async(Dispatchers.IO) { try { optionsOf(s) } catch (_: Throwable) { emptyList() } } }
+            .awaitAll()
+            .flatten()
+            .distinctBy { it.stream.link }
+        all.sortedByDescending { heightOf(it.quality) }
     }
 
     /** Puts the video at the top of a playlist named after the website (created on first use). Returns true if it was created. */
@@ -146,6 +374,37 @@ object MediaPlayback {
         val playlist = existing ?: PlaylistManager.createPlaylist(context, plugin.name, "VIDEO", true)
         PlaylistManager.updatePlaylistVideosOrder(context, playlist.id, listOf(item.path) + playlist.videoPaths.filter { it != item.path })
         return existing == null
+    }
+
+    /**
+     * Torrent download (magnet / .torrent link of a torrent provider): the torrent's file list is read, the wanted video
+     * (the episode of a season pack, else the movie) is picked and downloaded with the app's torrent downloader.
+     */
+    suspend fun startTorrentDownload(
+        context: Context,
+        plugin: MediaPluginInfo,
+        title: String,
+        poster: String,
+        stream: MediaStream,
+        episodeTitle: String,
+        episodeIndex: Int
+    ): String {
+        val result = resolveTorrentStream(context, stream, episodeTitle, episodeIndex)
+        val resolved = result.getOrNull() ?: return "Could not start the torrent: " + (result.exceptionOrNull()?.message ?: "unknown error")
+        return try {
+            com.example.util.DownloadManager.enqueueFromRecent(
+                context,
+                com.example.util.RecentStreamEntry(
+                    url = resolved.link,
+                    title = title,
+                    subtitle = plugin.name,
+                    playedAt = System.currentTimeMillis(),
+                    thumbnail = poster.ifBlank { null }
+                )
+            )
+        } catch (_: Throwable) {
+            "Could not start the download"
+        }
     }
 
     /** Starts the download right away (no sheet); the plugin's headers are sent with it. Returns the status message. */
@@ -250,7 +509,7 @@ object PluginQueuedEpisodes {
     /** Gets the real stream of a queued episode and returns the item the player can open. */
     suspend fun resolve(context: Context, path: String): Result<VideoItem> {
         val ep = map[path] ?: return Result.failure(PluginException("this episode is no longer queued"))
-        val result = MediaPlayback.resolve(context, ep.plugin, ep.link, ep.type, false)
+        val result = MediaPlayback.resolve(context, ep.plugin, ep.link, ep.type, false, ep.episodeTitle, if (ep.isSeries) ep.episodeIndex else -1)
         val stream = result.getOrNull() ?: return Result.failure(result.exceptionOrNull() ?: PluginException("no playable link was found"))
         val session = PluginPlaybackSession(
             plugin = ep.plugin,

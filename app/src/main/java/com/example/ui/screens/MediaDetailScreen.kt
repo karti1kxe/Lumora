@@ -78,6 +78,7 @@ import com.example.util.media.MediaLibraryStore
 import com.example.util.media.MediaLink
 import com.example.util.media.MediaPlayback
 import com.example.util.media.MediaPluginInfo
+import com.example.util.media.PluginException
 import com.example.util.media.PluginPlaybackSession
 import com.example.util.media.PluginQueuedEpisode
 import com.example.util.media.PluginQueuedEpisodes
@@ -252,6 +253,8 @@ fun MediaDetailScreen(
     // which picker sheet is open: 0 none, 1 season, 2 audio, 3 quality
     var pickerSheet by remember { mutableIntStateOf(0) }
     var downloadTarget by remember { mutableStateOf<DetailVideo?>(null) }
+    // the files / qualities the website offers for the movie / episode being downloaded (second step of a download)
+    var downloadLinks by remember { mutableStateOf<DownloadLinksState?>(null) }
 
     // ---- episodes of the selected quality (a series may need getEpisodes first) ----
     val optionKey = (option?.link?.episodesLink ?: option?.link?.directLinks?.firstOrNull()?.link).orEmpty() + "|" + audio?.label + "|" + option?.label
@@ -317,6 +320,7 @@ fun MediaDetailScreen(
         when {
             busyLabel != null -> { busyJob?.cancel(); busyJob = null; busyLabel = null }
             pickerSheet != 0 -> pickerSheet = 0
+            downloadLinks != null -> downloadLinks = null
             downloadTarget != null -> downloadTarget = null
             actionTarget != null -> actionTarget = null
             else -> onBack()
@@ -344,7 +348,10 @@ fun MediaDetailScreen(
 
     fun runResolve(label: String, forDownload: Boolean, v: DetailVideo, onOk: (com.example.util.media.MediaStream) -> Unit) {
         runBusy(label) {
-            val result = MediaPlayback.resolve(context, plugin, v.link, v.type, forDownload)
+            val result = MediaPlayback.resolve(
+                context, plugin, v.link, v.type, forDownload,
+                v.title, if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1
+            )
             val stream = result.getOrNull()
             if (stream == null) showResolveError(result.exceptionOrNull()) else onOk(stream)
         }
@@ -395,24 +402,46 @@ fun MediaDetailScreen(
         }
     }
 
+    suspend fun beginDownload(v: DetailVideo, suffix: String, opt: MediaPlayback.DownloadOption) {
+        val tag = opt.quality?.takeIf { it.isNotBlank() && !suffix.contains(it, ignoreCase = true) }?.let { " [$it]" }.orEmpty()
+        val name = playerTitle(v) + suffix + tag
+        val message = if (MediaPlayback.needsTorrentEngine(opt.stream)) {
+            MediaPlayback.startTorrentDownload(
+                context, plugin, name, v.poster, opt.stream,
+                v.title, if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1
+            )
+        } else {
+            MediaPlayback.startDownload(context, plugin, name, v.poster, opt.stream)
+        }
+        Toast.makeText(context, "$message (see Network › Download)", Toast.LENGTH_SHORT).show()
+    }
+
     fun startDownload(v: DetailVideo, chosenAudio: AudioGroup, chosen: QualityOption) {
         val suffix = chosen.label.takeIf { it != "Default" }?.let { " [$it]" }.orEmpty()
-        fun begin(stream: com.example.util.media.MediaStream) {
-            val message = MediaPlayback.startDownload(context, plugin, playerTitle(v) + suffix, v.poster, stream)
-            Toast.makeText(context, "$message (see Network › Download)", Toast.LENGTH_SHORT).show()
-        }
-        if (chosen === option) {
-            runResolve("Preparing download…", true, v) { begin(it) }
-            return
-        }
         runBusy("Preparing download…") {
-            val choice = PluginQualityChoice(chosen.label, chosen.link.episodesLink, chosen.link.directLinks)
-            val result = MediaPlayback.resolveChoice(
-                context, plugin, choice,
-                allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0), v.title, isSeries, true
-            )
-            val stream = result.getOrNull()
-            if (stream == null) showResolveError(result.exceptionOrNull()) else begin(stream)
+            // like the reference app: ask the website for everything it offers (servers, qualities, files), then let the user pick
+            val result = if (chosen === option) {
+                MediaPlayback.resolveAll(context, plugin, v.link, v.type, true)
+            } else {
+                val choice = PluginQualityChoice(chosen.label, chosen.link.episodesLink, chosen.link.directLinks)
+                MediaPlayback.resolveChoiceAll(
+                    context, plugin, choice,
+                    allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0), v.title, isSeries, true
+                )
+            }
+            val streams = result.getOrNull()
+            if (streams == null) {
+                showResolveError(result.exceptionOrNull())
+            } else {
+                val options = MediaPlayback.downloadOptions(streams)
+                if (options.size == 1) {
+                    beginDownload(v, suffix, options[0])
+                } else if (options.isNotEmpty()) {
+                    downloadLinks = DownloadLinksState(v, suffix, options)
+                } else {
+                    showResolveError(PluginException("no downloadable file was found"))
+                }
+            }
         }
     }
 
@@ -787,6 +816,22 @@ fun MediaDetailScreen(
             )
         }
 
+        // ---- download list: every server / quality / file the website offers ----
+        val links = downloadLinks
+        if (links != null) {
+            DownloadLinksSheet(
+                title = playerTitle(links.video),
+                options = links.options,
+                isDark = isDark,
+                glassBlurTransparency = glassBlurTransparency,
+                onDismiss = { downloadLinks = null },
+                onPick = { opt ->
+                    downloadLinks = null
+                    runBusy("Preparing download…") { beginDownload(links.video, links.suffix, opt) }
+                }
+            )
+        }
+
         // ---- "getting the link" indicator: transparent glass, no dark scrim (back cancels) ----
         if (busyLabel != null) {
             val factor = (glassBlurTransparency / 100f).coerceIn(0.20f, 1.0f)
@@ -870,6 +915,50 @@ private fun PickerPill(
             tint = primaryText.copy(alpha = 0.8f),
             modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = 90f }
         )
+    }
+}
+
+private class DownloadLinksState(val video: DetailVideo, val suffix: String, val options: List<MediaPlayback.DownloadOption>)
+
+/** The files the website offers for a download (server, quality, format, size): tapping one starts the download. */
+@Composable
+private fun DownloadLinksSheet(
+    title: String,
+    options: List<MediaPlayback.DownloadOption>,
+    isDark: Boolean,
+    glassBlurTransparency: Float,
+    onDismiss: () -> Unit,
+    onPick: (MediaPlayback.DownloadOption) -> Unit
+) {
+    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
+    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
+    val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
+    DownloadGlassSheet(isDark = isDark, glassBlurTransparency = glassBlurTransparency, onDismiss = onDismiss) {
+        Text(text = "Download", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = primaryText)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(text = title, fontSize = 13.sp, color = secondaryText, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(text = "${options.size} files available", fontSize = 12.sp, color = secondaryText)
+        Spacer(modifier = Modifier.height(12.dp))
+        options.forEach { opt ->
+            val shape = RoundedCornerShape(16.dp)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .clip(shape)
+                    .background(primaryText.copy(alpha = 0.06f))
+                    .border(1.dp, borderColor, shape)
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onPick(opt) }
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Text(text = opt.title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = primaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (opt.detail.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(text = opt.detail, fontSize = 13.sp, color = AccentSkyBlue)
+                }
+            }
+        }
     }
 }
 

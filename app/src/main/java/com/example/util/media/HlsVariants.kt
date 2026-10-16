@@ -52,7 +52,11 @@ object HlsVariants {
      * Downloads [url] and returns its variants, best first. Empty when it is not a master playlist (a single media
      * playlist, a plain file, or a request that failed): the player then simply has no quality choice.
      */
-    fun fetch(url: String, headers: Map<String, String>, proxy: Proxy? = null, timeoutMs: Int = 7000): List<HlsVariant> {
+    fun fetch(url: String, headers: Map<String, String>, proxy: Proxy? = null, timeoutMs: Int = 7000): List<HlsVariant> =
+        fetchResult(url, headers, proxy, timeoutMs) ?: emptyList()
+
+    /** Like [fetch], but null when the request itself failed (so the caller can try another route); empty = answered, no master playlist. */
+    fun fetchResult(url: String, headers: Map<String, String>, proxy: Proxy? = null, timeoutMs: Int = 7000): List<HlsVariant>? {
         return try {
             val conn = (URL(url).openConnection(proxy ?: Proxy.NO_PROXY) as HttpURLConnection).apply {
                 connectTimeout = timeoutMs
@@ -68,7 +72,7 @@ object HlsVariants {
                 }
             }
             try {
-                if (conn.responseCode !in 200..299) return emptyList()
+                if (conn.responseCode !in 200..299) return null
                 val text = conn.inputStream.use { ins ->
                     val bos = java.io.ByteArrayOutputStream()
                     val buf = ByteArray(16 * 1024)
@@ -84,7 +88,7 @@ object HlsVariants {
                 conn.disconnect()
             }
         } catch (_: Throwable) {
-            emptyList()
+            null
         }
     }
 

@@ -316,6 +316,11 @@ class MpvPlayerController {
     @Volatile private var streamOptionsApplied = false
     /** "http_proxy=..." of the local AntiDPI / DNS-over-HTTPS proxy for the stream being opened (null = direct connection). */
     @Volatile private var bypassProxyOption: String? = null
+    /** The local proxy's option when the proxy is available for this stream (it is used on one attempt and skipped on the other). */
+    @Volatile private var proxyCandidate: String? = null
+    @Volatile private var streamHost: String? = null
+    /** Host -> true when the stream only started through the proxy, false when it started on a direct connection. */
+    private val streamHostUsesProxy = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     /** Silent retries of a direct stream that never starts, before the error is shown (the player lowers it when another server can take over). */
     @Volatile var directStreamMaxRetries: Int = 3
     /** mpv's hls-bitrate: "max" (default) or the BANDWIDTH of the HLS rendition the user / Auto picked. */
@@ -474,11 +479,18 @@ class MpvPlayerController {
     private fun updateDirectStreamState(view: VideoPlayerMpvView, posSec: Double?, durSec: Double?) {
         // A position read within the first moments of a load can still belong to the PREVIOUS channel; counting it as
         // "started" disabled the stuck-stream watchdog, so a channel that never opened just buffered forever.
-        if (posSec != null && posSec >= 0.0 && System.currentTimeMillis() - directStreamLoadStartedAt > 400L) directStreamStarted = true
+        if (!directStreamStarted && posSec != null && posSec >= 0.0 && System.currentTimeMillis() - directStreamLoadStartedAt > 400L) {
+            directStreamStarted = true
+            // remember which route (direct / proxy) worked for this host: the next stream of it starts that way at once
+            val host = streamHost
+            if (host != null && proxyCandidate != null) streamHostUsesProxy[host] = bypassProxyOption != null
+        }
         if (!directStreamStarted) {
             val waited = System.currentTimeMillis() - directStreamLoadStartedAt
             val idle = try { view.mpv.getPropertyBoolean("idle-active") == true } catch (_: Throwable) { false }
-            if (!directStreamErrorShown && ((idle && waited > 4000L) || waited > 30000L)) {
+            // first attempt of a stream that has a proxy to fall back on: give up on this route sooner
+            val limitMs = if (proxyCandidate != null && onlineLoadRetries == 0) 12000L else 30000L
+            if (!directStreamErrorShown && ((idle && waited > 4000L) || waited > limitMs)) {
                 // Internet can be briefly slow/unstable: silently retry the stream (up to 3 times, spinner stays on)
                 // before telling the user the stream cannot be played.
                 if (onlineLoadRetries < directStreamMaxRetries) {
@@ -488,6 +500,12 @@ class MpvPlayerController {
                         _isBuffering.value = true
                         directStreamLoadStartedAt = System.currentTimeMillis()
                         try {
+                            // the retry uses the other route: direct connection <-> local AntiDPI / DoH proxy
+                            val candidate = proxyCandidate
+                            if (candidate != null) {
+                                bypassProxyOption = if (bypassProxyOption == null) candidate else null
+                                applyStreamingProfile(view, true)
+                            }
                             applyStreamRequestOptions(view, retryPath)
                             view.mpv.command("loadfile", retryPath, "replace")
                             view.mpv.setPropertyBoolean("pause", false)
@@ -612,7 +630,7 @@ class MpvPlayerController {
                     try { view.mpv.setPropertyString("demuxer-lavf-probesize", "2000000") } catch (_: Throwable) {}
                     // HLS channels whose segments use odd file extensions (.jpg/.txt/none) are refused by ffmpeg
                     // unless extensions are allowed - a common reason why "some channels never play".
-                    try { view.mpv.setPropertyString("demuxer-lavf-o", "allowed_extensions=ALL,fflags=+discardcorrupt" + proxyOpt) } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-o", "allowed_extensions=ALL,extension_picky=0,fflags=+discardcorrupt" + proxyOpt) } catch (_: Throwable) {}
                 } else {
                     view.mpv.setPropertyString("cache-pause-wait", "3")
                     view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx,5xx,reconnect_at_eof=1,reconnect_delay_max=5,multiple_requests=1")
@@ -1326,9 +1344,13 @@ class MpvPlayerController {
                 view.mpv.setPropertyString("secondary-sid", "no")
             } catch (_: Throwable) {}
             // Provider / IPTV streams go through the app's AntiDPI + DNS-over-HTTPS proxy (Network settings) when it is on.
-            bypassProxyOption = if (directStreamMode && !filePath.startsWith("http://127.0.0.1") && !filePath.startsWith("http://localhost")) {
+            // The first attempt is a plain direct connection (what the reference app does); the proxy is the second
+            // route, tried when the direct one does not start. A host that is known to need the proxy starts with it.
+            proxyCandidate = if (directStreamMode && !filePath.startsWith("http://127.0.0.1") && !filePath.startsWith("http://localhost")) {
                 try { NetworkBypass.ffmpegProxyOption(view.context) } catch (_: Throwable) { null }
             } else null
+            streamHost = if (directStreamMode) try { android.net.Uri.parse(filePath).host?.lowercase() } catch (_: Throwable) { null } else null
+            bypassProxyOption = if (proxyCandidate != null && streamHost?.let { streamHostUsesProxy[it] } == true) proxyCandidate else null
             applyStreamingProfile(view, onlineStreamMode)
             applyStreamRequestOptions(view, filePath)
             try { view.mpv.setPropertyString("hls-bitrate", if (directStreamMode) hlsBitrate else "max") } catch (_: Throwable) {}

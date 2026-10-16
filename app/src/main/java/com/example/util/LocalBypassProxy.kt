@@ -35,6 +35,10 @@ class LocalBypassProxy {
         Thread(r, "lumora-bypass-" + seq.incrementAndGet()).apply { isDaemon = true }
     })
     private val dnsCache = ConcurrentHashMap<String, Pair<List<InetAddress>, Long>>()
+    /** Hosts that refused the split connection: they get a plain connection straight away (host -> until when). */
+    private val noSplitUntil = ConcurrentHashMap<String, Long>()
+    /** While the DoH server itself cannot be reached, host names are not sent to it (every new connection would wait for its timeout). */
+    @Volatile private var dohBlockedUntil = 0L
 
     fun isRunning(): Boolean = running && server?.isClosed == false
 
@@ -167,11 +171,13 @@ class LocalBypassProxy {
      */
     private fun tunnel(host: String, port: Int, first: ByteArray, client: Socket, cout: OutputStream, httpHostSplit: Boolean = false): Socket? {
         val direct = isLocalHost(host) && hostsOverride[host.lowercase()] == null
-        val tries = if (fragment && !direct) 2 else 1
+        val hostKey = host.lowercase()
+        val splitAllowed = fragment && !direct && (noSplitUntil[hostKey] ?: 0L) < System.currentTimeMillis()
+        val tries = if (splitAllowed) 2 else 1
         val addrs = resolve(host, direct)
         if (addrs.isEmpty()) return null
         for (attempt in 0 until tries) {
-            val splitNow = fragment && !direct && attempt == 0
+            val splitNow = splitAllowed && attempt == 0
             val s = connectAny(addrs, port) ?: return null
             try {
                 s.tcpNoDelay = true
@@ -179,10 +185,13 @@ class LocalBypassProxy {
                 val out = s.getOutputStream()
                 if (splitNow) sendSplit(out, first, httpHostSplit) else { out.write(first); out.flush() }
                 // The first answer decides: a connection that is reset / silent right after the split gets one plain retry.
-                s.soTimeout = if (attempt < tries - 1) 6_000 else 30_000
+                // A TLS server answers at once; an HTTP server may need longer, and repeating that request would only double it.
+                val tlsFirst = first.isNotEmpty() && first[0] == 0x16.toByte()
+                s.soTimeout = if (attempt < tries - 1 && tlsFirst) 6_000 else 30_000
                 val buf = ByteArray(32 * 1024)
                 val n = s.getInputStream().read(buf)
                 if (n > 0) {
+                    if (attempt > 0) noSplitUntil[hostKey] = System.currentTimeMillis() + 10 * 60_000L
                     s.soTimeout = 0
                     cout.write(buf, 0, n)
                     cout.flush()
@@ -335,11 +344,12 @@ class LocalBypassProxy {
         if (isIpLiteral(host)) return try { listOf(InetAddress.getByName(host)) } catch (_: Throwable) { emptyList() }
         val out = ArrayList<InetAddress>()
         val doh = dohUrl
-        if (doh != null && !direct) {
+        if (doh != null && !direct && System.currentTimeMillis() >= dohBlockedUntil) {
             val cached = dnsCache[host]
             if (cached != null && cached.second > System.currentTimeMillis()) return cached.first
             val viaDoh = dohLookup(doh, host)
-            if (viaDoh.isNotEmpty()) {
+            if (viaDoh == null) dohBlockedUntil = System.currentTimeMillis() + 2 * 60_000L
+            else if (viaDoh.isNotEmpty()) {
                 dnsCache[host] = Pair(viaDoh, System.currentTimeMillis() + 5 * 60_000L)
                 out.addAll(viaDoh)
             }
@@ -352,7 +362,8 @@ class LocalBypassProxy {
         return out
     }
 
-    private fun dohLookup(base: String, host: String): List<InetAddress> {
+    /** The host's A records, an empty list when it has none, null when the DoH server could not be reached / answered badly. */
+    private fun dohLookup(base: String, host: String): List<InetAddress>? {
         try {
             val sep = if (base.contains('?')) '&' else '?'
             val conn = URL("$base${sep}name=${java.net.URLEncoder.encode(host, "UTF-8")}&type=A").openConnection(Proxy.NO_PROXY) as HttpURLConnection
@@ -360,7 +371,7 @@ class LocalBypassProxy {
             conn.readTimeout = 4_000
             conn.setRequestProperty("Accept", "application/dns-json")
             try {
-                if (conn.responseCode != 200) return emptyList()
+                if (conn.responseCode != 200) return null
                 val text = conn.inputStream.use { ins ->
                     val bos = ByteArrayOutputStream()
                     ins.copyTo(bos)
@@ -379,9 +390,9 @@ class LocalBypassProxy {
                 conn.disconnect()
             }
         } catch (_: IOException) {
-            return emptyList()
+            return null
         } catch (_: Throwable) {
-            return emptyList()
+            return null
         }
     }
 }

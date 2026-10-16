@@ -59,14 +59,14 @@ object TorrentStreamEngine {
      * Playback starts after the first 10% of the file is there (at most [PREBUFFER_HEAD_BYTES]): the container header with
      * every audio / subtitle track, the fonts, and the first minutes of the video. The rest keeps loading behind the playhead.
      */
-    private const val PREBUFFER_PERCENT = 10
-    private const val PREBUFFER_HEAD_BYTES = 150L * 1024 * 1024
-    private const val PREBUFFER_MIN_HEAD_BYTES = 16L * 1024 * 1024
+    private const val PREBUFFER_PERCENT = 3
+    private const val PREBUFFER_HEAD_BYTES = 40L * 1024 * 1024
+    private const val PREBUFFER_MIN_HEAD_BYTES = 8L * 1024 * 1024
     /** End of the file (index of mp4 / avi, cues of mkv): needed to open some formats and to seek. */
     private const val PREBUFFER_TAIL_BYTES = 3L * 1024 * 1024
     /** After this time a slow swarm may start playback with a smaller head ([PREBUFFER_SOFT_BYTES]). */
-    private const val PREBUFFER_SOFT_TIMEOUT_MS = 60_000L
-    private const val PREBUFFER_SOFT_BYTES = 24L * 1024 * 1024
+    private const val PREBUFFER_SOFT_TIMEOUT_MS = 20_000L
+    private const val PREBUFFER_SOFT_BYTES = 12L * 1024 * 1024
     private const val PREBUFFER_TIMEOUT_MS = 240_000L
     /** Subtitle files next to the video (srt / ass ...) are fetched too, when they are small. */
     private val SUBTITLE_EXT = setOf("srt", "ass", "ssa", "vtt", "sub", "sup")
@@ -82,8 +82,26 @@ object TorrentStreamEngine {
         "udp://open.demonii.com:1337/announce",
         "udp://tracker.dler.org:6969/announce",
         "udp://opentracker.io:6969/announce",
-        "https://tracker.tamersunion.org:443/announce"
+        "https://tracker.tamersunion.org:443/announce",
+        "udp://explodie.org:6969/announce",
+        "udp://tracker.tiny-vps.com:6969/announce",
+        "udp://p4p.arenabg.com:1337/announce",
+        "udp://tracker.internetwarriors.net:1337/announce",
+        "http://tracker.openbittorrent.com:80/announce",
+        "udp://tracker.cyberia.is:6969/announce"
     )
+
+    /** The magnet with the public trackers added: a magnet without trackers depends on DHT alone (slow, often fails). */
+    private fun withExtraTrackers(magnet: String): String {
+        val lower = magnet.lowercase()
+        val sb = StringBuilder(magnet)
+        for (t in EXTRA_TRACKERS) {
+            val enc = URLEncoder.encode(t, "UTF-8")
+            if (lower.contains(enc.lowercase()) || lower.contains(t.lowercase())) continue
+            sb.append("&tr=").append(enc)
+        }
+        return sb.toString()
+    }
 
     private val lock = Any()
 
@@ -188,12 +206,17 @@ object TorrentStreamEngine {
     private fun fetchMagnet(context: Context, magnet: String): ByteArray? {
         val sm = ensureSession(context) ?: return null
         val tmp = File(context.cacheDir, "torrent-magnet").apply { mkdirs() }
-        return try {
-            sm.fetchMagnet(magnet, MAGNET_TIMEOUT_SEC, tmp)
-        } catch (t: Throwable) {
-            Log.w(TAG, "fetchMagnet failed", t)
-            null
+        val full = withExtraTrackers(magnet)
+        // a second try: the first one often only wakes up DHT / the trackers of a fresh session
+        for (attempt in 0 until 2) {
+            try {
+                val bytes = sm.fetchMagnet(full, if (attempt == 0) MAGNET_TIMEOUT_SEC else 60, tmp)
+                if (bytes != null) return bytes
+            } catch (t: Throwable) {
+                Log.w(TAG, "fetchMagnet failed", t)
+            }
         }
+        return null
     }
 
     /** 40-char hex info hash of a magnet link (lower case) - null for base32 / v2-only links. */
