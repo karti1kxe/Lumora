@@ -516,6 +516,7 @@ fun VideoPlayerScreen(
     // Torrent video: true while the first ~5% is being downloaded (before the player opens the file)
     var torrentPreparing by remember { mutableStateOf(false) }
     var torrentPercent by remember { mutableIntStateOf(0) }
+    var torrentStatus by remember { mutableStateOf("") }
     var torrentStreamUrl by remember { mutableStateOf<String?>(null) }
 
     // ---- Online video (YouTube via NewPipeExtractor): resolved streams of the video that is playing ----
@@ -769,6 +770,21 @@ fun VideoPlayerScreen(
         }
         controller.loadVideo(url, startMs)
         controller.play()
+        // subtitle files that came in the torrent (next to the video) are added as soon as they are downloaded
+        coroutineScope.launch {
+            val added = HashSet<String>()
+            var tries = 0
+            while (tries < 60 && lastLoadedVideoKey == key) {
+                kotlinx.coroutines.delay(2000L)
+                tries++
+                val files = withContext(Dispatchers.IO) { com.example.util.TorrentStreamEngine.readySubtitleFiles(torrentPath) }
+                for (f in files) {
+                    if (!added.add(f.absolutePath)) continue
+                    try { controller.addExternalSubtitle(f.absolutePath, context, originalName = f.nameWithoutExtension, select = false) } catch (_: Throwable) {}
+                }
+                if (files.isNotEmpty() && tries > 5) break
+            }
+        }
     }
 
     val onStartTranslate: (Int) -> Unit = { sourceTrackId ->
@@ -2350,6 +2366,7 @@ fun VideoPlayerScreen(
         if (currentIsTorrent && tp != null && (torrentPreparing || isBuffering)) {
             while (true) {
                 torrentPercent = com.example.util.TorrentStreamEngine.fileProgressPercent(tp)
+                torrentStatus = com.example.util.TorrentStreamEngine.statusLine(tp)
                 kotlinx.coroutines.delay(400)
             }
         }
@@ -2881,7 +2898,9 @@ fun VideoPlayerScreen(
                     if (currentIsTorrent && (torrentPreparing || currentPositionMs <= 200L || isBuffering)) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "Buffering ${torrentPercent}%",
+                            text = (if (torrentPreparing) "Buffering ${torrentPercent}%" else "Starting video…") +
+                                (if (torrentStatus.isNotBlank()) "\n$torrentStatus" else ""),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                             color = Color.White.copy(alpha = 0.85f),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium

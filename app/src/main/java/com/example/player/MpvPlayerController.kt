@@ -1357,8 +1357,11 @@ class MpvPlayerController {
                 try { view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2") } catch (_: Throwable) {}
                 try { view.mpv.setPropertyString("cache-pause-wait", "2") } catch (_: Throwable) {}
                 try { view.mpv.setPropertyString("demuxer-readahead-secs", "60") } catch (_: Throwable) {}
-                try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "10") } catch (_: Throwable) {}
-                try { view.mpv.setPropertyString("demuxer-lavf-probesize", "20000000") } catch (_: Throwable) {}
+                // the start-up buffer (first 10% of the file) is already on disk: a modest probe finds every track without
+                // reading far ahead of it
+                try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "6") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-probesize", "10000000") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-o", "") } catch (_: Throwable) {}
             }
             try {
                 view.mpv.command("loadfile", filePath, "replace")
