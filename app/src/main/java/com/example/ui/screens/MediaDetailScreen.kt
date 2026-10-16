@@ -143,7 +143,8 @@ private fun audioLabel(link: MediaLink): String {
         .replace(EMPTY_BRACKETS_RE, " ")
         .replace(SEPARATORS_RE, " ")
         .trim()
-    return cleaned.ifBlank { "Default" }
+    // a label with no letter or digit at all (only an emoji / symbol) is not an audio name
+    return if (cleaned.none { it.isLetterOrDigit() }) "Default" else cleaned
 }
 
 /** The quality (and size) of a quality option, exactly as the plugin offers it. */
@@ -194,7 +195,8 @@ fun MediaDetailScreen(
     glassBlurTransparency: Float,
     onBack: () -> Unit,
     onPlayVideo: (VideoItem, List<VideoItem>) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    searchQuery: String = ""
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -285,7 +287,12 @@ fun MediaDetailScreen(
     val epSeasonNumbers = remember(allVideos) { allVideos.mapNotNull { seasonNumber(it.title) }.distinct().sorted() }
     val showEpSeason = groups.size <= 1 && epSeasonNumbers.size > 1
     val epSeasonShown = if (epSeasonNumbers.contains(epSeason)) epSeason else epSeasonNumbers.firstOrNull() ?: 0
-    val videos: List<DetailVideo> = if (showEpSeason) {
+    val query = searchQuery.trim()
+    val videos: List<DetailVideo> = if (query.isNotEmpty()) {
+        // top search button: finds the episode / movie by name or number, across every season
+        val numberRe = if (query.all { it.isDigit() }) Regex("(?i)(?:\\be|\\bep|episode)\\s*0*" + query.trimStart('0').ifEmpty { "0" } + "\\b") else null
+        allVideos.filter { it.title.contains(query, ignoreCase = true) || (numberRe != null && numberRe.containsMatchIn(it.title)) }
+    } else if (showEpSeason) {
         allVideos.filter {
             val n = seasonNumber(it.title)
             n == epSeasonShown || (n == null && epSeasonShown == epSeasonNumbers.first())
@@ -502,8 +509,14 @@ fun MediaDetailScreen(
                                     )
                                 }
                                 if (groups.isNotEmpty()) {
-                                    Spacer(modifier = Modifier.height(14.dp))
-                                    if (groups.size > 1 || showEpSeason) {
+                                    // only what this provider really offers a choice of: season / audio / quality
+                                    val showSeasonPicker = groups.size > 1 || showEpSeason
+                                    val showAudioPicker = audioList.size > 1
+                                    val showQualityPicker = optionList.size > 1
+                                    if (showSeasonPicker || showAudioPicker || showQualityPicker) {
+                                        Spacer(modifier = Modifier.height(14.dp))
+                                    }
+                                    if (showSeasonPicker) {
                                         PickerPill(
                                             caption = "Season",
                                             value = if (groups.size > 1) season?.label.orEmpty() else "Season $epSeasonShown",
@@ -512,28 +525,34 @@ fun MediaDetailScreen(
                                             borderColor = borderColor,
                                             modifier = Modifier.fillMaxWidth()
                                         ) { pickerSheet = if (groups.size > 1) 1 else 4 }
-                                        Spacer(modifier = Modifier.height(10.dp))
                                     }
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        PickerPill(
-                                            caption = "Audio",
-                                            value = audio?.label.orEmpty(),
-                                            primaryText = primaryText,
-                                            secondaryText = secondaryText,
-                                            borderColor = borderColor,
-                                            modifier = Modifier.weight(1f)
-                                        ) { pickerSheet = 2 }
-                                        PickerPill(
-                                            caption = "Quality",
-                                            value = option?.label.orEmpty(),
-                                            primaryText = primaryText,
-                                            secondaryText = secondaryText,
-                                            borderColor = borderColor,
-                                            modifier = Modifier.weight(1f)
-                                        ) { pickerSheet = 3 }
+                                    if (showAudioPicker || showQualityPicker) {
+                                        if (showSeasonPicker) Spacer(modifier = Modifier.height(10.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            if (showAudioPicker) {
+                                                PickerPill(
+                                                    caption = "Audio",
+                                                    value = audio?.label.orEmpty(),
+                                                    primaryText = primaryText,
+                                                    secondaryText = secondaryText,
+                                                    borderColor = borderColor,
+                                                    modifier = Modifier.weight(1f)
+                                                ) { pickerSheet = 2 }
+                                            }
+                                            if (showQualityPicker) {
+                                                PickerPill(
+                                                    caption = "Quality",
+                                                    value = option?.label.orEmpty(),
+                                                    primaryText = primaryText,
+                                                    secondaryText = secondaryText,
+                                                    borderColor = borderColor,
+                                                    modifier = Modifier.weight(1f)
+                                                ) { pickerSheet = 3 }
+                                            }
+                                        }
                                     }
                                 } else {
                                     Spacer(modifier = Modifier.height(12.dp))

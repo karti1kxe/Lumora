@@ -618,6 +618,9 @@ private fun MediaCategoryRow(
         }
     }
 
+    // a category that fails to load (or has nothing) is not shown at all
+    if (error != null || (posts != null && posts?.isEmpty() == true)) return
+
     Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp),

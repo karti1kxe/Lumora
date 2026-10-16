@@ -97,7 +97,8 @@ fun NetworkTabContent(
     onPlayVideo: (VideoItem, List<VideoItem>) -> Unit,
     modifier: Modifier = Modifier,
     onOpenDownloads: () -> Unit = {},
-    glassBlurTransparency: Float = 85f
+    glassBlurTransparency: Float = 85f,
+    searchQuery: String = ""
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -302,7 +303,8 @@ fun NetworkTabContent(
             glassBlurTransparency = glassBlurTransparency,
             onBack = { MediaDetailState.close() },
             onPlayVideo = onPlayVideo,
-            modifier = modifier
+            modifier = modifier,
+            searchQuery = searchQuery
         )
         return
     }

@@ -335,6 +335,11 @@ fun HomeScreen(
     }
     var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
+    // opening / closing a media title page starts with a clean top search bar
+    LaunchedEffect(MediaDetailState.plugin) {
+        searchQuery = ""
+        isSearchActive = false
+    }
     val searchFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(isSearchActive) {
@@ -1754,7 +1759,7 @@ fun HomeScreen(
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Search videos, channels online..." else if (currentFolder != null) "Search in ${currentFolder.name}..." else "Search videos, or /playlist (e.g. /Op Anime)..."
                         NavigationTab.MUSIC -> if (selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) "Search songs, albums, artists online..." else "Search songs, albums, artists..."
                         NavigationTab.RECENTS -> "Search watch history..."
-                        NavigationTab.NETWORK -> if (showDownloads) "Search downloads..." else "Enter stream URL..."
+                        NavigationTab.NETWORK -> if (showDownloads) "Search downloads..." else if (MediaDetailState.plugin != null) "Search episodes or movies in this title..." else "Enter stream URL..."
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.let { "Search in ${it.name}..." } ?: "Search playlists..."
                     }
                     Box(
@@ -1947,6 +1952,7 @@ fun HomeScreen(
                                 onPlayVideo = onPlayVideo,
                                 modifier = Modifier.fillMaxWidth().weight(1f),
                                 glassBlurTransparency = uiState.glassBlurTransparency,
+                                searchQuery = if (MediaDetailState.plugin != null) searchQuery else "",
                                 onOpenDownloads = {
                                     searchQuery = ""
                                     isSearchActive = false
