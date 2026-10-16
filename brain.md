@@ -271,3 +271,17 @@ for a list of files that look large/complex but are all live).
 Home / Videos / Shorts / Playlists / Posts tabs with a sliding gradient indicator.
 `OnlineChannelDetail` gained `bannerUrl` + `isVerified`; `OnlineMusicService.fetchChannelSectionTracks()` loads Shorts.
 NewPipeExtractor has no "Posts" tab, so Posts shows an empty-state message.
+
+## 11. Network > Media providers (provider page)
+- `NetworkTabContent` has only two sections: **Local Network** and **Media**. A downloaded plugin has no tab any more.
+- Media list (`MediaPluginManager`, `MediaTabContent.kt`): downloaded plugins are sorted first (last download on top) and
+  the list scrolls to the top when a download finishes. Tapping a downloaded plugin sets `MediaDetailState.provider`.
+- Provider page (`MediaPluginPage`): sliding banner (`MediaHeroSlider`, max 6 titles of the trending/popular/latest
+  category, auto-advances every 4.5 s) → "Continue watching" (`MediaHistoryStore`, written when playback starts from the
+  title page) → Watch later → the plugin's categories (`MediaFocusRow`: raised alternate cards, centre card bigger, edge
+  cards tilt, press bounce) → genres. "See all" = text + gradient underline (no round background).
+- `HomeScreen` header: while `MediaDetailState.provider` is set the header shows the provider's icon (`HeaderBar.leadingIconUrl`)
+  and name, no sort button (download page + search + settings only). The header search runs the plugin's `getSearchPosts`
+  (`MediaProviderRepository.searchPosts`) and shows a result grid (`MediaPostGrid`).
+- `HighResImage` / `HighResImageLoader`: sharp full-width images (detail backdrop, banner). Separate memory/disk cache from
+  the 480 px `LinkThumbnail`, tries larger TMDB/IMDb/WordPress variants first.

@@ -54,7 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.ui.components.DownloadGlassSheet
-import com.example.ui.components.LinkThumbnail
+import com.example.ui.components.HighResImage
 import com.example.ui.components.LumoraExpressiveLoadingIndicator
 import com.example.ui.components.OnlineQuickActionBar
 import com.example.ui.components.StyledIcon
@@ -83,6 +83,8 @@ import com.example.util.media.PluginQualityChoice
 import com.example.util.media.MediaPost
 import com.example.util.media.MediaProviderRepository
 import com.example.util.media.MediaSavedVideo
+import com.example.util.media.MediaHistoryStore
+import com.example.util.media.MediaWatchedTitle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -95,6 +97,8 @@ object MediaDetailState {
     var plugin by androidx.compose.runtime.mutableStateOf<MediaPluginInfo?>(null)
     var post by androidx.compose.runtime.mutableStateOf<MediaPost?>(null)
     var lastSection by mutableIntStateOf(0)
+    /** The provider page that is open inside Network > Media (null = the plugin list). Kept so Back from a title / the player returns to it. */
+    var provider by androidx.compose.runtime.mutableStateOf<MediaPluginInfo?>(null)
     /** "plugin|link" -> [season index, audio index, quality index] */
     val selections = HashMap<String, IntArray>()
 
@@ -358,6 +362,11 @@ fun MediaDetailScreen(
                 subtitles = stream.subtitles
             )
             val item = MediaPlayback.toVideoItem(context, plugin, playerTitle(v), v.poster, stream, session)
+            // "Continue watching" row of the provider page
+            MediaHistoryStore.record(
+                context,
+                MediaWatchedTitle(plugin.value, title, post.link, poster.ifBlank { post.image })
+            )
             onPlayVideo(item, listOf(item))
         }
     }
@@ -407,10 +416,10 @@ fun MediaDetailScreen(
                             .height(230.dp)
                             .clip(RoundedCornerShape(topStart = 14.5.dp, topEnd = 14.5.dp))
                     ) {
-                        LinkThumbnail(
-                            thumbnail = backdrop.ifBlank { null },
+                        HighResImage(
+                            url = backdrop.ifBlank { null },
                             modifier = Modifier.fillMaxSize(),
-                            fallback = {
+                            placeholder = {
                                 Box(modifier = Modifier.fillMaxSize().background(if (isDark) Color(0xFF1E293B) else Color(0xFFE2E8F0)))
                             }
                         )

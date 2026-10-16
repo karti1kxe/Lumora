@@ -66,6 +66,7 @@ fun HeaderBar(
     onCopyClick: (() -> Unit)? = null,
     onShareClick: (() -> Unit)? = null,
     onDownloadClick: (() -> Unit)? = null,
+    leadingIconUrl: String? = null,
     backgroundColor: Color? = null,
     showBorder: Boolean = true,
     elevation: Dp = 6.dp
@@ -121,6 +122,22 @@ fun HeaderBar(
                         modifier = Modifier.size(22.dp)
                     )
                 }
+            } else if (leadingIconUrl != null) {
+                // a media provider page: the provider's own icon instead of the app icon
+                LinkThumbnail(
+                    thumbnail = leadingIconUrl.ifBlank { null },
+                    modifier = Modifier
+                        .size(34.dp)
+                        .testTag("header_provider_icon")
+                        .clip(RoundedCornerShape(10.dp)),
+                    fallback = {
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_abouticon),
+                            contentDescription = "Provider",
+                            modifier = Modifier.size(34.dp)
+                        )
+                    }
+                )
             } else {
                 Image(
                     painter = painterResource(id = R.drawable.ic_abouticon),

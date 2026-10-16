@@ -9,6 +9,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -58,6 +60,20 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
+import com.example.ui.components.HighResImage
+import com.example.util.media.MediaHistoryStore
+import kotlinx.coroutines.delay
+import kotlin.math.abs
 import com.example.ui.components.LinkThumbnail
 import com.example.ui.components.StyledIcon
 import com.example.ui.theme.AccentGradient
@@ -90,7 +106,8 @@ import kotlinx.coroutines.sync.withPermit
 @Composable
 fun MediaPluginManager(
     isDark: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenPlugin: (MediaPluginInfo) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -112,6 +129,19 @@ fun MediaPluginManager(
     var errorText by remember { mutableStateOf<String?>(null) }
     val busy = remember { mutableStateListOf<String>() }
     var bulkLabel by remember { mutableStateOf<String?>(null) }
+
+    // Downloaded plugins are listed first (the one downloaded last on top); the list scrolls up when a download finishes.
+    val ordered = remember(manifest, installed) {
+        val installedAtById = installed.associate { it.value to it.installedAt }
+        val (done, todo) = manifest.partition { installedAtById.containsKey(it.value) }
+        done.sortedByDescending { installedAtById[it.value] ?: 0L } + todo
+    }
+    val listState = rememberLazyListState()
+    var lastInstalledCount by remember { mutableStateOf(installed.size) }
+    LaunchedEffect(installed.size) {
+        if (installed.size > lastInstalledCount) listState.animateScrollToItem(0)
+        lastInstalledCount = installed.size
+    }
 
     fun loadRepo() {
         if (repoUrl.isBlank() || isLoading) return
@@ -315,14 +345,17 @@ fun MediaPluginManager(
                 }
             }
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                items(manifest, key = { it.value }) { plugin ->
+                items(ordered, key = { it.value }) { plugin ->
                     val installedVersion = installed.firstOrNull { it.value == plugin.value }?.version
                     val isBusy = busy.contains(plugin.value)
                     PluginRow(
+                        modifier = Modifier.animateItem(),
+                        onOpen = if (installedVersion != null) { { onOpenPlugin(installed.first { it.value == plugin.value }) } } else null,
                         plugin = plugin,
                         installedVersion = installedVersion,
                         busy = isBusy,
@@ -341,6 +374,8 @@ fun MediaPluginManager(
 
 @Composable
 private fun PluginRow(
+    modifier: Modifier = Modifier,
+    onOpen: (() -> Unit)? = null,
     plugin: MediaPluginInfo,
     installedVersion: String?,
     busy: Boolean,
@@ -354,11 +389,18 @@ private fun PluginRow(
     val isInstalled = installedVersion != null
     val hasUpdate = isInstalled && installedVersion != plugin.version
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
             .background(surfaceColor)
             .border(1.dp, borderColor, RoundedCornerShape(20.dp))
+            .then(
+                if (onOpen != null) Modifier.clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onOpen
+                ) else Modifier
+            )
             .padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -430,8 +472,18 @@ private fun PluginIconButton(drawableRes: Int, description: String, tint: Color,
 }
 
 // --------------------------------------------------------------------------------------------------------------------
-// One downloaded plugin: category rows (thumbnails only for now — opening a title comes later).
+// One downloaded plugin (provider) page: sliding trending banner, "Continue watching", then the provider's categories.
 // --------------------------------------------------------------------------------------------------------------------
+
+/** The category that feeds the sliding banner: a trending / popular / latest one when the plugin has it, else the first. */
+private fun heroEntry(cat: MediaProviderRepository.Catalog): MediaCatalogEntry? {
+    val all = cat.categories
+    val keywords = listOf("trending", "popular", "latest", "new", "top", "recent")
+    for (k in keywords) {
+        all.firstOrNull { it.title.contains(k, ignoreCase = true) }?.let { return it }
+    }
+    return all.firstOrNull() ?: cat.genres.firstOrNull()
+}
 
 @Composable
 fun MediaPluginPage(
@@ -439,7 +491,8 @@ fun MediaPluginPage(
     isDark: Boolean,
     onOpenPost: (MediaPost) -> Unit = {},
     onPlayVideo: (VideoItem, List<VideoItem>) -> Unit = { _, _ -> },
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    searchQuery: String = ""
 ) {
     val context = LocalContext.current
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
@@ -450,6 +503,8 @@ fun MediaPluginPage(
     val scope = rememberCoroutineScope()
     val savedTick by MediaLibraryStore.changes.collectAsState()
     val savedVideos = remember(savedTick, plugin.value) { MediaLibraryStore.watchLater(context, plugin.value) }
+    val historyTick by MediaHistoryStore.changes.collectAsState()
+    val watched = remember(historyTick, plugin.value) { MediaHistoryStore.recent(context, plugin.value) }
     var playingSaved by remember { mutableStateOf(false) }
 
     fun playSaved(v: MediaSavedVideo) {
@@ -493,16 +548,37 @@ fun MediaPluginPage(
         }
     }
 
+    // top search bar of the app: results of this provider replace the page while something is typed
+    val typed = searchQuery.trim()
+    var activeQuery by remember(plugin.value) { mutableStateOf("") }
+    LaunchedEffect(typed) {
+        if (typed.isNotEmpty()) delay(500L)
+        activeQuery = typed
+    }
+    if (activeQuery.isNotEmpty() && typed.isNotEmpty()) {
+        MediaPostGrid(
+            identity = plugin.value + "|search|" + activeQuery,
+            title = "Results for \"$activeQuery\"",
+            isDark = isDark,
+            onBack = null,
+            onOpenPost = onOpenPost,
+            loader = { page -> MediaProviderRepository.searchPosts(context, plugin.value, activeQuery, page) },
+            modifier = modifier
+        )
+        return
+    }
+
     BackHandler(enabled = seeAll != null) { seeAll = null }
 
     val current = seeAll
     if (current != null) {
-        MediaSeeAllGrid(
-            plugin = plugin,
-            entry = current,
+        MediaPostGrid(
+            identity = plugin.value + "|" + current.filter,
+            title = current.title,
             isDark = isDark,
             onBack = { seeAll = null },
             onOpenPost = onOpenPost,
+            loader = { page -> MediaProviderRepository.loadPosts(context, plugin.value, current.filter, page) },
             modifier = modifier
         )
         return
@@ -535,17 +611,47 @@ fun MediaPluginPage(
             }
         }
         else -> {
+            val hero = remember(cat) { heroEntry(cat) }
             LazyColumn(
                 modifier = modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(bottom = 28.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(top = 4.dp, bottom = 28.dp)
             ) {
+                if (hero != null) {
+                    item(key = "hero") {
+                        MediaHeroSlider(plugin, hero, isDark, borderColor, onOpenPost)
+                    }
+                }
+                if (watched.isNotEmpty()) {
+                    item(key = "continue-watching") {
+                        Column(modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                            MediaSectionHeader(
+                                title = "Continue watching",
+                                iconRes = R.drawable.lumora_recent,
+                                primaryText = primaryText,
+                                surfaceColor = surfaceColor,
+                                borderColor = borderColor,
+                                onSeeAll = null
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            MediaFocusRow(
+                                posts = watched.map { MediaPost(it.title, it.link, it.image, null) },
+                                isDark = isDark,
+                                primaryText = primaryText,
+                                borderColor = borderColor,
+                                onOpenPost = onOpenPost,
+                                onRemove = { MediaHistoryStore.remove(context, plugin.value, it.link) }
+                            )
+                        }
+                    }
+                }
                 if (savedVideos.isNotEmpty()) {
                     item(key = "watch-later") {
                         MediaWatchLaterRow(
                             videos = savedVideos,
                             isDark = isDark,
                             primaryText = primaryText,
+                            surfaceColor = surfaceColor,
                             borderColor = borderColor,
                             onPlay = { playSaved(it) },
                             onRemove = { MediaLibraryStore.remove(context, it.pluginId, it.link) }
@@ -553,7 +659,7 @@ fun MediaPluginPage(
                     }
                 }
                 items(cat.categories, key = { "c|" + it.title + "|" + it.filter }) { entry ->
-                    MediaCategoryRow(plugin, entry, isDark, primaryText, secondaryText, surfaceColor, borderColor, onOpenPost) { seeAll = entry }
+                    MediaCategoryRow(plugin, entry, isDark, primaryText, secondaryText, surfaceColor, borderColor, R.drawable.lumora_video_library, onOpenPost) { seeAll = entry }
                 }
                 if (cat.genres.isNotEmpty()) {
                     item(key = "genres-label") {
@@ -566,7 +672,7 @@ fun MediaPluginPage(
                         )
                     }
                     items(cat.genres, key = { "g|" + it.title + "|" + it.filter }) { entry ->
-                        MediaCategoryRow(plugin, entry, isDark, primaryText, secondaryText, surfaceColor, borderColor, onOpenPost) { seeAll = entry }
+                        MediaCategoryRow(plugin, entry, isDark, primaryText, secondaryText, surfaceColor, borderColor, R.drawable.lumora_list, onOpenPost) { seeAll = entry }
                     }
                 }
             }
@@ -588,7 +694,379 @@ private fun RetryPill(primaryText: Color, surfaceColor: Color, borderColor: Colo
     }
 }
 
-/** Title + "See all" pill + a horizontal strip of thumbnails; the posts load when the row scrolls into view. */
+/**
+ * Sliding banner at the top of a provider page: the trending / latest titles of the provider (at most 6) change by
+ * themselves every few seconds; the neighbours peek in and the page in the middle is the biggest.
+ */
+@Composable
+private fun MediaHeroSlider(
+    plugin: MediaPluginInfo,
+    entry: MediaCatalogEntry,
+    isDark: Boolean,
+    borderColor: Color,
+    onOpenPost: (MediaPost) -> Unit
+) {
+    val context = LocalContext.current
+    var posts by remember(plugin.value, entry.filter) { mutableStateOf<List<MediaPost>?>(null) }
+    LaunchedEffect(plugin.value, entry.filter) {
+        posts = try {
+            MediaProviderRepository.loadPosts(context, plugin.value, entry.filter, 1)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+    val loaded = posts
+    val slides = remember(loaded) {
+        val all = loaded.orEmpty()
+        all.filter { it.image.isNotBlank() }.ifEmpty { all }.take(6)
+    }
+    val placeholderBg = if (isDark) Color(0xFF111827) else Color(0xFFE2E8F0)
+    if (loaded == null) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp)
+                .height(210.dp)
+                .clip(RoundedCornerShape(26.dp))
+                .background(placeholderBg),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(24.dp), color = AccentSkyBlue, strokeWidth = 2.4.dp)
+        }
+        return
+    }
+    if (slides.isEmpty()) return
+
+    val pagerState = rememberPagerState(pageCount = { slides.size })
+    LaunchedEffect(slides.size) {
+        if (slides.size < 2) return@LaunchedEffect
+        while (true) {
+            delay(4500L)
+            if (!pagerState.isScrollInProgress) {
+                val next = (pagerState.currentPage + 1) % slides.size
+                pagerState.animateScrollToPage(next, animationSpec = tween(700, easing = FastOutSlowInEasing))
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        HorizontalPager(
+            state = pagerState,
+            contentPadding = PaddingValues(horizontal = 26.dp),
+            pageSpacing = 12.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) { page ->
+            val post = slides[page]
+            val distance = abs((pagerState.currentPage - page) + pagerState.currentPageOffsetFraction).coerceIn(0f, 1f)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(210.dp)
+                    .graphicsLayer {
+                        val s = 1f - 0.07f * distance
+                        scaleX = s
+                        scaleY = s
+                        alpha = 1f - 0.35f * distance
+                    }
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(placeholderBg)
+                    .border(1.dp, borderColor, RoundedCornerShape(26.dp))
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onOpenPost(post) }
+            ) {
+                HighResImage(
+                    url = post.image.ifBlank { null },
+                    modifier = Modifier.fillMaxSize(),
+                    alignment = Alignment.TopCenter,
+                    placeholder = {
+                        StyledIcon(
+                            drawableRes = R.drawable.lumora_video,
+                            contentDescription = null,
+                            tint = Color.White.copy(alpha = 0.35f),
+                            modifier = Modifier.size(34.dp)
+                        )
+                    }
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0.35f to Color.Transparent,
+                                1f to Color.Black.copy(alpha = 0.86f)
+                            )
+                        )
+                )
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .padding(start = 18.dp, end = 18.dp, bottom = 16.dp)
+                ) {
+                    Text(
+                        text = entry.title.uppercase(),
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.2.sp,
+                        color = Color.White,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(AccentGradient)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = post.title,
+                        fontSize = 20.sp,
+                        lineHeight = 24.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+        if (slides.size > 1) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                slides.indices.forEach { i ->
+                    val active = pagerState.currentPage == i
+                    val w by animateFloatAsState(if (active) 22f else 7f, tween(300), label = "heroDot")
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 3.dp)
+                            .height(7.dp)
+                            .width(w.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(if (active) AccentGradient else Brush.linearGradient(listOf(borderColor, borderColor)))
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Section title like the reference design: a small rounded icon tile + upper-case title, "See all" with a gradient line below. */
+@Composable
+private fun MediaSectionHeader(
+    title: String,
+    iconRes: Int,
+    primaryText: Color,
+    surfaceColor: Color,
+    borderColor: Color,
+    onSeeAll: (() -> Unit)?
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(surfaceColor)
+                .border(1.dp, borderColor, RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            StyledIcon(
+                drawableRes = iconRes,
+                contentDescription = null,
+                tint = primaryText,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = title.uppercase(),
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.8.sp,
+            color = primaryText,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (onSeeAll != null) {
+            // no round background any more: just the text and a gradient line under it
+            Column(
+                modifier = Modifier
+                    .width(IntrinsicSize.Max)
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onSeeAll)
+                    .padding(horizontal = 2.dp, vertical = 4.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = "See all", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = primaryText)
+                    Spacer(modifier = Modifier.width(4.dp))
+                    StyledIcon(
+                        drawableRes = R.drawable.lumora_arrow_right_solid,
+                        contentDescription = null,
+                        tint = primaryText,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(3.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(AccentGradient)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Horizontal strip of posters. Like the reference design the cards stand a little uneven (every second one is raised),
+ * the cards near the middle of the screen are bigger and straight, the ones towards the edges are smaller and tilt
+ * outwards, so the strip sways while it is dragged; a touched card bounces a little.
+ */
+@Composable
+private fun MediaFocusRow(
+    posts: List<MediaPost>,
+    isDark: Boolean,
+    primaryText: Color,
+    borderColor: Color,
+    onOpenPost: (MediaPost) -> Unit,
+    onRemove: ((MediaPost) -> Unit)? = null
+) {
+    val listState = rememberLazyListState()
+    LazyRow(
+        state = listState,
+        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        items(posts.size, key = { posts[it].link + "|" + posts[it].title }) { index ->
+            val post = posts[index]
+            MediaPosterCard(
+                post = post,
+                index = index,
+                listState = listState,
+                isDark = isDark,
+                primaryText = primaryText,
+                borderColor = borderColor,
+                onClick = { onOpenPost(post) },
+                onRemove = onRemove?.let { remover -> { remover(post) } }
+            )
+        }
+    }
+}
+
+@Composable
+private fun MediaPosterCard(
+    post: MediaPost,
+    index: Int,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    isDark: Boolean,
+    primaryText: Color,
+    borderColor: Color,
+    onClick: () -> Unit,
+    onRemove: (() -> Unit)?
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val press by animateFloatAsState(
+        targetValue = if (pressed) 0.93f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+        label = "posterPress"
+    )
+    Column(
+        modifier = Modifier
+            .width(126.dp)
+            .graphicsLayer {
+                val info = listState.layoutInfo
+                val item = info.visibleItemsInfo.firstOrNull { it.index == index }
+                val raise = if (index % 2 == 1) -10.dp.toPx() else 0f
+                if (item != null && info.viewportSize.width > 0) {
+                    val half = info.viewportSize.width / 2f
+                    val frac = (((item.offset + item.size / 2f) - half) / half).coerceIn(-1f, 1f)
+                    val near = 1f - abs(frac)
+                    val s = (0.9f + 0.1f * near) * press
+                    scaleX = s
+                    scaleY = s
+                    rotationZ = frac * 5f
+                    translationY = raise
+                } else {
+                    scaleX = 0.9f * press
+                    scaleY = 0.9f * press
+                    translationY = raise
+                }
+            }
+            .clip(RoundedCornerShape(22.dp))
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(22.dp))
+                .background(if (isDark) Color(0xFF111827) else Color(0xFFE2E8F0))
+                .border(1.dp, borderColor, RoundedCornerShape(22.dp))
+        ) {
+            LinkThumbnail(
+                thumbnail = post.image.ifBlank { null },
+                modifier = Modifier.fillMaxSize(),
+                fallback = {
+                    StyledIcon(
+                        drawableRes = R.drawable.lumora_video,
+                        contentDescription = null,
+                        tint = primaryText.copy(alpha = 0.35f),
+                        modifier = Modifier.size(30.dp)
+                    )
+                }
+            )
+            if (onRemove != null) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(7.dp)
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(Color.Black.copy(alpha = 0.6f))
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onRemove),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(text = "✕", fontSize = 12.sp, color = Color.White)
+                }
+            }
+            post.tag?.let { tag ->
+                Text(
+                    text = tag,
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(7.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.Black.copy(alpha = 0.62f))
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            text = post.title,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = primaryText,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 4.dp)
+        )
+    }
+}
+
+/** Title + "See all" + a strip of posters; the posts load when the row scrolls into view. */
 @Composable
 private fun MediaCategoryRow(
     plugin: MediaPluginInfo,
@@ -598,6 +1076,7 @@ private fun MediaCategoryRow(
     secondaryText: Color,
     surfaceColor: Color,
     borderColor: Color,
+    iconRes: Int,
     onOpenPost: (MediaPost) -> Unit,
     onSeeAll: () -> Unit
 ) {
@@ -622,57 +1101,31 @@ private fun MediaCategoryRow(
     if (error != null || (posts != null && posts?.isEmpty() == true)) return
 
     Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = entry.title,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                color = primaryText,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(surfaceColor)
-                    .border(1.dp, borderColor, RoundedCornerShape(18.dp))
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onSeeAll)
-                    .padding(start = 14.dp, end = 10.dp, top = 8.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(text = "See all", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = primaryText)
-                Spacer(modifier = Modifier.width(4.dp))
-                StyledIcon(
-                    drawableRes = R.drawable.lumora_arrow_right_solid,
-                    contentDescription = null,
-                    tint = primaryText,
-                    modifier = Modifier.size(14.dp)
-                )
-            }
-        }
-        Spacer(modifier = Modifier.height(12.dp))
+        MediaSectionHeader(
+            title = entry.title,
+            iconRes = iconRes,
+            primaryText = primaryText,
+            surfaceColor = surfaceColor,
+            borderColor = borderColor,
+            onSeeAll = onSeeAll
+        )
         val list = posts
         when {
             list != null && list.isNotEmpty() -> {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 18.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(list, key = { it.link + "|" + it.title }) { post ->
-                        MediaPostCard(post, isDark, primaryText, borderColor, Modifier.width(118.dp), onClick = { onOpenPost(post) })
-                    }
-                }
+                MediaFocusRow(
+                    posts = list,
+                    isDark = isDark,
+                    primaryText = primaryText,
+                    borderColor = borderColor,
+                    onOpenPost = onOpenPost
+                )
             }
             list != null -> {
-                Text(text = "Nothing found", fontSize = 12.5.sp, color = secondaryText, modifier = Modifier.padding(start = 18.dp, bottom = 8.dp))
+                Text(text = "Nothing found", fontSize = 12.5.sp, color = secondaryText, modifier = Modifier.padding(start = 18.dp, top = 12.dp, bottom = 8.dp))
             }
             error != null -> {
                 Row(
-                    modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 8.dp),
+                    modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -688,7 +1141,7 @@ private fun MediaCategoryRow(
                 }
             }
             else -> {
-                Box(modifier = Modifier.fillMaxWidth().height(176.dp), contentAlignment = Alignment.Center) {
+                Box(modifier = Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(modifier = Modifier.size(24.dp), color = AccentSkyBlue, strokeWidth = 2.4.dp)
                 }
             }
@@ -696,7 +1149,7 @@ private fun MediaCategoryRow(
     }
 }
 
-/** Poster-style thumbnail card. Tapping it does nothing yet (detail page comes in a later step). */
+/** Plain poster card of the grids ("See all" / search results). */
 @Composable
 private fun MediaPostCard(
     post: MediaPost,
@@ -778,34 +1231,37 @@ private fun MediaPostCard(
     }
 }
 
-/** "See all": the whole category as a grid of thumbnails, next pages load while scrolling. */
+/**
+ * A grid of thumbnails; the next pages load while scrolling. Used for "See all" of a category ([onBack] set) and for
+ * the search results of a provider ([onBack] null: the app's top search bar is the way out).
+ */
 @Composable
-private fun MediaSeeAllGrid(
-    plugin: MediaPluginInfo,
-    entry: MediaCatalogEntry,
+private fun MediaPostGrid(
+    identity: String,
+    title: String,
     isDark: Boolean,
-    onBack: () -> Unit,
+    onBack: (() -> Unit)?,
     onOpenPost: (MediaPost) -> Unit,
+    loader: suspend (page: Int) -> List<MediaPost>,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
 
-    val items = remember(plugin.value, entry.filter) { mutableStateListOf<MediaPost>() }
-    var page by remember(plugin.value, entry.filter) { mutableStateOf(1) }
-    var loading by remember(plugin.value, entry.filter) { mutableStateOf(false) }
-    var ended by remember(plugin.value, entry.filter) { mutableStateOf(false) }
-    var error by remember(plugin.value, entry.filter) { mutableStateOf<String?>(null) }
+    val items = remember(identity) { mutableStateListOf<MediaPost>() }
+    var page by remember(identity) { mutableStateOf(1) }
+    var loading by remember(identity) { mutableStateOf(false) }
+    var ended by remember(identity) { mutableStateOf(false) }
+    var error by remember(identity) { mutableStateOf<String?>(null) }
 
     suspend fun loadNext() {
         if (loading || ended) return
         loading = true
         error = null
         try {
-            val fresh = MediaProviderRepository.loadPosts(context, plugin.value, entry.filter, page)
+            val fresh = loader(page)
             val known = items.map { it.link + "|" + it.title }.toHashSet()
             val added = fresh.filter { known.add(it.link + "|" + it.title) }
             if (added.isEmpty()) ended = true else { items.addAll(added); page++ }
@@ -821,13 +1277,15 @@ private fun MediaSeeAllGrid(
 
     Column(modifier = modifier.fillMaxSize()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 12.dp, bottom = 10.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = if (onBack != null) 8.dp else 18.dp, end = 12.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            PluginIconButton(R.drawable.lumora_arrow_left_solid, "Back", primaryText, onBack)
-            Spacer(modifier = Modifier.width(4.dp))
+            if (onBack != null) {
+                PluginIconButton(R.drawable.lumora_arrow_left_solid, "Back", primaryText, onBack)
+                Spacer(modifier = Modifier.width(4.dp))
+            }
             Text(
-                text = entry.title,
+                text = title,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 color = primaryText,
@@ -873,18 +1331,21 @@ private fun MediaWatchLaterRow(
     videos: List<MediaSavedVideo>,
     isDark: Boolean,
     primaryText: Color,
+    surfaceColor: Color,
     borderColor: Color,
     onPlay: (MediaSavedVideo) -> Unit,
     onRemove: (MediaSavedVideo) -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
-        Text(
-            text = "Watch later",
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            color = primaryText,
-            modifier = Modifier.padding(start = 18.dp, bottom = 12.dp)
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+        MediaSectionHeader(
+            title = "Watch later",
+            iconRes = R.drawable.lumora_watch_later,
+            primaryText = primaryText,
+            surfaceColor = surfaceColor,
+            borderColor = borderColor,
+            onSeeAll = null
         )
+        Spacer(modifier = Modifier.height(12.dp))
         LazyRow(
             contentPadding = PaddingValues(horizontal = 18.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)

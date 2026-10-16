@@ -336,7 +336,7 @@ fun HomeScreen(
     var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     // opening / closing a media title page starts with a clean top search bar
-    LaunchedEffect(MediaDetailState.plugin) {
+    LaunchedEffect(MediaDetailState.plugin, MediaDetailState.provider) {
         searchQuery = ""
         isSearchActive = false
     }
@@ -1641,7 +1641,7 @@ fun HomeScreen(
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Online" else (currentFolder?.name ?: AppStrings.getTitle(lang))
                         NavigationTab.MUSIC -> selectedMusicFolder?.name ?: "Music & Audio"
                         NavigationTab.RECENTS -> selectedRecentsFolder?.name ?: "Recently Played"
-                        NavigationTab.NETWORK -> if (showDownloads) "Download" else "Network"
+                        NavigationTab.NETWORK -> if (showDownloads) "Download" else (MediaDetailState.provider?.name ?: "Network")
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.name ?: "Playlists"
                     }
                     val headerSubtitle = when (effectiveSelectedTab) {
@@ -1664,7 +1664,7 @@ fun HomeScreen(
                         NavigationTab.RECENTS -> selectedRecentsFolder?.let {
                             "${it.records.size} video${if (it.records.size != 1) "s" else ""} in folder"
                         } ?: "Resume your watch history"
-                        NavigationTab.NETWORK -> if (showDownloads) "Download videos" else "Play links from the internet"
+                        NavigationTab.NETWORK -> if (showDownloads) "Download videos" else if (MediaDetailState.provider != null) null else "Play links from the internet"
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.let {
                             val count = it.videoPaths.size
                             val type = if (it.isAudio) "Audio" else "Video"
@@ -1725,6 +1725,8 @@ fun HomeScreen(
                                 showDownloads = true
                             }
                         } else null,
+                        // a media provider page shows the provider's own icon in place of the app icon
+                        leadingIconUrl = if (effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads) MediaDetailState.provider?.icon else null,
                         onSettingsClick = { showSettingsSheet = true }
                     )
                 }
@@ -1759,7 +1761,7 @@ fun HomeScreen(
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Search videos, channels online..." else if (currentFolder != null) "Search in ${currentFolder.name}..." else "Search videos, or /playlist (e.g. /Op Anime)..."
                         NavigationTab.MUSIC -> if (selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) "Search songs, albums, artists online..." else "Search songs, albums, artists..."
                         NavigationTab.RECENTS -> "Search watch history..."
-                        NavigationTab.NETWORK -> if (showDownloads) "Search downloads..." else if (MediaDetailState.plugin != null) "Search episodes or movies in this title..." else "Enter stream URL..."
+                        NavigationTab.NETWORK -> if (showDownloads) "Search downloads..." else if (MediaDetailState.plugin != null) "Search episodes or movies in this title..." else if (MediaDetailState.provider != null) "Search movies & series in ${MediaDetailState.provider?.name}..." else "Enter stream URL..."
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.let { "Search in ${it.name}..." } ?: "Search playlists..."
                     }
                     Box(
@@ -1952,7 +1954,7 @@ fun HomeScreen(
                                 onPlayVideo = onPlayVideo,
                                 modifier = Modifier.fillMaxWidth().weight(1f),
                                 glassBlurTransparency = uiState.glassBlurTransparency,
-                                searchQuery = if (MediaDetailState.plugin != null) searchQuery else "",
+                                searchQuery = if (MediaDetailState.plugin != null || MediaDetailState.provider != null) searchQuery else "",
                                 onOpenDownloads = {
                                     searchQuery = ""
                                     isSearchActive = false

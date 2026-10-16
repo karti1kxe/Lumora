@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -109,8 +110,8 @@ fun NetworkTabContent(
     var section by rememberSaveable { mutableStateOf(MediaDetailState.lastSection) }
     val mediaTick by MediaPluginStore.changes.collectAsState()
     val mediaPlugins = remember(mediaTick) { MediaPluginStore.getInstalled(context) }
-    // a plugin tab can disappear (plugin removed): fall back to the last existing tab
-    val safeSection = section.coerceIn(0, 1 + mediaPlugins.size)
+    // only two sections now (Local Network, Media); a downloaded provider opens as a page from the Media list
+    val safeSection = section.coerceIn(0, 1)
     var optionsEntry by remember { mutableStateOf<RecentStreamEntry?>(null) }
     var url by rememberSaveable { mutableStateOf("") }
     var isResolving by remember { mutableStateOf(false) }
@@ -309,24 +310,34 @@ fun NetworkTabContent(
         return
     }
 
+    // A provider (downloaded media plugin) is open: its own page replaces the Network tab until Back.
+    val openProvider = MediaDetailState.provider?.let { p -> mediaPlugins.firstOrNull { it.value == p.value } }
+    if (MediaDetailState.provider != null && openProvider == null) MediaDetailState.provider = null
+    BackHandler(enabled = openProvider != null) { MediaDetailState.provider = null }
+    if (openProvider != null) {
+        MediaPluginPage(
+            plugin = openProvider,
+            isDark = isDark,
+            onOpenPost = { MediaDetailState.open(openProvider, it) },
+            onPlayVideo = onPlayVideo,
+            modifier = modifier,
+            searchQuery = searchQuery
+        )
+        return
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
         // Same gradient "liquid" underline + slide animation as the Saved / Favourite tabs of a playlist.
-        // Downloaded media plugins get their own tab next to "Media"; the bar scrolls once there are many.
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val barMinWidth = maxWidth
-            Box(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-                PlaylistFilterTabs(
-                    tabs = listOf("Local Network", "Media") + mediaPlugins.map { it.name },
-                    selectedIndex = safeSection,
-                    isDark = isDark,
-                    onSelect = { section = it; MediaDetailState.lastSection = it },
-                    modifier = Modifier
-                        .widthIn(min = barMinWidth)
-                        .padding(horizontal = 4.dp)
-                        .padding(top = 4.dp, bottom = 12.dp)
-                )
-            }
-        }
+        PlaylistFilterTabs(
+            tabs = listOf("Local Network", "Media"),
+            selectedIndex = safeSection,
+            isDark = isDark,
+            onSelect = { section = it; MediaDetailState.lastSection = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp)
+                .padding(top = 4.dp, bottom = 12.dp)
+        )
 
         Crossfade(
             targetState = safeSection,
@@ -517,18 +528,11 @@ fun NetworkTabContent(
                         }
                     }
                 }
-            } else if (current == 1) {
-                MediaPluginManager(isDark = isDark)
             } else {
-                val plugin = mediaPlugins.getOrNull(current - 2)
-                if (plugin != null) {
-                    MediaPluginPage(
-                        plugin = plugin,
-                        isDark = isDark,
-                        onOpenPost = { MediaDetailState.open(plugin, it) },
-                        onPlayVideo = onPlayVideo
-                    )
-                }
+                MediaPluginManager(
+                    isDark = isDark,
+                    onOpenPlugin = { MediaDetailState.provider = it }
+                )
             }
         }
     }

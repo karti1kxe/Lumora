@@ -193,6 +193,17 @@ object MediaProviderRepository {
         return list
     }
 
+    /** Search inside one plugin (the plugin's own getSearchPosts). Not cached. */
+    suspend fun searchPosts(context: Context, pluginId: String, query: String, page: Int): List<MediaPost> {
+        val args = org.json.JSONObject()
+            .put("searchQuery", query)
+            .put("page", page)
+            .put("providerValue", pluginId)
+            .toString()
+        val json = gate.withPermit { PluginJsEngine.call(context, pluginId, "posts", "getSearchPosts", args) }
+        return parsePosts(json)
+    }
+
     private fun parseEntries(json: String): List<MediaCatalogEntry> {
         val arr = JSONArray(json)
         val out = ArrayList<MediaCatalogEntry>()
