@@ -233,7 +233,9 @@ fun MediaDetailScreen(
     var seasonIdx by remember(selKey) { mutableIntStateOf(MediaDetailState.selections[selKey]?.getOrNull(0) ?: 0) }
     var audioIdx by remember(selKey) { mutableIntStateOf(MediaDetailState.selections[selKey]?.getOrNull(1) ?: 0) }
     var qualityIdx by remember(selKey) { mutableIntStateOf(MediaDetailState.selections[selKey]?.getOrNull(2) ?: 0) }
-    fun saveSelection() { MediaDetailState.selections[selKey] = intArrayOf(seasonIdx, audioIdx, qualityIdx) }
+    // Season taken from the episode titles (S01 E01 ...) when one list holds all the seasons of a series
+    var epSeason by remember(selKey) { mutableIntStateOf(MediaDetailState.selections[selKey]?.getOrNull(3) ?: 0) }
+    fun saveSelection() { MediaDetailState.selections[selKey] = intArrayOf(seasonIdx, audioIdx, qualityIdx, epSeason) }
     val season = groups.getOrNull(seasonIdx.coerceIn(0, (groups.size - 1).coerceAtLeast(0)))
     val audioList = season?.audios.orEmpty()
     val audio = audioList.getOrNull(audioIdx.coerceIn(0, (audioList.size - 1).coerceAtLeast(0)))
@@ -266,7 +268,7 @@ fun MediaDetailScreen(
         }
     }
 
-    val videos: List<DetailVideo> = remember(episodes, option, isSeries, title, poster) {
+    val allVideos: List<DetailVideo> = remember(episodes, option, isSeries, title, poster) {
         val q = option?.label.orEmpty()
         (episodes ?: emptyList()).map { d ->
             val shownTitle = if (!isSeries && d.title.equals("Movie", ignoreCase = true)) title else d.title
@@ -279,6 +281,16 @@ fun MediaDetailScreen(
             )
         }
     }
+
+    val epSeasonNumbers = remember(allVideos) { allVideos.mapNotNull { seasonNumber(it.title) }.distinct().sorted() }
+    val showEpSeason = groups.size <= 1 && epSeasonNumbers.size > 1
+    val epSeasonShown = if (epSeasonNumbers.contains(epSeason)) epSeason else epSeasonNumbers.firstOrNull() ?: 0
+    val videos: List<DetailVideo> = if (showEpSeason) {
+        allVideos.filter {
+            val n = seasonNumber(it.title)
+            n == epSeasonShown || (n == null && epSeasonShown == epSeasonNumbers.first())
+        }
+    } else allVideos
 
     // ---- swipe toolbar + background work ----
     var actionTarget by remember { mutableStateOf<DetailVideo?>(null) }
@@ -331,7 +343,7 @@ fun MediaDetailScreen(
             // the player's quality menu lists exactly the qualities this plugin offers for this audio
             val session = PluginPlaybackSession(
                 plugin = plugin,
-                episodeIndex = videos.indexOfFirst { it.link == v.link }.coerceAtLeast(0),
+                episodeIndex = allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0),
                 episodeTitle = v.title,
                 isSeries = isSeries,
                 choices = optionList.map { PluginQualityChoice(it.label, it.link.episodesLink, it.link.directLinks) },
@@ -357,7 +369,7 @@ fun MediaDetailScreen(
             val choice = PluginQualityChoice(chosen.label, chosen.link.episodesLink, chosen.link.directLinks)
             val result = MediaPlayback.resolveChoice(
                 context, plugin, choice,
-                videos.indexOfFirst { it.link == v.link }.coerceAtLeast(0), v.title, isSeries, true
+                allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0), v.title, isSeries, true
             )
             val stream = result.getOrNull()
             if (stream == null) showResolveError(result.exceptionOrNull()) else begin(stream)
@@ -376,7 +388,7 @@ fun MediaDetailScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .padding(vertical = 6.dp)
                         .clip(cardShape)
                         .background(surfaceColor)
                         .border(1.5.dp, AccentGradient, cardShape)
@@ -491,15 +503,15 @@ fun MediaDetailScreen(
                                 }
                                 if (groups.isNotEmpty()) {
                                     Spacer(modifier = Modifier.height(14.dp))
-                                    if (groups.size > 1) {
+                                    if (groups.size > 1 || showEpSeason) {
                                         PickerPill(
                                             caption = "Season",
-                                            value = season?.label.orEmpty(),
+                                            value = if (groups.size > 1) season?.label.orEmpty() else "Season $epSeasonShown",
                                             primaryText = primaryText,
                                             secondaryText = secondaryText,
                                             borderColor = borderColor,
                                             modifier = Modifier.fillMaxWidth()
-                                        ) { pickerSheet = 1 }
+                                        ) { pickerSheet = if (groups.size > 1) 1 else 4 }
                                         Spacer(modifier = Modifier.height(10.dp))
                                     }
                                     Row(
@@ -567,7 +579,7 @@ fun MediaDetailScreen(
                                 channelName = listOf(v.qualityLabel, plugin.name).filter { it.isNotBlank() }.joinToString(" · ")
                             )
                         }
-                        Box(modifier = Modifier.padding(horizontal = 12.dp).swipeLeftForActions { actionTarget = v }) {
+                        Box(modifier = Modifier.swipeLeftForActions { actionTarget = v }) {
                             VideoItemCard(
                                 video = card,
                                 isDark = isDark,
@@ -657,6 +669,19 @@ fun MediaDetailScreen(
                     seasonIdx = it
                     audioIdx = 0
                     qualityIdx = 0
+                    saveSelection()
+                    pickerSheet = 0
+                }
+            )
+            4 -> OptionSheet(
+                title = "Season",
+                options = epSeasonNumbers.map { "Season $it" },
+                selected = epSeasonNumbers.indexOf(epSeasonShown).coerceAtLeast(0),
+                isDark = isDark,
+                glassBlurTransparency = glassBlurTransparency,
+                onDismiss = { pickerSheet = 0 },
+                onSelect = {
+                    epSeason = epSeasonNumbers[it]
                     saveSelection()
                     pickerSheet = 0
                 }
