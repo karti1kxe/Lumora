@@ -57,7 +57,7 @@ import com.example.util.LinkInfo
 
 /** Same translucent "liquid glass" colour as the app's other bottom sheets; the opacity follows the transparency setting. */
 @Composable
-private fun downloadSheetColor(isDark: Boolean, glassBlurTransparency: Float): Color {
+internal fun downloadSheetColor(isDark: Boolean, glassBlurTransparency: Float): Color {
     val alphaFactor = (glassBlurTransparency / 100f).coerceIn(0.20f, 1.0f)
     return if (isDark) {
         if (alphaFactor >= 0.99f) Color(0xFF0F172A)
@@ -70,7 +70,7 @@ private fun downloadSheetColor(isDark: Boolean, glassBlurTransparency: Float): C
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DownloadGlassSheet(
+internal fun DownloadGlassSheet(
     isDark: Boolean,
     glassBlurTransparency: Float,
     onDismiss: () -> Unit,

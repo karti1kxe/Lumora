@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -197,7 +198,14 @@ fun VideoItemCard(
             .padding(10.dp)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                // Every card is exactly as tall as its thumbnail, so a longer title or an extra badge never makes
+                // one card bigger than the next (the "show full name" option may still grow it on purpose).
+                .then(
+                    if (visibleFields.showThumbnails && !isRenaming && !visibleFields.showFullName) Modifier.height(80.dp)
+                    else Modifier.heightIn(min = if (visibleFields.showThumbnails) 80.dp else 54.dp)
+                ),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // 1. Thumbnail or Compact Video Icon
@@ -617,6 +625,7 @@ fun VideoItemGridCard(
                     fontWeight = FontWeight.Bold,
                     color = primaryText,
                     maxLines = if (visibleFields.showFullName) 3 else 2,
+                    minLines = if (visibleFields.showFullName) 3 else 2,
                     overflow = TextOverflow.Ellipsis,
                     lineHeight = 17.sp
                 )

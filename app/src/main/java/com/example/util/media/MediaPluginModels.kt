@@ -52,11 +52,15 @@ data class MediaInfo(
     val linkList: List<MediaLink>
 )
 
+/** One subtitle track a plugin's getStream offers next to a stream. */
+data class MediaSubtitle(val title: String, val language: String, val uri: String)
+
 /** One playable source returned by a plugin's getStream. */
 data class MediaStream(
     val server: String,
     val link: String,
     val type: String,
     val quality: String?,
-    val headers: Map<String, String>
+    val headers: Map<String, String>,
+    val subtitles: List<MediaSubtitle> = emptyList()
 )

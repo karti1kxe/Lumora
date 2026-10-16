@@ -526,6 +526,11 @@ fun VideoPlayerScreen(
     val onlinePrefs = remember { context.getSharedPreferences("lumora_online_video", android.content.Context.MODE_PRIVATE) }
     // HTTP headers of a Network-tab link (yt-dlp result); re-applied on every quality switch (setOnlineStream clears them)
     var networkRequestHeaders by remember(currentVideo) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    // Media-plugin video: the qualities that plugin offers for this movie / episode (player quality menu) + its subtitles
+    val pluginSession = remember(currentVideo) {
+        currentVideo?.takeIf { it.isDirectStream }?.let { com.example.util.media.PluginPlaybackSessions.get(it.path) }
+    }
+    var pluginQuality by remember(currentVideo) { mutableStateOf(pluginSession?.selectedQuality) }
 
 
     // Video thumbnail / first frame state
@@ -587,6 +592,27 @@ fun VideoPlayerScreen(
         if (headers.isNotEmpty()) controller.setNetworkRequestHeaders(headers)
         controller.loadVideo(q.url, startMs)
         controller.play()
+    }
+
+    /** Media plugin: every subtitle the website offers for this stream is added to the player's subtitle list (none is forced on). */
+    fun attachPluginSubtitles(subtitles: List<com.example.util.media.MediaSubtitle>, loadKey: String?) {
+        if (subtitles.isEmpty()) return
+        coroutineScope.launch {
+            val opened = withContext(Dispatchers.IO) { controller.awaitFileLoaded(30000L) }
+            if (!opened || lastLoadedVideoKey != loadKey) return@launch
+            val used = HashSet<String>()
+            withContext(Dispatchers.IO) {
+                for (sub in subtitles) {
+                    val base = sub.title.ifBlank { sub.language }.ifBlank { "Subtitle" }
+                    var name = base
+                    var n = 2
+                    while (!used.add(name.lowercase())) name = "$base ${n++}"
+                    try {
+                        controller.addExternalSubtitle(sub.uri, context, originalName = name, select = false)
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
     }
 
     /** Resolves the stream URLs and starts playback. The existing buffering spinner runs until the first frame. */
@@ -1838,6 +1864,7 @@ fun VideoPlayerScreen(
                     controller.setDirectStream(true)
                     controller.loadVideo(path, startPositionMs = initialPos)
                     controller.play()
+                    com.example.util.media.PluginPlaybackSessions.get(path)?.let { attachPluginSubtitles(it.subtitles, key) }
                 } else if (targetVideo.isTorrentStream) {
                     onlinePlayback = null
                     startTorrentPlayback(path, initialPos, key)
@@ -2214,6 +2241,37 @@ fun VideoPlayerScreen(
         }
     }
     val bufferedPositionMs by controller.bufferedPositionMs.collectAsState()
+
+    /** Media plugin quality menu: opens the same movie / episode in another quality of that website, from the same second. */
+    fun switchPluginQuality(label: String) {
+        val session = pluginSession ?: return
+        val video = currentVideo ?: return
+        if (label == pluginQuality) return
+        val choice = session.choices.firstOrNull { it.quality == label } ?: return
+        val pos = controller.currentPositionMs.value
+        val loadKey = lastLoadedVideoKey
+        coroutineScope.launch {
+            Toast.makeText(context, "Loading $label…", Toast.LENGTH_SHORT).show()
+            val result = com.example.util.media.MediaPlayback.resolveChoice(
+                context, session.plugin, choice, session.episodeIndex, session.episodeTitle, session.isSeries, false
+            )
+            val stream = result.getOrNull()
+            if (stream == null) {
+                Toast.makeText(context, "Could not load $label: " + (result.exceptionOrNull()?.message ?: "unknown error"), Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            if (lastLoadedVideoKey != loadKey) return@launch
+            // registers the new URL's headers (User-Agent / Referer) exactly like the first load
+            com.example.util.media.MediaPlayback.toVideoItem(context, session.plugin, video.displayName, video.thumbnailUrl.orEmpty(), stream, session)
+            session.selectedQuality = label
+            pluginQuality = label
+            controller.setOnlineStream(true)
+            controller.setDirectStream(true)
+            controller.loadVideo(stream.link, pos)
+            controller.play()
+            attachPluginSubtitles(stream.subtitles, loadKey)
+        }
+    }
 
     /** Loads [q] at the current position (same moment, same audio track) without touching the saved preference. */
     fun applyOnlineQuality(q: OnlineVideoQuality) {
@@ -3121,9 +3179,14 @@ fun VideoPlayerScreen(
             isLiveStream = controllerIsLive,
             liveSeekStartMs = controllerLiveRange?.startMs ?: 0L,
             liveSeekEndMs = controllerLiveRange?.endMs ?: 0L,
-            availableVideoQualities = onlinePlayback?.qualities?.map { it.label }?.let { listOf(OnlineVideoService.AUTO_QUALITY) + it } ?: emptyList(),
-            selectedVideoQuality = if (onlineAutoMode) "${OnlineVideoService.AUTO_QUALITY} (${selectedOnlineQuality ?: "…"})" else selectedOnlineQuality,
-            onSelectVideoQuality = { label -> switchOnlineQuality(label) },
+            availableVideoQualities = if (pluginSession != null) {
+                pluginSession.choices.map { it.quality }
+            } else {
+                onlinePlayback?.qualities?.map { it.label }?.let { listOf(OnlineVideoService.AUTO_QUALITY) + it } ?: emptyList()
+            },
+            selectedVideoQuality = if (pluginSession != null) pluginQuality
+                else if (onlineAutoMode) "${OnlineVideoService.AUTO_QUALITY} (${selectedOnlineQuality ?: "…"})" else selectedOnlineQuality,
+            onSelectVideoQuality = { label -> if (pluginSession != null) switchPluginQuality(label) else switchOnlineQuality(label) },
             showBufferedRange = uiState.playerSettings.showBufferedRange || currentVideo?.isOnline == true,
             thumbFastPreview = uiState.playerSettings.thumbFastPreview,
             previewVideoUri = currentVideo?.uri,

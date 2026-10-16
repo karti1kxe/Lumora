@@ -85,13 +85,25 @@ object MediaProviderRepository {
                     if (k.isNotBlank() && v.isNotBlank()) headers[k] = v
                 }
             }
+            val subtitles = ArrayList<MediaSubtitle>()
+            o.optJSONArray("subtitles")?.let { sa ->
+                for (j in 0 until sa.length()) {
+                    val so = sa.optJSONObject(j) ?: continue
+                    val suri = (so.optString("uri", "").ifBlank { so.optString("url", "").ifBlank { so.optString("link", "") } }).trim()
+                    if (!suri.startsWith("http://", ignoreCase = true) && !suri.startsWith("https://", ignoreCase = true)) continue
+                    val lang = so.optString("language", "").ifBlank { so.optString("lang", "") }.trim()
+                    val stitle = so.optString("title", "").ifBlank { so.optString("label", "") }.ifBlank { lang }.trim()
+                    subtitles.add(MediaSubtitle(title = stitle.ifBlank { "Subtitle ${j + 1}" }, language = lang, uri = suri))
+                }
+            }
             out.add(
                 MediaStream(
                     server = o.optString("server", "").ifBlank { "Server ${i + 1}" },
                     link = url,
                     type = o.optString("type", "").lowercase(),
                     quality = o.optString("quality", "").ifBlank { null },
-                    headers = headers
+                    headers = headers,
+                    subtitles = subtitles
                 )
             )
         }

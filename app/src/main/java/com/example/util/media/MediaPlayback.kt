@@ -33,7 +33,13 @@ object MediaPlayback {
         return try {
             val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, forDownload)
             val best = pickBest(streams)
-            if (best == null) Result.failure(PluginException("no playable link was found")) else Result.success(best)
+            if (best == null) {
+                Result.failure(PluginException("no playable link was found"))
+            } else {
+                // every subtitle the plugin listed (on any server) is offered in the player, without duplicates
+                val allSubs = streams.flatMap { it.subtitles }.distinctBy { it.uri }
+                Result.success(if (allSubs.size > best.subtitles.size) best.copy(subtitles = allSubs) else best)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -45,7 +51,18 @@ object MediaPlayback {
      * The card / player item of a resolved stream. It is opened like an imported IPTV stream: mpv plays the URL directly,
      * with buffering and the "could not be played" message of the existing player, using the headers the plugin gave.
      */
-    fun toVideoItem(context: Context, plugin: MediaPluginInfo, title: String, poster: String, stream: MediaStream): VideoItem {
+    fun toVideoItem(
+        context: Context,
+        plugin: MediaPluginInfo,
+        title: String,
+        poster: String,
+        stream: MediaStream,
+        session: PluginPlaybackSession? = null
+    ): VideoItem {
+        if (session != null) {
+            session.subtitles = stream.subtitles
+            PluginPlaybackSessions.put(stream.link, session)
+        }
         val ua = stream.headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value
         val ref = stream.headers.entries.firstOrNull { it.key.equals("Referer", true) || it.key.equals("Referrer", true) }?.value
         val extra = LinkedHashMap<String, String>()
@@ -82,6 +99,29 @@ object MediaPlayback {
         )
     }
 
+    /** The same movie / episode in another quality option of the title (series: the quality's episode list is opened first). */
+    suspend fun resolveChoice(
+        context: Context,
+        plugin: MediaPluginInfo,
+        choice: PluginQualityChoice,
+        episodeIndex: Int,
+        episodeTitle: String,
+        isSeries: Boolean,
+        forDownload: Boolean
+    ): Result<MediaStream> {
+        return try {
+            val list = choice.episodesLink?.let { MediaProviderRepository.loadEpisodes(context, plugin.value, it) } ?: choice.directLinks
+            fun norm(t: String) = t.lowercase().filter { it.isLetterOrDigit() }
+            val target = list.firstOrNull { norm(it.title) == norm(episodeTitle) } ?: list.getOrNull(episodeIndex)
+                ?: return Result.failure(PluginException("this quality does not have the same episode"))
+            resolve(context, plugin, target.link, target.type ?: if (isSeries) "series" else "movie", forDownload)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
     /** Puts the video at the top of a playlist named after the website (created on first use). Returns true if it was created. */
     fun addToPluginPlaylist(context: Context, plugin: MediaPluginInfo, item: VideoItem): Boolean {
         val existing = PlaylistManager.getPlaylists(context)
@@ -110,4 +150,35 @@ object MediaPlayback {
             "Could not start the download"
         }
     }
+}
+
+/** One quality of the audio (language) a title was opened with: the movie / episodes of it, or the link to open them. */
+data class PluginQualityChoice(
+    val quality: String,
+    val episodesLink: String?,
+    val directLinks: List<MediaDirectLink>
+)
+
+/**
+ * What the player needs to know about a video that came from a media plugin: the qualities that plugin really offers
+ * for this movie / episode (for the player's quality menu) and the subtitles of the stream that is playing.
+ */
+class PluginPlaybackSession(
+    val plugin: MediaPluginInfo,
+    val episodeIndex: Int,
+    val episodeTitle: String,
+    val isSeries: Boolean,
+    val choices: List<PluginQualityChoice>,
+    @Volatile var selectedQuality: String,
+    @Volatile var subtitles: List<MediaSubtitle> = emptyList()
+)
+
+/** Stream URL -> session, so the player (which only gets a VideoItem) can find it. Small, in memory only. */
+object PluginPlaybackSessions {
+    private val map = object : LinkedHashMap<String, PluginPlaybackSession>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PluginPlaybackSession>?): Boolean = size > 24
+    }
+
+    @Synchronized fun put(url: String, session: PluginPlaybackSession) { map[url] = session }
+    @Synchronized fun get(url: String): PluginPlaybackSession? = map[url]
 }

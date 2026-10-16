@@ -3020,7 +3020,7 @@ fun HomeScreen(
                 }
             }
 
-            val isInsideAnyFolder = currentFolder != null || isOnlineVideoOpen || selectedMusicFolder != null || selectedRecentsFolder != null || selectedPlaylist != null
+            val isInsideAnyFolder = currentFolder != null || isOnlineVideoOpen || selectedMusicFolder != null || selectedRecentsFolder != null || selectedPlaylist != null || MediaDetailState.plugin != null
 
             // 6. Dynamic Floating Bottom Navigation Bar (Hidden inside folders & playlists or during selection)
             if (!isSelectionMode && !isInsideAnyFolder && activeTabs.isNotEmpty()) {
