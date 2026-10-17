@@ -1223,15 +1223,10 @@ fun FoldersSettingsTabContent(
         var errorMessage by remember { mutableStateOf<String?>(null) }
 
         val sheetAlphaFactor = (glassBlurTransparency / 100f).coerceIn(0.20f, 1.0f)
-        val sheetContainerColor = if (isDark) {
-            if (sheetAlphaFactor >= 0.99f) Color(0xFF0F172A)
-            else Color(0xFF0F172A).copy(alpha = (0.70f + 0.30f * sheetAlphaFactor).coerceIn(0.40f, 1.0f))
-        } else {
-            if (sheetAlphaFactor >= 0.99f) Color(0xFFFFFFFF)
-            else Color(0xFFFFFFFF).copy(alpha = (0.75f + 0.25f * sheetAlphaFactor).coerceIn(0.45f, 1.0f))
-        }
+        val sheetContainerColor = glassPanelColor(isDark, glassBlurTransparency)
 
-        ModalBottomSheet(
+        PanelScaled {
+ModalBottomSheet(
             onDismissRequest = { showVaultSetupSheet = false },
             sheetState = sheetState,
             shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -1446,6 +1441,7 @@ fun FoldersSettingsTabContent(
                 }
             }
         }
+}
     }
 
     // ================= BOTTOM SHEET 2: VAULT UNLOCK (WITH TRANSPARENCY SUPPORT) ================= //
@@ -1457,15 +1453,10 @@ fun FoldersSettingsTabContent(
         var unlockError by remember { mutableStateOf<String?>(null) }
 
         val sheetAlphaFactor = (glassBlurTransparency / 100f).coerceIn(0.20f, 1.0f)
-        val sheetContainerColor = if (isDark) {
-            if (sheetAlphaFactor >= 0.99f) Color(0xFF0F172A)
-            else Color(0xFF0F172A).copy(alpha = (0.70f + 0.30f * sheetAlphaFactor).coerceIn(0.40f, 1.0f))
-        } else {
-            if (sheetAlphaFactor >= 0.99f) Color(0xFFFFFFFF)
-            else Color(0xFFFFFFFF).copy(alpha = (0.75f + 0.25f * sheetAlphaFactor).coerceIn(0.45f, 1.0f))
-        }
+        val sheetContainerColor = glassPanelColor(isDark, glassBlurTransparency)
 
-        ModalBottomSheet(
+        PanelScaled {
+ModalBottomSheet(
             onDismissRequest = { showVaultUnlockSheet = false },
             sheetState = sheetState,
             shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -1628,6 +1619,7 @@ fun FoldersSettingsTabContent(
                 }
             }
         }
+}
     }
 }
 

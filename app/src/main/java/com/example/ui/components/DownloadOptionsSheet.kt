@@ -58,14 +58,7 @@ import com.example.util.LinkInfo
 /** Same translucent "liquid glass" colour as the app's other bottom sheets; the opacity follows the transparency setting. */
 @Composable
 internal fun downloadSheetColor(isDark: Boolean, glassBlurTransparency: Float): Color {
-    val alphaFactor = (glassBlurTransparency / 100f).coerceIn(0.20f, 1.0f)
-    return if (isDark) {
-        if (alphaFactor >= 0.99f) Color(0xFF0F172A)
-        else Color(0xFF0F172A).copy(alpha = (0.70f + 0.30f * alphaFactor).coerceIn(0.40f, 1.0f))
-    } else {
-        if (alphaFactor >= 0.99f) Color(0xFFFFFFFF)
-        else Color(0xFFFFFFFF).copy(alpha = (0.75f + 0.25f * alphaFactor).coerceIn(0.45f, 1.0f))
-    }
+    return glassPanelColor(isDark, glassBlurTransparency)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -78,7 +71,8 @@ internal fun DownloadGlassSheet(
 ) {
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(
+    PanelScaled {
+ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -107,6 +101,7 @@ internal fun DownloadGlassSheet(
             content()
         }
     }
+}
 }
 
 /**

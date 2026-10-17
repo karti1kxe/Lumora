@@ -204,6 +204,7 @@ class MainActivity : ComponentActivity() {
             VideoPlayerTheme(
                 themeMode = uiState.themeMode,
                 appScale = uiState.appScale,
+                glassBlurTransparency = uiState.glassBlurTransparency,
                 appTheme = uiState.appTheme,
                 amoledBlackMode = uiState.amoledBlackMode,
                 useSystemFont = uiState.useSystemFont

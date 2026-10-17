@@ -446,13 +446,7 @@ fun SettingsSheet(
         }
     }
 
-    val sheetBg = if (isDark) {
-        if (alphaFactor >= 0.99f) Color(0xFF0B1120)
-        else Color(0xFF0B1120).copy(alpha = (0.12f + 0.85f * alphaFactor).coerceIn(0.12f, 1.0f))
-    } else {
-        if (alphaFactor >= 0.99f) Color(0xFFFFFFFF)
-        else Color(0xFFFFFFFF).copy(alpha = (0.12f + 0.85f * alphaFactor).coerceIn(0.12f, 1.0f))
-    }
+    val sheetBg = glassPanelColor(isDark, uiState.glassBlurTransparency)
     val maxContentHeight = (configuration.screenHeightDp - 36).coerceAtLeast(360).dp
 
     val cardBg = if (isDark) {

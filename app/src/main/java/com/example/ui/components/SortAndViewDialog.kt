@@ -147,11 +147,7 @@ fun SortAndViewOptionsPopup(
     val pillBorderColor = if (isDark) Color(0xFF38BDF8).copy(alpha = 0.70f) else Color(0xFF0284C7).copy(alpha = 0.65f)
     val dividerColor = if (isDark) Color(0xFF38BDF8).copy(alpha = 0.25f) else Color(0xFF38BDF8).copy(alpha = 0.30f)
     val alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.10f, 1.0f)
-    val dialogSurface = if (isDark) {
-        if (alphaRatio >= 0.99f) Color(0xFF0B1120) else Color(0xFF0B1120).copy(alpha = (0.40f + 0.60f * alphaRatio).coerceIn(0.25f, 1.0f))
-    } else {
-        if (alphaRatio >= 0.99f) Color(0xFFFFFFFF) else Color(0xFFFFFFFF).copy(alpha = (0.40f + 0.60f * alphaRatio).coerceIn(0.25f, 1.0f))
-    }
+    val dialogSurface = glassPanelColor(isDark, glassBlurTransparency)
     val dialogBorderBrush = if (isDark) LiquidGlassDefaults.DarkGlassBorderBrush else LiquidGlassDefaults.LightGlassBorderBrush
 
     // Calculate dynamic scaled density so the entire Sort & View Options UI scales with appScale

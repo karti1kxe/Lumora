@@ -34,6 +34,7 @@ private fun getSecondaryForVariant(variant: AppThemeVariant): Color = variant.se
 fun VideoPlayerTheme(
     themeMode: ThemeMode = ThemeMode.LIGHT,
     appScale: Float = 75f,
+    glassBlurTransparency: Float = 85f,
     appTheme: AppThemeVariant = AppThemeVariant.DYNAMIC,
     amoledBlackMode: Boolean = false,
     useSystemFont: Boolean = false,
@@ -127,6 +128,8 @@ fun VideoPlayerTheme(
 
     CompositionLocalProvider(
         LocalDensity provides scaledDensity,
+        com.example.ui.components.LocalAppScale provides appScale,
+        com.example.ui.components.LocalPanelTransparency provides glassBlurTransparency,
         LocalIsDarkTheme provides isDark,
         LocalIsSystemFontEnabled provides useSystemFont,
         LocalAppFontFamily provides appFontFamily,

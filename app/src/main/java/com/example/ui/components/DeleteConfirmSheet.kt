@@ -52,7 +52,7 @@ fun DeleteConfirmSheet(
     onConfirm: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val sheetBg = if (isDark) Color(0xFF1B2630).copy(alpha = 0.94f) else Color(0xFFDAE3E9).copy(alpha = 0.94f)
+    val sheetBg = glassPanelColor(isDark, LocalPanelTransparency.current)
     val primaryText = if (isDark) Color(0xFFE6EEF2) else Color(0xFF16222A)
     val warnBg = if (isDark) Color(0xFF4A1F1D) else Color(0xFFF9DEDC)
     val warnText = if (isDark) Color(0xFFFFDAD6) else Color(0xFF410E0B)
@@ -60,7 +60,8 @@ fun DeleteConfirmSheet(
     val accent = if (isDark) Color(0xFF5FD3E6) else Color(0xFF006877)
     val red = Color(0xFFB3261E)
 
-    ModalBottomSheet(
+    PanelScaled {
+ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = sheetBg,
@@ -193,4 +194,5 @@ fun DeleteConfirmSheet(
             }
         }
     }
+}
 }

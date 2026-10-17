@@ -146,13 +146,7 @@ fun AudioFolderVideoSelectorSheet(
     val alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.10f, 1.0f)
     val primaryTextColor = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryTextColor = if (isDark) DarkTextSecondary else LightTextSecondary
-    val sheetBg = if (isDark) {
-        if (alphaRatio >= 0.99f) Color(0xFF0F172A)
-        else Color(0xFF0F172A).copy(alpha = (0.40f + 0.60f * alphaRatio).coerceIn(0.25f, 1.0f))
-    } else {
-        if (alphaRatio >= 0.99f) Color(0xFFF8FAFC)
-        else Color(0xFFF8FAFC).copy(alpha = (0.40f + 0.60f * alphaRatio).coerceIn(0.25f, 1.0f))
-    }
+    val sheetBg = glassPanelColor(isDark, glassBlurTransparency)
     val cardBg = if (isDark) {
         if (alphaRatio >= 0.99f) Color(0xFF1E293B)
         else Color(0xFF1E293B).copy(alpha = (0.35f + 0.65f * alphaRatio).coerceIn(0.20f, 1.0f))
