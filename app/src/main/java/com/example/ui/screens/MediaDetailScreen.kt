@@ -433,7 +433,7 @@ fun MediaDetailScreen(
             if (streams == null) {
                 showResolveError(result.exceptionOrNull())
             } else {
-                val options = MediaPlayback.downloadOptions(streams)
+                val options = MediaPlayback.downloadOptions(context, streams)
                 if (options.size == 1) {
                     beginDownload(v, suffix, options[0])
                 } else if (options.isNotEmpty()) {

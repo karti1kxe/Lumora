@@ -10,6 +10,11 @@
   var seq = 0;
 
   // ---------- native bridge helpers ----------
+  var webViewPending = {};
+  global.__webViewResolve = function (id) {
+    var cb = webViewPending[id]; delete webViewPending[id];
+    if (cb) cb(Host.takeResult(id));
+  };
   global.__hostResolve = function (id) {
     var cb = pending[id];
     delete pending[id];
@@ -149,9 +154,16 @@
   }
 
   function createAxios(defaults) {
+    var requestInterceptors = [], responseInterceptors = [];
     function request(config) {
       config = mergeConfig(defaults, config);
       if (config.signal && config.signal.aborted) return Promise.reject(axiosError("canceled", config, undefined, "ERR_CANCELED"));
+      var chain = Promise.resolve(config);
+      requestInterceptors.slice().reverse().forEach(function (pair) {
+        chain = chain.then(pair.fulfilled, pair.rejected);
+      });
+      return chain.then(function (prepared) {
+      config = prepared || config;
       var headers = normHeaders(config.headers);
       var url = appendParams(joinUrl(config.baseURL, config.url || ""), config.params);
       var method = String(config.method || "get").toUpperCase();
@@ -188,6 +200,15 @@
         var e = axiosError(err && err.message ? err.message : "Network Error", config, undefined, "ERR_NETWORK");
         throw e;
       });
+      }).then(function (response) {
+        var result = Promise.resolve(response);
+        responseInterceptors.forEach(function (pair) { result = result.then(pair.fulfilled, pair.rejected); });
+        return result;
+      }, function (error) {
+        var result = Promise.reject(error);
+        responseInterceptors.forEach(function (pair) { result = result.then(pair.fulfilled, pair.rejected); });
+        return result;
+      });
     }
     var instance = function (a, b) {
       return typeof a === "string" ? request(Object.assign({}, b, { url: a })) : request(a);
@@ -200,7 +221,41 @@
       instance[m] = function (url, data, config) { return request(Object.assign({}, config, { method: m, url: url, data: data })); };
     });
     instance.defaults = defaults;
-    instance.interceptors = { request: { use: function () {}, eject: function () {} }, response: { use: function () {}, eject: function () {} } };
+    // Axios-compatible interceptor chains. Provider modules install global request/response
+    // interceptors (including Cloudflare cookie cleanup); silently ignoring them breaks auth flows.
+    var requestHandlers = [], responseHandlers = [];
+    instance.interceptors = {
+      request: {
+        use: function (fulfilled, rejected) { requestHandlers.push({ fulfilled: fulfilled, rejected: rejected }); return requestHandlers.length - 1; },
+        eject: function (id) { if (requestHandlers[id]) requestHandlers[id] = null; }
+      },
+      response: {
+        use: function (fulfilled, rejected) { responseHandlers.push({ fulfilled: fulfilled, rejected: rejected }); return responseHandlers.length - 1; },
+        eject: function (id) { if (responseHandlers[id]) responseHandlers[id] = null; }
+      }
+    };
+    var rawRequest = request;
+    request = function (config) {
+      var chain = Promise.resolve(config || {});
+      requestHandlers.forEach(function (h) { if (h) chain = chain.then(h.fulfilled, h.rejected); });
+      return chain.then(function (cfg) { return rawRequest(cfg); }).then(function (res) {
+        var out = Promise.resolve(res);
+        responseHandlers.forEach(function (h) { if (h) out = out.then(h.fulfilled, h.rejected); });
+        return out;
+      }, function (err) {
+        var out = Promise.reject(err);
+        responseHandlers.forEach(function (h) { if (h) out = out.then(h.fulfilled, h.rejected); });
+        return out;
+      });
+    };
+    instance.request = request;
+    instance.get = function (url, config) { return request(Object.assign({}, config, { method: "get", url: url })); };
+    instance.delete = function (url, config) { return request(Object.assign({}, config, { method: "delete", url: url })); };
+    instance.head = function (url, config) { return request(Object.assign({}, config, { method: "head", url: url })); };
+    instance.options = function (url, config) { return request(Object.assign({}, config, { method: "options", url: url })); };
+    ["post", "put", "patch"].forEach(function (m) {
+      instance[m] = function (url, data, config) { return request(Object.assign({}, config, { method: m, url: url, data: data })); };
+    });
     instance.create = function (cfg) { return createAxios(mergeConfig(defaults, cfg)); };
     instance.isAxiosError = function (e) { return !!(e && e.isAxiosError); };
     instance.isCancel = function (e) { return !!(e && e.code === "ERR_CANCELED"); };
@@ -561,9 +616,28 @@
   // ---------- plugin loading / execution ----------
   var moduleCache = {};
 
+  function sha1HexSync(input) {
+    var bytes = Array.prototype.slice.call(new TextEncoder().encode(String(input))), bitLen = bytes.length * 8;
+    bytes.push(128); while ((bytes.length % 64) !== 56) bytes.push(0);
+    for (var i = 7; i >= 0; i--) bytes.push(i < 4 ? (bitLen >>> (i * 8)) & 255 : 0);
+    var h0=0x67452301,h1=0xEFCDAB89,h2=0x98BADCFE,h3=0x10325476,h4=0xC3D2E1F0;
+    function rol(x,n){return (x<<n)|(x>>>(32-n));}
+    for(var off=0;off<bytes.length;off+=64){var w=new Array(80);for(i=0;i<16;i++){var j=off+i*4;w[i]=((bytes[j]<<24)|(bytes[j+1]<<16)|(bytes[j+2]<<8)|bytes[j+3])|0;}for(i=16;i<80;i++)w[i]=rol(w[i-3]^w[i-8]^w[i-14]^w[i-16],1);var a=h0,b=h1,c=h2,d=h3,e=h4;
+      for(i=0;i<80;i++){var f,k;if(i<20){f=(b&c)|((~b)&d);k=0x5A827999;}else if(i<40){f=b^c^d;k=0x6ED9EBA1;}else if(i<60){f=(b&c)|(b&d)|(c&d);k=0x8F1BBCDC;}else{f=b^c^d;k=0xCA62C1D6;}var t=(rol(a,5)+f+e+k+w[i])|0;e=d;d=c;c=rol(b,30);b=a;a=t;}
+      h0=(h0+a)|0;h1=(h1+b)|0;h2=(h2+c)|0;h3=(h3+d)|0;h4=(h4+e)|0;
+    }
+    return [h0,h1,h2,h3,h4].map(function(x){return (x>>>0).toString(16).padStart(8,"0");}).join("");
+  }
+  var cryptoJsStub = {
+    enc: { Hex: { stringify: function (v) { return String(v); } }, Utf8: { stringify: function (v) { return v && v.toString ? v.toString() : String(v); } }, Base64: {} },
+    SHA1: function (v) { var hex=sha1HexSync(v); return { toString: function () { return hex; }, words: [], sigBytes: 20 }; },
+    AES: { decrypt: function () { throw new Error("CryptoJS AES.decrypt is unsupported; use providerContext.Aes.decrypt"); }, encrypt: function () { throw new Error("CryptoJS AES.encrypt is unsupported; use providerContext.Aes.encrypt"); } }
+  };
   function requireStub(name) {
     if (name === "axios") return axios;
     if (name === "cheerio") return cheerio;
+    if (name === "crypto-js" || name === "crypto-js/aes" || name === "crypto-js/sha1") return cryptoJsStub;
+    if (name === "crypto-js/enc-utf8") return cryptoJsStub.enc.Utf8;
     throw new Error("Module '" + name + "' is not available in plugins");
   }
 
@@ -599,20 +673,123 @@
     return p.then(function (d) { return (d[value] && d[value].url) || ""; });
   }
 
+  var commonHeaders = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\"",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "max-age=0"
+  };
+  var Aes = {
+    sha1: function (value) {
+      var bytes = new TextEncoder().encode(String(value));
+      return crypto.subtle.digest("SHA-1", bytes).then(function (hash) {
+        return Array.prototype.map.call(new Uint8Array(hash), function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
+      });
+    }
+  };
   function makeContext(pluginId) {
-    return {
-      axios: axios,
-      cheerio: cheerio,
-      commonHeaders: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
-      },
-      getBaseUrl: getBaseUrlFor,
-      kvStore: makeKv(pluginId),
-      openWebView: function () { return Promise.reject(new Error("This site needs a browser check (WebView) which is not supported yet")); },
-      Aes: null
+    var commonHeaders = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+      "Accept-Language": "en-US,en;q=0.9",
+      "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+      "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"',
+      "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none",
+      "Upgrade-Insecure-Requests": "1", "Cache-Control": "max-age=0"
     };
+    function openWebView(url, options) {
+      options = options || {};
+      return new Promise(function (resolve, reject) {
+        var id = ++seq;
+        webViewPending[id] = function (json) {
+          var r; try { r = JSON.parse(json); } catch (_) { reject(new Error("Invalid WebView response")); return; }
+          if (r.error) { reject(new Error(r.error)); return; }
+          resolve({ data: r.html || "", html: r.html || "", cookies: r.cookies || "", cookieMap: {}, url: url, userAgent: r.userAgent || commonHeaders["User-Agent"] });
+        };
+        try { Host.webViewAsync(id, JSON.stringify({ url: url, options: options })); }
+        catch (e) { delete webViewPending[id]; reject(e); }
+      });
+    }
+    // WebCrypto-backed subset of CryptoJS/Expo AES and SHA-1 used by Vega providers.
+    var Aes = {
+      sha1: function (input) { return crypto.subtle.digest("SHA-1", new TextEncoder().encode(String(input))).then(function (b) { return Array.prototype.map.call(new Uint8Array(b), function (x) { return ("0" + x.toString(16)).slice(-2); }).join(""); }); },
+      decrypt: function (cipherText, key, iv) {
+        try {
+          var raw = atob(String(cipherText).replace(/-/g, "+").replace(/_/g, "/"));
+          var bytes = Uint8Array.from(raw, function (c) { return c.charCodeAt(0); });
+          var keyBytes = new TextEncoder().encode(String(key));
+          if (![16,24,32].includes(keyBytes.length)) return Promise.reject(new Error("AES key must be 16, 24 or 32 UTF-8 bytes"));
+          var ivBytes = new Uint8Array(16); ivBytes.set(new TextEncoder().encode(String(iv || "0000000000000000")).slice(0, 16));
+          return crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]).then(function (k) { return crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBytes }, k, bytes); }).then(function (b) { return new TextDecoder().decode(b); });
+        } catch (e) { return Promise.reject(e); }
+      },
+      encrypt: function (plainText, key, iv) {
+        try {
+          var keyBytes = new TextEncoder().encode(String(key));
+          if (![16,24,32].includes(keyBytes.length)) return Promise.reject(new Error("AES key must be 16, 24 or 32 UTF-8 bytes"));
+          var ivBytes = new Uint8Array(16); ivBytes.set(new TextEncoder().encode(String(iv || "0000000000000000")).slice(0, 16));
+          return crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["encrypt"]).then(function (k) { return crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBytes }, k, new TextEncoder().encode(String(plainText))); }).then(function (b) { var a = new Uint8Array(b), out = ""; for (var i=0;i<a.length;i++) out += String.fromCharCode(a[i]); return btoa(out); });
+        } catch (e) { return Promise.reject(e); }
+      }
+    };
+    // Vega extractor contracts. Keep return shapes compatible with providerContext.extractors.
+    var extractors = {
+      superVideoExtractor: function (html) {
+        var m = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/s.exec(String(html));
+        if (!m) return Promise.resolve((String(html).match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i) || [])[1] || "");
+        var enc = m[2], p = enc.split("',36,")[0].trim(), rest = enc.split("',36,")[1] || "", k = rest.slice(2).split("|"), c = k.length;
+        while (c--) if (k[c]) p = p.replace(new RegExp("\\b" + c.toString(36) + "\\b", "g"), k[c]);
+        return Promise.resolve((p.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i) || [])[1] || "");
+      },
+      gofileExtractor: (function () {
+        var cachedToken = null, cachedWT = null, cachedWTAt = 0;
+        function firstFile(node) { if (!node) return null; if (node.type === "file" && node.link) return node; var children=node.children||{}; var keys=Object.keys(children); for(var i=0;i<keys.length;i++){var found=firstFile(children[keys[i]]);if(found)return found;} return null; }
+        function generateWT(ax) {
+          if (cachedWT && Date.now()-cachedWTAt < 10800000) return Promise.resolve(cachedWT);
+          return ax.get("https://gofile.io/js/wt.obf.js", {headers:{"User-Agent":commonHeaders["User-Agent"],Referer:"https://gofile.io/"}}).then(function(r){
+            var runner = new Function("navigator","window","document","location",String(r.data)+"\nreturn generateWT;");
+            var nav={userAgent:commonHeaders["User-Agent"],language:"en-US"}, loc={href:"https://gofile.io/",protocol:"https:",host:"gofile.io"}, win={navigator:nav,location:loc};
+            var fn=runner(nav,win,{},loc); if(typeof fn!=="function") throw new Error("Gofile website token function missing"); cachedWT=fn;cachedWTAt=Date.now();return fn;
+          }).catch(function(){ return function(token){return token;}; });
+        }
+        return function (id, ax, ctx) {
+          var tokenPromise = cachedToken ? Promise.resolve(cachedToken) : Promise.resolve(ctx && ctx.kvStore ? ctx.kvStore.get("gofile_account_token").catch(function(){return null;}) : null).then(function(saved){
+            if(saved) { cachedToken=saved; return saved; }
+            return ax.post("https://api.gofile.io/accounts", {}, {headers:{"User-Agent":commonHeaders["User-Agent"],Origin:"https://gofile.io",Referer:"https://gofile.io/"}}).then(function(r){var t=r.data&&r.data.data&&r.data.data.token;if(!t)throw new Error("Gofile did not return an account token");cachedToken=t; if(ctx&&ctx.kvStore)ctx.kvStore.set("gofile_account_token",t).catch(function(){});return t;});
+          });
+          return tokenPromise.then(function(token){return generateWT(ax).then(function(makeWT){return {token:token,wt:makeWT(token)};});}).then(function(auth){
+            return ax.get("https://api.gofile.io/contents/"+encodeURIComponent(id), {params:{contentFilter:"",page:1,pageSize:1000,sortField:"name",sortDirection:1},headers:{Accept:"*/*","Accept-Language":"en-US,en;q=0.9",Authorization:"Bearer "+auth.token,Origin:"https://gofile.io",Referer:"https://gofile.io/","User-Agent":commonHeaders["User-Agent"],"X-BL":"en-US","X-Website-Token":auth.wt}}).then(function(r){
+              var data=r.data||{};if(data.status!=="ok"){if(data.status==="error-auth"||r.status===401){cachedToken=null;if(ctx&&ctx.kvStore)ctx.kvStore.delete("gofile_account_token").catch(function(){});}throw new Error("Gofile API returned "+(data.status||"invalid data"));}
+              var file=firstFile(data.data);if(!file||!file.link)throw new Error("No downloadable file found in Gofile response");return {link:file.link,token:auth.token};
+            });
+          });
+        };
+      })(),
+      gdflixExtractor: function (link, signal, ax, ch, headers) { return ax.get(link, { headers: headers, signal: signal }).then(function (r) { var $ = ch.load(r.data); var links=[]; $("a[href]").each(function () { var href=$(this).attr("href")||""; if (/https?:/.test(href) && /download|drive|resume|googleusercontent/i.test(href)) links.push({server: $(this).text().trim() || "GDFlix", link: href, type:"mkv"}); }); return links; }); },
+      hubcloudExtractor: function (link, signal, ax, ch, headers, ctx) {
+        return ax.get(link, { headers: headers, signal: signal }).then(function (r) {
+          var html=String(r.data||""), $=ch.load(html), out=[];
+          var m=/(?:var|let|const)\s+\w+\s*=\s*atob\(atob\(['"]([^'"]+)['"]\)\)/.exec(html);
+          var u=m ? "" : ((html.match(/var\s+url\s*=\s*['"]([^'"]+)['"]/i)||[])[1]||"");
+          if(m) { try { u=atob(atob(m[1])); } catch(_){} } else if(u.indexOf("r=")>=0) { try { u=atob(u.split("r=")[1]); } catch(_){} }
+          if(u && u.indexOf("/")===0) u=new URL(u, link).href;
+          if(u && /^https?:/i.test(u)) out.push({server:"HubCloud",link:u,type:/\.m3u8/i.test(u)?"m3u8":"mkv"});
+          $("a[href]").each(function(){var href=$(this).attr("href")||""; if(/^https?:/i.test(href)&&(/gofile\.io|pixeldrain|drive\.google|\.mkv|\.mp4/i.test(href))) out.push({server:$(this).text().trim()||"HubCloud",link:href,type:/\.mp4/i.test(href)?"mp4":"mkv"});});
+          return out.filter(function(x,i,a){return a.findIndex(function(y){return y.link===x.link;})===i;});
+        });
+      }
+    };
+    return { axios: axios, cheerio: cheerio, getBaseUrl: getBaseUrlFor, commonHeaders: commonHeaders,
+      kvStore: makeKv(pluginId), openWebView: openWebView, Aes: Aes, extractors: extractors,
+      Crypto: Aes, fetch: global.fetch };
   }
 
   /** fnName 'catalog' / 'genres' may be a plain array export; anything else is a function export. */

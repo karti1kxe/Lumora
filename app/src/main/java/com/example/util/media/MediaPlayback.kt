@@ -12,6 +12,7 @@ import com.example.util.TorrentFileInfo
 import com.example.util.TorrentLibrary
 import com.example.util.TorrentSource
 import com.example.util.TorrentStreamEngine
+import com.example.util.NetworkBypass
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -76,8 +77,8 @@ object MediaPlayback {
                 }
                 if (match != null) return match
             }
-            videos.getOrNull(episodeIndex)?.let { return it }
         }
+        // If the episode cannot be matched by SxxExx / Episode N, use the largest video rather than a fragile list index.
         return videos.maxByOrNull { it.size }
     }
 
@@ -335,12 +336,17 @@ object MediaPlayback {
         }
     }
 
-    private fun optionsOf(s: MediaStream): List<DownloadOption> {
+    private fun optionsOf(context: Context, s: MediaStream): List<DownloadOption> {
         val format = formatOf(s)
         val headers = s.headers
         if (format == "HLS") {
             // a master playlist is opened to list its qualities (each one downloads its own rendition)
-            val variants = HlsVariants.fetch(s.link, headers, null, 4000)
+            // Vega waits briefly on the direct route first. Only a failed request falls back to AntiDPI/DoH proxy.
+            val direct = HlsVariants.fetchResult(s.link, headers, null, 4000)
+            val variants = if (direct != null) direct else {
+                val proxy = try { NetworkBypass.okHttpProxy(context) } catch (_: Throwable) { null }
+                if (proxy != null) HlsVariants.fetchResult(s.link, headers, proxy, 4000) ?: emptyList() else emptyList()
+            }
             if (variants.isNotEmpty()) {
                 return variants.map { v ->
                     DownloadOption(
@@ -359,8 +365,8 @@ object MediaPlayback {
     }
 
     /** The download list of a movie / episode: every file / quality the website offers, best quality first, with sizes when known. */
-    suspend fun downloadOptions(streams: List<MediaStream>): List<DownloadOption> = coroutineScope {
-        val all = streams.map { s -> async(Dispatchers.IO) { try { optionsOf(s) } catch (_: Throwable) { emptyList() } } }
+    suspend fun downloadOptions(context: Context, streams: List<MediaStream>): List<DownloadOption> = coroutineScope {
+        val all = streams.map { s -> async(Dispatchers.IO) { try { optionsOf(context, s) } catch (_: Throwable) { emptyList() } } }
             .awaitAll()
             .flatten()
             .distinctBy { it.stream.link }

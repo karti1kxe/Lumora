@@ -468,7 +468,10 @@ class MpvPlayerController {
         val options = networkRequestOptions ?: if (directStreamMode) StreamRequestOptions.forUrl(filePath) else null
         if (options == null && !streamOptionsApplied) return
         try {
-            if (options?.userAgent != null) view.mpv.setPropertyString("user-agent", options.userAgent)
+            // Provider plugins often omit User-Agent. Use the same Chrome UA as the plugin HTTP bridge;
+            // a supplied provider UA still wins (some hosts validate it).
+            view.mpv.setPropertyString("user-agent", options?.userAgent?.takeIf { it.isNotBlank() }
+                ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
             view.mpv.setPropertyString("referrer", options?.referrer ?: "")
             view.mpv.setPropertyString("http-header-fields", options?.headerFields ?: "")
             streamOptionsApplied = options != null
@@ -479,7 +482,7 @@ class MpvPlayerController {
     private fun updateDirectStreamState(view: VideoPlayerMpvView, posSec: Double?, durSec: Double?) {
         // A position read within the first moments of a load can still belong to the PREVIOUS channel; counting it as
         // "started" disabled the stuck-stream watchdog, so a channel that never opened just buffered forever.
-        if (!directStreamStarted && posSec != null && posSec >= 0.0 && System.currentTimeMillis() - directStreamLoadStartedAt > 400L) {
+        if (!directStreamStarted && posSec != null && posSec > 0.5 && System.currentTimeMillis() - directStreamLoadStartedAt > 400L) {
             directStreamStarted = true
             // remember which route (direct / proxy) worked for this host: the next stream of it starts that way at once
             val host = streamHost

@@ -9,6 +9,7 @@ import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.CookieManager
 import com.example.util.NetworkBypass
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -22,6 +23,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -53,7 +57,19 @@ object PluginJsEngine {
     @Volatile private var ready = false
     @Volatile private var appContext: Context? = null
 
+    private val pluginCookieJar = object : CookieJar {
+        private val stored = ConcurrentHashMap<String, Cookie>()
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+            cookies.forEach { cookie -> stored[cookie.name + "@" + cookie.domain] = cookie }
+        }
+        override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            val now = System.currentTimeMillis()
+            stored.entries.removeAll { it.value.expiresAt < now }
+            return stored.values.filter { it.matches(url) }
+        }
+    }
     private val client: OkHttpClient = OkHttpClient.Builder()
+        .cookieJar(pluginCookieJar)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -149,6 +165,55 @@ object PluginJsEngine {
         }
 
         @JavascriptInterface
+        fun webViewAsync(id: Int, reqJson: String) {
+            val req = try { JSONObject(reqJson) } catch (_: Throwable) { JSONObject() }
+            val url = req.optString("url", "")
+            if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                httpResults[id] = JSONObject().put("error", "Invalid WebView URL").toString()
+                mainHandler.post { webView?.evaluateJavascript("__webViewResolve($id)", null) }
+                return
+            }
+            mainHandler.post {
+                try {
+                    val browser = WebView(appContext ?: return@post)
+                    browser.settings.javaScriptEnabled = true
+                    browser.settings.domStorageEnabled = true
+                    browser.settings.blockNetworkLoads = false
+                    val headers = LinkedHashMap<String, String>()
+                    val opts = req.optJSONObject("options")
+                    opts?.optJSONObject("headers")?.let { h ->
+                        val keys = h.keys(); while (keys.hasNext()) { val k = keys.next(); headers[k] = h.optString(k) }
+                    }
+                    browser.webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView, pageUrl: String?) {
+                            view.evaluateJavascript("document.documentElement ? document.documentElement.outerHTML : document.body.innerHTML") { htmlJson ->
+                                val html = try { org.json.JSONTokener(htmlJson ?: "null").nextValue().toString().takeIf { it != "null" } ?: "" } catch (_: Throwable) { "" }
+                                val cookie = CookieManager.getInstance().getCookie(pageUrl ?: url).orEmpty()
+                                val result = JSONObject().put("html", html).put("cookies", cookie).put("userAgent", view.settings.userAgentString).toString()
+                                httpResults[id] = result
+                                view.stopLoading()
+                                view.destroy()
+                                webView?.evaluateJavascript("__webViewResolve($id)", null)
+                            }
+                        }
+                    }
+                    browser.loadUrl(url, headers)
+                    mainHandler.postDelayed({
+                        if (!httpResults.containsKey(id)) {
+                            val cookie = CookieManager.getInstance().getCookie(url).orEmpty()
+                            httpResults[id] = JSONObject().put("error", "WebView challenge timed out; cookies=" + cookie).toString()
+                            try { browser.stopLoading(); browser.destroy() } catch (_: Throwable) {}
+                            webView?.evaluateJavascript("__webViewResolve($id)", null)
+                        }
+                    }, 25_000L)
+                } catch (t: Throwable) {
+                    httpResults[id] = JSONObject().put("error", t.message ?: "WebView failed").toString()
+                    webView?.evaluateJavascript("__webViewResolve($id)", null)
+                }
+            }
+        }
+
+        @JavascriptInterface
         fun takeResult(id: Int): String = httpResults.remove(id) ?: ""
 
         @JavascriptInterface
@@ -229,6 +294,11 @@ object PluginJsEngine {
             }
         }
         if (!hasUa) builder.header("User-Agent", DEFAULT_UA)
+        // Keep WebView challenge cookies available to OkHttp-backed plugin requests.
+        val webCookies = try { CookieManager.getInstance().getCookie(url) } catch (_: Throwable) { null }
+        if (!webCookies.isNullOrBlank() && headers?.keys()?.asSequence()?.none { it.equals("Cookie", true) } != false) {
+            builder.header("Cookie", webCookies)
+        }
 
         val bodyStr = if (req.isNull("body")) null else req.optString("body")
         if (method == "GET" || method == "HEAD") {
