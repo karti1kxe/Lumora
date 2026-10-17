@@ -260,3 +260,10 @@ dependencies {
   // "ksp"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
 }
+
+// Some CloudStream library dependencies pull in the standalone "org.json:json" jar, whose JSONException is a RuntimeException.
+// Android already has its own org.json (JSONException is a checked Exception), so the mix made the app fail to start with a
+// VerifyError. Always use the Android one.
+configurations.configureEach {
+  exclude(group = "org.json", module = "json")
+}

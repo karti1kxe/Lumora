@@ -58,3 +58,8 @@ dependencies {
   implementation("org.jetbrains.kotlin:kotlin-reflect:${libs.versions.kotlin.get()}")
   implementation(libs.newpipe.extractor)
 }
+
+// Use Android's own org.json (see the note in app/build.gradle.kts)
+configurations.configureEach {
+  exclude(group = "org.json", module = "json")
+}
