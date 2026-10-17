@@ -173,22 +173,20 @@ class LocalBypassProxy {
         val direct = isLocalHost(host) && hostsOverride[host.lowercase()] == null
         val hostKey = host.lowercase()
         val splitAllowed = fragment && !direct && (noSplitUntil[hostKey] ?: 0L) < System.currentTimeMillis()
-        val tlsFirst = first.isNotEmpty() && first[0] == 0x16.toByte()
-        // A TLS ClientHello can safely be retried as a plain handshake. An HTTP request
-        // must never be replayed after sending its split first packet: that can duplicate
-        // a non-idempotent request or trigger two downloads on the origin.
-        val tries = if (splitAllowed && tlsFirst) 2 else 1
+        val tries = if (splitAllowed) 2 else 1
         val addrs = resolve(host, direct)
         if (addrs.isEmpty()) return null
         for (attempt in 0 until tries) {
             val splitNow = splitAllowed && attempt == 0
             val s = connectAny(addrs, port) ?: return null
+            val tlsFirst = first.isNotEmpty() && first[0] == 0x16.toByte()
             try {
                 s.tcpNoDelay = true
                 s.keepAlive = true
                 val out = s.getOutputStream()
                 if (splitNow) sendSplit(out, first, httpHostSplit) else { out.write(first); out.flush() }
-                // Only TLS gets a second (plain) handshake attempt. HTTP requests are never replayed.
+                // The first answer decides: a connection that is reset / silent right after the split gets one plain retry.
+                // A TLS server answers at once; an HTTP server may need longer, and repeating that request would only double it.
                 s.soTimeout = if (attempt < tries - 1 && tlsFirst) 6_000 else 30_000
                 val buf = ByteArray(32 * 1024)
                 val n = s.getInputStream().read(buf)
@@ -200,10 +198,10 @@ class LocalBypassProxy {
                     return s
                 }
                 try { s.close() } catch (_: Throwable) {}
-                if (splitNow && !tlsFirst) noSplitUntil[hostKey] = System.currentTimeMillis() + 10 * 60_000L
             } catch (t: Throwable) {
                 try { s.close() } catch (_: Throwable) {}
-                if (splitNow && !tlsFirst) noSplitUntil[hostKey] = System.currentTimeMillis() + 10 * 60_000L
+                // An HTTP request that was sent and then only timed out must not be sent a second time.
+                if (!tlsFirst && t is java.net.SocketTimeoutException) return null
             }
         }
         return null

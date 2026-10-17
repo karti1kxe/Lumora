@@ -2452,6 +2452,22 @@ fun VideoPlayerScreen(
         }
     }
 
+    // A server that opens but never starts (stays buffering / black) is left after about 10 s for the next server.
+    LaunchedEffect(pluginServerIndex, pluginSession, lastLoadedVideoKey) {
+        val session = pluginSession ?: return@LaunchedEffect
+        if (session.selectedServer + 1 >= session.servers.size) return@LaunchedEffect
+        delay(2000L)
+        val basePos = controller.currentPositionMs.value
+        var waited = 0L
+        while (waited < 10_000L) {
+            delay(500L)
+            waited += 500L
+            if (controller.errorMessage.value != null) return@LaunchedEffect // the error handler above switches
+            if (!controller.isBuffering.value && controller.currentPositionMs.value - basePos >= 300L) return@LaunchedEffect // it plays
+        }
+        if (session.selectedServer + 1 < session.servers.size) switchPluginServer(session.selectedServer + 1, automatic = true)
+    }
+
     // Auto (adaptive bitrate) for HLS: one step down when playback keeps stalling, one step up when the read-ahead stays full.
     LaunchedEffect(hlsVariants, hlsSelectedKey) {
         if (hlsSelectedKey != "auto" || hlsVariants.size < 2) return@LaunchedEffect

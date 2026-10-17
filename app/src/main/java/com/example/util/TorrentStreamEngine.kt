@@ -329,9 +329,11 @@ object TorrentStreamEngine {
             int(settings_pack.int_types.torrent_connect_boost, 60)
             int(settings_pack.int_types.max_peerlist_size, 3000)
             int(settings_pack.int_types.peer_timeout, 60)
-            int(settings_pack.int_types.request_timeout, 20)
+            // Vega's values: streaming waits on single pieces, so a slow peer must not hold a block for the 20 s / 60 s defaults
+            int(settings_pack.int_types.piece_timeout, 6)
+            int(settings_pack.int_types.request_timeout, 12)
             int(settings_pack.int_types.handshake_timeout, 10)
-            int(settings_pack.int_types.peer_connect_timeout, 10)
+            int(settings_pack.int_types.peer_connect_timeout, 7)
             int(settings_pack.int_types.max_queued_disk_bytes, 16 * 1024 * 1024)
             int(settings_pack.int_types.send_buffer_watermark, 512 * 1024)
             int(settings_pack.int_types.send_buffer_low_watermark, 128 * 1024)
@@ -343,6 +345,8 @@ object TorrentStreamEngine {
             bool(settings_pack.bool_types.enable_natpmp, true)
             bool(settings_pack.bool_types.announce_to_all_trackers, true)
             bool(settings_pack.bool_types.announce_to_all_tiers, true)
+            bool(settings_pack.bool_types.strict_end_game_mode, false)
+            try { sp.setDhtBootstrapNodes("router.bittorrent.com:6881,dht.transmissionbt.com:6881,router.utorrent.com:6881,dht.aelitis.com:6881") } catch (_: Throwable) {}
             sm.applySettings(sp)
         } catch (t: Throwable) {
             Log.w(TAG, "could not tune the torrent session", t)

@@ -9,8 +9,9 @@ import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.CookieManager
 import com.example.util.NetworkBypass
+import okhttp3.Cookie
+import okhttp3.Response
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,13 +24,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
-import okhttp3.Cookie
-import okhttp3.CookieJar
-import okhttp3.HttpUrl
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -45,6 +44,27 @@ object PluginJsEngine {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     private const val UPSTREAM_URLS = "https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/urls.json"
     private const val MAX_BODY_BYTES = 12L * 1024 * 1024
+    private const val MAX_REDIRECTS = 10
+    private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
+
+    /** Vega's `commonHeaders` (providers/headers.ts): merged under every provider request, and given to the provider as providerContext.commonHeaders. */
+    private val COMMON_HEADERS: Map<String, String> = linkedMapOf(
+        "User-Agent" to DEFAULT_UA,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language" to "en-US,en;q=0.9",
+        "sec-ch-ua" to "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+        "sec-ch-ua-mobile" to "?0",
+        "sec-ch-ua-platform" to "\"Windows\"",
+        "Sec-Fetch-Dest" to "document",
+        "Sec-Fetch-Mode" to "navigate",
+        "Sec-Fetch-Site" to "none",
+        "Sec-Fetch-User" to "?1",
+        "Upgrade-Insecure-Requests" to "1",
+        "Cache-Control" to "max-age=0"
+    )
+
+    /** Host -> true when its requests only worked through the AntiDPI / DoH proxy (false: direct). The next request starts that way. */
+    private val hostUsesProxy = ConcurrentHashMap<String, Boolean>()
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -57,23 +77,14 @@ object PluginJsEngine {
     @Volatile private var ready = false
     @Volatile private var appContext: Context? = null
 
-    private val pluginCookieJar = object : CookieJar {
-        private val stored = ConcurrentHashMap<String, Cookie>()
-        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-            cookies.forEach { cookie -> stored[cookie.name + "@" + cookie.domain] = cookie }
-        }
-        override fun loadForRequest(url: HttpUrl): List<Cookie> {
-            val now = System.currentTimeMillis()
-            stored.entries.removeAll { it.value.expiresAt < now }
-            return stored.values.filter { it.matches(url) }
-        }
-    }
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .cookieJar(pluginCookieJar)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .callTimeout(60, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .cookieJar(PluginCookieJar)
         .build()
 
     /** Runs `module.fnName(args)` of a plugin. Returns the JSON-encoded result; throws [PluginException] on failure. */
@@ -117,6 +128,10 @@ object PluginJsEngine {
             val runtimeJs = withContext(Dispatchers.IO) {
                 app.assets.open("media/plugin_runtime.js").bufferedReader().use { it.readText() }
             }
+            val extractorsJs = withContext(Dispatchers.IO) {
+                try { app.assets.open("media/plugin_extractors.js").bufferedReader().use { it.readText() } } catch (_: Throwable) { "" }
+            }
+            PluginCookieJar.attach(app)
             val loaded = CompletableDeferred<Unit>()
             try {
                 withContext(Dispatchers.Main) {
@@ -129,7 +144,10 @@ object PluginJsEngine {
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView, url: String?) {
                             if (!loaded.isCompleted) {
-                                view.evaluateJavascript(runtimeJs) { loaded.complete(Unit) }
+                                view.evaluateJavascript(runtimeJs) {
+                                    if (extractorsJs.isEmpty()) loaded.complete(Unit)
+                                    else view.evaluateJavascript(extractorsJs) { loaded.complete(Unit) }
+                                }
                             }
                         }
                     }
@@ -164,53 +182,36 @@ object PluginJsEngine {
             }
         }
 
+        /** providerContext.openWebView: hidden WebView browser check (answer comes back like an http result). */
         @JavascriptInterface
-        fun webViewAsync(id: Int, reqJson: String) {
-            val req = try { JSONObject(reqJson) } catch (_: Throwable) { JSONObject() }
-            val url = req.optString("url", "")
-            if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                httpResults[id] = JSONObject().put("error", "Invalid WebView URL").toString()
-                mainHandler.post { webView?.evaluateJavascript("__webViewResolve($id)", null) }
-                return
-            }
-            mainHandler.post {
-                try {
-                    val browser = WebView(appContext ?: return@post)
-                    browser.settings.javaScriptEnabled = true
-                    browser.settings.domStorageEnabled = true
-                    browser.settings.blockNetworkLoads = false
-                    val headers = LinkedHashMap<String, String>()
-                    val opts = req.optJSONObject("options")
-                    opts?.optJSONObject("headers")?.let { h ->
-                        val keys = h.keys(); while (keys.hasNext()) { val k = keys.next(); headers[k] = h.optString(k) }
-                    }
-                    browser.webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView, pageUrl: String?) {
-                            view.evaluateJavascript("document.documentElement ? document.documentElement.outerHTML : document.body.innerHTML") { htmlJson ->
-                                val html = try { org.json.JSONTokener(htmlJson ?: "null").nextValue().toString().takeIf { it != "null" } ?: "" } catch (_: Throwable) { "" }
-                                val cookie = CookieManager.getInstance().getCookie(pageUrl ?: url).orEmpty()
-                                val result = JSONObject().put("html", html).put("cookies", cookie).put("userAgent", view.settings.userAgentString).toString()
-                                httpResults[id] = result
-                                view.stopLoading()
-                                view.destroy()
-                                webView?.evaluateJavascript("__webViewResolve($id)", null)
-                            }
-                        }
-                    }
-                    browser.loadUrl(url, headers)
-                    mainHandler.postDelayed({
-                        if (!httpResults.containsKey(id)) {
-                            val cookie = CookieManager.getInstance().getCookie(url).orEmpty()
-                            httpResults[id] = JSONObject().put("error", "WebView challenge timed out; cookies=" + cookie).toString()
-                            try { browser.stopLoading(); browser.destroy() } catch (_: Throwable) {}
-                            webView?.evaluateJavascript("__webViewResolve($id)", null)
-                        }
-                    }, 25_000L)
+        fun webViewAsync(id: Int, url: String, optionsJson: String) {
+            ioScope.launch {
+                val result = try {
+                    PluginWebViewSolver.solve(appContext ?: throw PluginException("not ready"), url, optionsJson, DEFAULT_UA)
                 } catch (t: Throwable) {
-                    httpResults[id] = JSONObject().put("error", t.message ?: "WebView failed").toString()
-                    webView?.evaluateJavascript("__webViewResolve($id)", null)
+                    JSONObject().put("error", t.message ?: t.javaClass.simpleName).toString()
                 }
+                httpResults[id] = result
+                mainHandler.post { webView?.evaluateJavascript("__hostResolve($id)", null) }
             }
+        }
+
+        /** providerContext.getCookies: the jar's cookies for [url] as a JSON name -> value map. */
+        @JavascriptInterface
+        fun getCookies(url: String): String {
+            val m = JSONObject()
+            for ((k, v) in PluginCookieJar.cookieMap(url)) m.put(k, v)
+            return m.toString()
+        }
+
+        @JavascriptInterface
+        fun crypto(opJson: String): String = PluginCrypto.run(opJson)
+
+        @JavascriptInterface
+        fun commonHeaders(): String {
+            val o = JSONObject()
+            for ((k, v) in COMMON_HEADERS) o.put(k, v)
+            return o.toString()
         }
 
         @JavascriptInterface
@@ -246,7 +247,7 @@ object PluginJsEngine {
             val prefs = ctx.getSharedPreferences("media_plugin_kv", Context.MODE_PRIVATE)
             val prefix = "$plugin|"
             return when (op) {
-                "get" -> prefs.getString(prefix + key, null) ?: "null"
+                "get" -> prefs.getString(prefix + key, null) ?: ""
                 "set" -> { prefs.edit().putString(prefix + key, valueJson).apply(); "null" }
                 "delete" -> {
                     val had = prefs.contains(prefix + key)
@@ -270,84 +271,134 @@ object PluginJsEngine {
     }
 
     private fun doHttp(reqJson: String): String {
+        appContext?.let { PluginCookieJar.attach(it) }
         val req = JSONObject(reqJson)
-        val url = req.getString("url")
-        val method = req.optString("method", "GET").uppercase()
+        var url = req.getString("url")
+        var method = req.optString("method", "GET").uppercase()
         val follow = req.optBoolean("follow", true)
         val binary = req.optBoolean("binary", false)
         val timeoutSec = (req.optLong("timeout", 0L) / 1000L).coerceIn(0L, 90L)
 
-        val builder = Request.Builder().url(url)
-        var hasUa = false
-        var contentType: String? = null
-        val headers = req.optJSONObject("headers")
-        if (headers != null) {
-            val names = headers.keys()
+        val headers = LinkedHashMap<String, String>()
+        req.optJSONObject("headers")?.let { h ->
+            val names = h.keys()
             while (names.hasNext()) {
                 val name = names.next()
                 val lower = name.lowercase()
                 // Accept-Encoding is left to OkHttp so the body is decompressed for us.
                 if (lower == "accept-encoding" || lower == "host" || lower == "content-length" || lower == "connection") continue
-                if (lower == "user-agent") hasUa = true
-                if (lower == "content-type") contentType = headers.getString(name)
-                try { builder.header(name, headers.getString(name)) } catch (_: Throwable) { }
+                val v = h.optString(name, "")
+                if (name.isNotBlank()) headers[name] = v
             }
         }
-        if (!hasUa) builder.header("User-Agent", DEFAULT_UA)
-        // Keep WebView challenge cookies available to OkHttp-backed plugin requests.
-        val webCookies = try { CookieManager.getInstance().getCookie(url) } catch (_: Throwable) { null }
-        if (!webCookies.isNullOrBlank() && headers?.keys()?.asSequence()?.none { it.equals("Cookie", true) } != false) {
-            builder.header("Cookie", webCookies)
-        }
+        // Vega merges its common headers under every provider request
+        for ((k, v) in COMMON_HEADERS) if (headers.keys.none { it.equals(k, true) }) headers[k] = v
 
-        val bodyStr = if (req.isNull("body")) null else req.optString("body")
-        if (method == "GET" || method == "HEAD") {
-            builder.method(method, null)
-        } else {
-            val mt = (contentType ?: "application/x-www-form-urlencoded").toMediaTypeOrNull()
-            builder.method(method, (bodyStr ?: "").toRequestBody(mt))
+        var bodyBytes: ByteArray? = when {
+            !req.isNull("bodyBase64") -> Base64.decode(req.getString("bodyBase64"), Base64.DEFAULT)
+            !req.isNull("body") -> req.optString("body").toByteArray(Charsets.UTF_8)
+            else -> null
         }
+        var contentType: String? = headers.entries.firstOrNull { it.key.equals("content-type", true) }?.value
 
-        var c = client.newBuilder().followRedirects(follow).followSslRedirects(follow)
-        if (timeoutSec > 0) c = c.callTimeout(timeoutSec, TimeUnit.SECONDS).readTimeout(timeoutSec, TimeUnit.SECONDS)
-        val request = builder.build()
-        // AntiDPI / DNS-over-HTTPS (Network settings): blocked provider sites go through the local bypass proxy first;
-        // if that attempt fails the same request is repeated once on the normal connection.
-        val bypass = appContext?.let { NetworkBypass.okHttpProxy(it) }
-        val response = if (bypass != null) {
-            try {
-                c.proxy(bypass).build().newCall(request).execute()
-            } catch (_: java.io.IOException) {
-                c.build().newCall(request).execute()
-            }
-        } else {
-            c.build().newCall(request).execute()
-        }
-        return response.use { resp ->
-            val out = JSONObject()
-            out.put("status", resp.code)
-            out.put("statusText", resp.message)
-            out.put("url", resp.request.url.toString())
-            val hmap = JSONObject()
-            for (name in resp.headers.names()) {
-                hmap.put(name.lowercase(), resp.headers.values(name).joinToString(", "))
-            }
-            out.put("headers", hmap)
-            val body = resp.body
-            if (body != null) {
-                val declared = body.contentLength()
-                if (declared > MAX_BODY_BYTES) throw java.io.IOException("Response is too large")
-                val bytes = body.bytes()
-                if (binary) {
-                    out.put("bodyBase64", Base64.encodeToString(bytes, Base64.NO_WRAP))
-                } else {
-                    val charset = body.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
-                    out.put("body", String(bytes, charset))
-                }
+        // the provider's own Cookie header + the jar's cookies (the provider's win)
+        val cookieKey = headers.keys.firstOrNull { it.equals("cookie", true) }
+        val supplied = cookieKey?.let { headers[it] }
+        if (cookieKey != null) headers.remove(cookieKey)
+        var cookieHeader = PluginCookieJar.header(url, supplied)
+
+        var redirects = 0
+        while (true) {
+            val builder = Request.Builder().url(url)
+            for ((k, v) in headers) { try { builder.header(k, v) } catch (_: Throwable) { } }
+            if (cookieHeader.isNotEmpty()) builder.header("Cookie", cookieHeader)
+            if (method == "GET" || method == "HEAD") {
+                builder.method(method, null)
             } else {
-                out.put("body", "")
+                val mt = (contentType ?: "application/x-www-form-urlencoded").toMediaTypeOrNull()
+                builder.method(method, (bodyBytes ?: ByteArray(0)).toRequestBody(mt))
             }
-            out.toString()
+            val response = execute(builder.build(), timeoutSec)
+            var answer: String? = null
+            response.use { resp ->
+                val location = resp.header("Location")
+                if (follow && resp.code in REDIRECT_CODES && location != null) {
+                    if (redirects >= MAX_REDIRECTS) throw IOException("Too many redirects")
+                    val prev = resp.request.url
+                    val next = prev.resolve(location) ?: throw IOException("Bad redirect location")
+                    if (resp.code == 303 || ((resp.code == 301 || resp.code == 302) && method != "GET" && method != "HEAD")) {
+                        if (method != "HEAD") method = "GET"
+                        bodyBytes = null
+                        contentType = null
+                        headers.keys.removeAll { it.equals("content-type", true) || it.equals("content-length", true) }
+                    }
+                    if (!next.host.equals(prev.host, true)) headers.keys.removeAll { it.equals("authorization", true) }
+                    cookieHeader = if (next.host.equals(prev.host, true)) {
+                        PluginCookieJar.carry(cookieHeader, Cookie.parseAll(prev, resp.headers))
+                    } else {
+                        PluginCookieJar.header(next.toString(), null)
+                    }
+                    url = next.toString()
+                } else {
+                    answer = buildAnswer(resp, binary)
+                }
+            }
+            answer?.let { return it }
+            redirects++
         }
+    }
+
+    /**
+     * One request. Provider sites are tried on a direct connection first (what Vega does); when that fails with a network
+     * error and the AntiDPI / DoH proxy is on, the same request goes through the proxy. The route that worked is remembered
+     * per host, so the next request of that host starts with it.
+     */
+    private fun execute(request: Request, timeoutSec: Long): Response {
+        val host = request.url.host.lowercase()
+        val bypass = appContext?.let { try { NetworkBypass.okHttpProxy(it) } catch (_: Throwable) { null } }
+        fun call(proxy: java.net.Proxy?, shortConnect: Boolean): Response {
+            var b = client.newBuilder().proxy(proxy)
+            if (timeoutSec > 0) b = b.callTimeout(timeoutSec, TimeUnit.SECONDS).readTimeout(timeoutSec, TimeUnit.SECONDS)
+            if (shortConnect) b = b.connectTimeout(10, TimeUnit.SECONDS)
+            return b.build().newCall(request).execute()
+        }
+        if (bypass == null) return call(null, false)
+        val proxyFirst = hostUsesProxy[host] == true
+        return try {
+            call(if (proxyFirst) bypass else null, true)
+        } catch (_: IOException) {
+            val second = call(if (proxyFirst) null else bypass, false)
+            hostUsesProxy[host] = !proxyFirst
+            second
+        }
+    }
+
+    private fun buildAnswer(resp: Response, binary: Boolean): String {
+        val out = JSONObject()
+        out.put("status", resp.code)
+        out.put("statusText", resp.message)
+        out.put("url", resp.request.url.toString())
+        val hmap = JSONObject()
+        for (name in resp.headers.names()) {
+            if (name.equals("set-cookie", true)) continue
+            hmap.put(name.lowercase(), resp.headers.values(name).joinToString(", "))
+        }
+        out.put("headers", hmap)
+        val cookies = JSONArray()
+        for (c in resp.headers.values("Set-Cookie")) cookies.put(c)
+        out.put("setCookies", cookies)
+        val body = resp.body
+        if (body != null && resp.request.method != "HEAD") {
+            val declared = body.contentLength()
+            if (declared > MAX_BODY_BYTES) throw IOException("Response is too large")
+            val bytes = body.bytes()
+            if (bytes.size > MAX_BODY_BYTES) throw IOException("Response is too large")
+            // UTF-8 always (what Vega's Response.text() does)
+            if (binary) out.put("bodyBase64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+            else out.put("body", String(bytes, Charsets.UTF_8))
+        } else {
+            if (binary) out.put("bodyBase64", "") else out.put("body", "")
+        }
+        return out.toString()
     }
 }

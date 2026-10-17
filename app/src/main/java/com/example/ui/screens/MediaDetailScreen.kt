@@ -418,7 +418,7 @@ fun MediaDetailScreen(
 
     fun startDownload(v: DetailVideo, chosenAudio: AudioGroup, chosen: QualityOption) {
         val suffix = chosen.label.takeIf { it != "Default" }?.let { " [$it]" }.orEmpty()
-        runBusy("Preparing download…") {
+        runBusy("Searching available files…") {
             // like the reference app: ask the website for everything it offers (servers, qualities, files), then let the user pick
             val result = if (chosen === option) {
                 MediaPlayback.resolveAll(context, plugin, v.link, v.type, true)
@@ -433,10 +433,9 @@ fun MediaDetailScreen(
             if (streams == null) {
                 showResolveError(result.exceptionOrNull())
             } else {
-                val options = MediaPlayback.downloadOptions(context, streams)
-                if (options.size == 1) {
-                    beginDownload(v, suffix, options[0])
-                } else if (options.isNotEmpty()) {
+                val options = MediaPlayback.downloadOptions(streams)
+                // always show what is available first (even one file); the download starts only after a tap
+                if (options.isNotEmpty()) {
                     downloadLinks = DownloadLinksState(v, suffix, options)
                 } else {
                     showResolveError(PluginException("no downloadable file was found"))
@@ -646,7 +645,17 @@ fun MediaDetailScreen(
                         }
                     }
                     else -> items(videos, key = { "v|" + it.link + "|" + it.title }) { v ->
-                        val card = remember(v) {
+                        // the card's picture is a frame of the episode's own video (made when the card is shown, then kept)
+                        var framePath by remember(v.link) { mutableStateOf(com.example.util.media.EpisodeFrames.cached(context, plugin, v.link)) }
+                        LaunchedEffect(v.link) {
+                            if (framePath == null) {
+                                framePath = com.example.util.media.EpisodeFrames.obtain(
+                                    context, plugin, v.link, v.type, v.title,
+                                    if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1
+                                )
+                            }
+                        }
+                        val card = remember(v, framePath) {
                             VideoItem(
                                 id = -(kotlin.math.abs(v.link.hashCode().toLong())) - 1L,
                                 uri = Uri.parse(v.link),
@@ -656,7 +665,7 @@ fun MediaDetailScreen(
                                 durationMs = 0L,
                                 dateModified = 0L,
                                 isOnline = true,
-                                thumbnailUrl = v.poster.ifBlank { null },
+                                thumbnailUrl = framePath,
                                 channelName = listOf(v.qualityLabel, plugin.name).filter { it.isNotBlank() }.joinToString(" · ")
                             )
                         }
@@ -719,7 +728,14 @@ fun MediaDetailScreen(
                     onDownload = {
                         // the qualities the website offers open from the bottom, then the download starts
                         actionTarget = null
-                        downloadTarget = t
+                        val onlyAudio = audioList.getOrNull(audioIdx.coerceIn(0, (audioList.size - 1).coerceAtLeast(0)))
+                        val onlyQuality = optionList.getOrNull(qualityIdx.coerceIn(0, (optionList.size - 1).coerceAtLeast(0)))
+                        if (audioList.size <= 1 && optionList.size <= 1 && onlyAudio != null && onlyQuality != null) {
+                            // nothing to choose between: go straight to searching the files
+                            startDownload(t, onlyAudio, onlyQuality)
+                        } else {
+                            downloadTarget = t
+                        }
                     },
                     onShare = {
                         actionTarget = null

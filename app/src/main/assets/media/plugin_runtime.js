@@ -1,7 +1,9 @@
 /*
  * Lumora media-plugin runtime (runs inside a hidden WebView).
- * Provides what Vega provider bundles expect: fetch, axios, cheerio, URL helpers, kvStore, providerContext.
- * All network IO and storage go through the native `LumoraHost` bridge (see PluginJsEngine.kt).
+ * Gives a Vega provider bundle the same world it gets inside Vega's sandbox:
+ *   providerContext = { axios, cheerio, Crypto, Aes, commonHeaders, getBaseUrl, openWebView, getCookies, kvStore, extractors }
+ *   plus fetch / require() / providerGlobal, and WITHOUT window / document / navigator / Buffer / globalThis (Vega hides them too).
+ * All network IO, cookies, crypto, storage and the browser-check WebView go through the native `LumoraHost` bridge (PluginJsEngine.kt).
  */
 (function (global) {
   "use strict";
@@ -10,20 +12,13 @@
   var seq = 0;
 
   // ---------- native bridge helpers ----------
-  var webViewPending = {};
-  global.__webViewResolve = function (id) {
-    var cb = webViewPending[id]; delete webViewPending[id];
-    if (cb) cb(Host.takeResult(id));
-  };
   global.__hostResolve = function (id) {
     var cb = pending[id];
     delete pending[id];
     if (cb) cb(Host.takeResult(id));
   };
 
-  var lastOrigin = "";
-  function hostHttp(req) {
-    try { var mm = /^(https?:\/\/[^\/]+)/i.exec(String(req.url)); if (mm && !/\.(png|jpe?g|webp|gif|svg)(\?|$)/i.test(req.url)) lastOrigin = mm[1]; } catch (e) { /* ignore */ }
+  function hostAsync(start) {
     return new Promise(function (resolve, reject) {
       var id = ++seq;
       pending[id] = function (json) {
@@ -31,14 +26,44 @@
         try { res = JSON.parse(json); } catch (e) { reject(new Error("Bad response from host")); return; }
         if (res.error) { var err = new Error(res.error); err.isNetworkError = true; reject(err); } else resolve(res);
       };
-      Host.httpAsync(id, JSON.stringify(req));
+      try { start(id); } catch (e) { delete pending[id]; reject(e); }
     });
   }
 
-  function b64ToBuf(b64) {
+  var lastOrigin = "";
+  function hostHttp(req) {
+    try { var mm = /^(https?:\/\/[^\/]+)/i.exec(String(req.url)); if (mm && !/\.(png|jpe?g|webp|gif|svg)(\?|$)/i.test(req.url)) lastOrigin = mm[1]; } catch (e) { /* ignore */ }
+    return hostAsync(function (id) { Host.httpAsync(id, JSON.stringify(req)); });
+  }
+
+  // ---------- bytes / base64 ----------
+  function b64ToBytes(b64) {
     var bin = atob(b64), len = bin.length, out = new Uint8Array(len);
     for (var i = 0; i < len; i++) out[i] = bin.charCodeAt(i);
-    return out.buffer;
+    return out;
+  }
+  function bytesToB64(bytes) {
+    var s = "", CH = 0x8000;
+    for (var i = 0; i < bytes.length; i += CH) s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    return btoa(s);
+  }
+  function bytesToHex(bytes) {
+    var s = "";
+    for (var i = 0; i < bytes.length; i++) s += (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+    return s;
+  }
+  function hexToBytes(hex) {
+    hex = String(hex || "");
+    var out = new Uint8Array(Math.floor(hex.length / 2));
+    for (var i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return out;
+  }
+  function utf8(str) { return new TextEncoder().encode(String(str)); }
+  function toBytes(x) {
+    if (x instanceof Uint8Array) return x;
+    if (x instanceof ArrayBuffer) return new Uint8Array(x);
+    if (x && x.buffer instanceof ArrayBuffer && typeof x.byteLength === "number") return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+    return utf8(x);
   }
 
   function normHeaders(h) {
@@ -49,73 +74,136 @@
       return out;
     }
     if (Array.isArray(h)) { h.forEach(function (p) { out[p[0]] = String(p[1]); }); return out; }
-    Object.keys(h).forEach(function (k) { if (h[k] !== undefined && h[k] !== null) out[k] = String(h[k]); });
+    Object.keys(h).forEach(function (k) { if (h[k] !== undefined && h[k] !== null && typeof h[k] !== "object") out[k] = String(h[k]); });
     return out;
-  }
-
-  function encodeBody(data, headers) {
-    if (data === undefined || data === null) return null;
-    if (typeof data === "string") return data;
-    if (typeof URLSearchParams !== "undefined" && data instanceof URLSearchParams) {
-      if (!hasHeader(headers, "content-type")) headers["Content-Type"] = "application/x-www-form-urlencoded";
-      return data.toString();
-    }
-    if (typeof data === "object") {
-      if (!hasHeader(headers, "content-type")) headers["Content-Type"] = "application/json";
-      return JSON.stringify(data);
-    }
-    return String(data);
   }
 
   function hasHeader(h, name) {
     name = name.toLowerCase();
     return Object.keys(h).some(function (k) { return k.toLowerCase() === name; });
   }
-
-  // ---------- fetch ----------
-  function makeHeadersView(map) {
-    return {
-      get: function (n) { var v = map[String(n).toLowerCase()]; return v === undefined ? null : v; },
-      has: function (n) { return map[String(n).toLowerCase()] !== undefined; },
-      forEach: function (cb) { Object.keys(map).forEach(function (k) { cb(map[k], k); }); },
-      entries: function () { return Object.keys(map).map(function (k) { return [k, map[k]]; })[Symbol.iterator](); }
-    };
+  function deleteHeader(h, name) {
+    name = name.toLowerCase();
+    Object.keys(h).forEach(function (k) { if (k.toLowerCase() === name) delete h[k]; });
   }
 
+  /** axios' toURLEncodedForm: nested keys as a[b]=c, arrays as a[]=1&a[]=2. */
+  function toUrlEncodedForm(obj) {
+    var parts = [];
+    function add(key, value) {
+      if (value === undefined || value === null) return;
+      if (Array.isArray(value)) { value.forEach(function (v) { add(key + "[]", v); }); return; }
+      if (typeof value === "object" && !(value instanceof Date)) {
+        Object.keys(value).forEach(function (k) { add(key ? key + "[" + k + "]" : k, value[k]); });
+        return;
+      }
+      parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(value instanceof Date ? value.toISOString() : value));
+    }
+    Object.keys(obj).forEach(function (k) { add(k, obj[k]); });
+    return parts.join("&");
+  }
+
+  /**
+   * Request body -> { body (text) | bodyBase64, contentType }. Same kinds Vega's sandbox serializes:
+   * string, Uint8Array / ArrayBuffer, URLSearchParams, FormData (multipart, with its boundary), plain objects (JSON).
+   */
+  function encodeBody(data, headers, forAxios) {
+    if (data === undefined || data === null) return {};
+    if (typeof data === "string") return { body: data };
+    if (data instanceof Uint8Array || data instanceof ArrayBuffer) return { bodyBase64: bytesToB64(toBytes(data)) };
+    if (typeof URLSearchParams !== "undefined" && data instanceof URLSearchParams) {
+      if (!hasHeader(headers, "content-type")) headers["Content-Type"] = "application/x-www-form-urlencoded;charset=utf-8";
+      return { body: data.toString() };
+    }
+    if (typeof FormData !== "undefined" && data instanceof FormData) {
+      var r = new Response(data);
+      var ct = r.headers.get("content-type");
+      if (ct) { deleteHeader(headers, "content-type"); headers["Content-Type"] = ct; }
+      return { asyncBody: r.arrayBuffer().then(function (ab) { return { bodyBase64: bytesToB64(new Uint8Array(ab)) }; }) };
+    }
+    if (typeof Blob !== "undefined" && data instanceof Blob) {
+      return { asyncBody: data.arrayBuffer().then(function (ab) { return { bodyBase64: bytesToB64(new Uint8Array(ab)) }; }) };
+    }
+    if (typeof data === "object") {
+      var ctype = "";
+      Object.keys(headers).forEach(function (k) { if (k.toLowerCase() === "content-type") ctype = String(headers[k]); });
+      if (forAxios && ctype.indexOf("application/x-www-form-urlencoded") >= 0) return { body: toUrlEncodedForm(data) };
+      if (!ctype) headers["Content-Type"] = "application/json";
+      return { body: JSON.stringify(data) };
+    }
+    return { body: String(data) };
+  }
+
+  function sendRequest(opts) {
+    // opts: { method, url, headers, data, follow, timeout, forAxios }
+    var enc = encodeBody(opts.data, opts.headers, opts.forAxios);
+    return Promise.resolve(enc.asyncBody || enc).then(function (e) {
+      var req = {
+        method: opts.method, url: opts.url, headers: opts.headers,
+        follow: opts.follow, binary: true, timeout: opts.timeout || 0
+      };
+      if (e.body !== undefined) req.body = e.body;
+      if (e.bodyBase64 !== undefined) req.bodyBase64 = e.bodyBase64;
+      return hostHttp(req);
+    }).then(function (res) {
+      var bytes = res.bodyBase64 ? b64ToBytes(res.bodyBase64) : new Uint8Array(0);
+      res.bytes = bytes;
+      return res;
+    });
+  }
+
+  function decodeText(bytes) { return new TextDecoder("utf-8").decode(bytes); } // strips a BOM, like Response.text()
+
+  function abortError(msg) { var e = new Error(msg || "The operation was aborted"); e.name = "AbortError"; return e; }
+  function withSignal(signal, promise) {
+    if (!signal) return promise;
+    if (signal.aborted) return Promise.reject(abortError());
+    return new Promise(function (resolve, reject) {
+      var onAbort = function () { reject(abortError()); };
+      if (typeof signal.addEventListener === "function") signal.addEventListener("abort", onAbort, { once: true });
+      promise.then(function (v) { resolve(v); }, function (e) { reject(e); });
+    });
+  }
+
+  // ---------- fetch ----------
   global.fetch = function (input, init) {
     init = init || {};
     var url = typeof input === "string" ? input : (input && input.url) || String(input);
-    var headers = normHeaders(init.headers || (input && input.headers));
+    var headers = Object.assign({}, normHeaders(input && input.headers), normHeaders(init.headers));
     var method = String(init.method || (input && input.method) || "GET").toUpperCase();
-    var body = encodeBody(init.body, headers);
-    if (init.signal && init.signal.aborted) return Promise.reject(new Error("Aborted"));
-    return hostHttp({
-      method: method, url: url, headers: headers, body: body,
-      follow: init.redirect !== "manual", binary: false
-    }).then(function (res) {
-      var text = res.body || "";
-      return {
-        ok: res.status >= 200 && res.status < 300,
-        status: res.status,
-        statusText: res.statusText || "",
-        url: res.url || url,
-        redirected: !!res.url && res.url !== url,
-        headers: makeHeadersView(res.headers || {}),
-        text: function () { return Promise.resolve(text); },
-        json: function () { try { return Promise.resolve(JSON.parse(text)); } catch (e) { return Promise.reject(e); } },
-        arrayBuffer: function () { return hostHttp({ method: method, url: url, headers: headers, body: body, follow: init.redirect !== "manual", binary: true }).then(function (r) { return b64ToBuf(r.bodyBase64 || ""); }); },
-        clone: function () { return this; }
-      };
-    });
+    var body = init.body !== undefined ? init.body : (input && input.body);
+    var p = sendRequest({ method: method, url: url, headers: headers, data: body, follow: init.redirect !== "manual", timeout: 0 })
+      .then(function (res) {
+        var nullBody = res.status === 204 || res.status === 304 || method === "HEAD";
+        var status = res.status >= 200 && res.status <= 599 ? res.status : 200;
+        var rh = [];
+        Object.keys(res.headers || {}).forEach(function (k) { rh.push([k, String(res.headers[k])]); });
+        var r;
+        try {
+          r = new Response(nullBody ? null : res.bytes.buffer, { status: status, statusText: res.statusText || "", headers: rh });
+        } catch (e) {
+          r = new Response(nullBody ? null : res.bytes.buffer, { status: status, statusText: res.statusText || "" });
+        }
+        try { Object.defineProperty(r, "url", { value: res.url || url }); } catch (e) { /* ignore */ }
+        try { Object.defineProperty(r, "redirected", { value: !!res.url && res.url !== url }); } catch (e) { /* ignore */ }
+        var raw = [];
+        Object.keys(res.headers || {}).forEach(function (k) { raw.push([k, String(res.headers[k])]); });
+        (res.setCookies || []).forEach(function (c) { raw.push(["set-cookie", String(c)]); });
+        try { Object.defineProperty(r, "rawHeaders", { value: raw }); } catch (e) { /* ignore */ }
+        return r;
+      });
+    return withSignal(init.signal, p);
   };
 
   // ---------- axios ----------
   function axiosError(message, config, response, code) {
     var e = new Error(message);
     e.isAxiosError = true;
+    e.name = "AxiosError";
     e.config = config;
     e.response = response;
     e.code = code;
+    e.status = response ? response.status : undefined;
     e.toJSON = function () { return { message: e.message, code: e.code, status: response && response.status }; };
     return e;
   }
@@ -125,10 +213,11 @@
     return base.replace(/\/+$/, "") + "/" + String(url).replace(/^\/+/, "");
   }
 
-  function appendParams(url, params) {
+  function appendParams(url, params, serializer) {
     if (!params) return url;
     var sp;
-    if (typeof URLSearchParams !== "undefined" && params instanceof URLSearchParams) sp = params.toString();
+    if (serializer && typeof serializer.serialize === "function") sp = serializer.serialize(params);
+    else if (typeof URLSearchParams !== "undefined" && params instanceof URLSearchParams) sp = params.toString();
     else {
       var parts = [];
       Object.keys(params).forEach(function (k) {
@@ -143,53 +232,87 @@
     return url + (url.indexOf("?") >= 0 ? "&" : "?") + sp;
   }
 
-  function mergeConfig(a, b) {
+  /** axios headers may be flat or {common:{}, get:{}, post:{}, ...}: flatten for one method. */
+  function flattenHeaders(h, method) {
     var out = {};
-    Object.keys(a || {}).forEach(function (k) { out[k] = a[k]; });
-    Object.keys(b || {}).forEach(function (k) {
-      if (k === "headers") out.headers = Object.assign({}, normHeaders(a && a.headers), normHeaders(b.headers));
-      else out[k] = b[k];
+    if (!h) return out;
+    var m = String(method || "get").toLowerCase();
+    var METHODS = ["common", "get", "post", "put", "patch", "delete", "head", "options"];
+    if (h.common && typeof h.common === "object") Object.assign(out, normHeaders(h.common));
+    if (h[m] && typeof h[m] === "object") Object.assign(out, normHeaders(h[m]));
+    Object.keys(h).forEach(function (k) {
+      if (METHODS.indexOf(k) >= 0 && typeof h[k] === "object") return;
+      if (h[k] !== undefined && h[k] !== null && typeof h[k] !== "object") out[k] = String(h[k]);
     });
     return out;
   }
 
+  function mergeConfig(a, b) {
+    var out = {};
+    Object.keys(a || {}).forEach(function (k) { out[k] = a[k]; });
+    Object.keys(b || {}).forEach(function (k) {
+      if (k === "headers") {
+        var ah = (a && a.headers) || {}, bh = b.headers || {};
+        var merged = {};
+        ["common", "get", "post", "put", "patch", "delete", "head", "options"].forEach(function (mk) {
+          var x = Object.assign({}, ah[mk] || {}, bh[mk] || {});
+          if (Object.keys(x).length) merged[mk] = x;
+        });
+        Object.keys(ah).forEach(function (hk) { if (!merged[hk] && typeof ah[hk] !== "object") merged[hk] = ah[hk]; });
+        Object.keys(bh).forEach(function (hk) { if (!merged[hk] && typeof bh[hk] !== "object") merged[hk] = bh[hk]; });
+        if (typeof bh.forEach === "function" && typeof bh.get === "function") Object.assign(merged, normHeaders(bh));
+        out.headers = merged;
+      } else if (b[k] !== undefined) out[k] = b[k];
+    });
+    return out;
+  }
+
+  function InterceptorManager() { this.handlers = []; }
+  InterceptorManager.prototype.use = function (fulfilled, rejected, options) {
+    this.handlers.push({ fulfilled: fulfilled, rejected: rejected, options: options || {} });
+    return this.handlers.length - 1;
+  };
+  InterceptorManager.prototype.eject = function (id) { if (this.handlers[id]) this.handlers[id] = null; };
+  InterceptorManager.prototype.clear = function () { this.handlers = []; };
+  InterceptorManager.prototype.forEach = function (fn) { this.handlers.forEach(function (h) { if (h !== null) fn(h); }); };
+
+  // axios 1.x (what Vega bundles): only Accept is a default; Content-Type is derived from the body.
+  var AXIOS_DEFAULT_HEADERS = { common: { "Accept": "application/json, text/plain, */*" } };
+
   function createAxios(defaults) {
-    var requestInterceptors = [], responseInterceptors = [];
-    function request(config) {
-      config = mergeConfig(defaults, config);
+    var interceptors = { request: new InterceptorManager(), response: new InterceptorManager() };
+
+    function dispatch(config) {
       if (config.signal && config.signal.aborted) return Promise.reject(axiosError("canceled", config, undefined, "ERR_CANCELED"));
-      var chain = Promise.resolve(config);
-      requestInterceptors.slice().reverse().forEach(function (pair) {
-        chain = chain.then(pair.fulfilled, pair.rejected);
-      });
-      return chain.then(function (prepared) {
-      config = prepared || config;
-      var headers = normHeaders(config.headers);
-      var url = appendParams(joinUrl(config.baseURL, config.url || ""), config.params);
       var method = String(config.method || "get").toUpperCase();
-      var body = encodeBody(config.data, headers);
+      var headers = flattenHeaders(config.headers, method);
+      var url = appendParams(joinUrl(config.baseURL, config.url || ""), config.params, config.paramsSerializer);
       var wantBinary = config.responseType === "arraybuffer" || config.responseType === "blob";
-      return hostHttp({
-        method: method, url: url, headers: headers, body: body,
-        follow: config.maxRedirects !== 0, binary: wantBinary,
-        timeout: config.timeout || 0
+      var data = config.data;
+      if (typeof config.transformRequest === "function") data = config.transformRequest(data, headers);
+      else if (Array.isArray(config.transformRequest)) config.transformRequest.forEach(function (t) { if (typeof t === "function") data = t(data, headers); });
+      var p = sendRequest({
+        method: method, url: url, headers: headers, data: data,
+        follow: config.maxRedirects !== 0, timeout: config.timeout || 0, forAxios: true
       }).then(function (res) {
-        var data;
-        if (wantBinary) data = b64ToBuf(res.bodyBase64 || "");
+        var out;
+        if (wantBinary) out = res.bytes.buffer;
         else {
-          data = res.body || "";
-          if (config.responseType !== "text" && typeof data === "string") {
-            var t = data.replace(/^\uFEFF/, "").trim();
-            if (t && (t[0] === "{" || t[0] === "[" || config.responseType === "json")) {
-              try { data = JSON.parse(t); } catch (e) { /* keep text */ }
-            }
+          out = decodeText(res.bytes);
+          if (config.responseType !== "text") {
+            if (out) { try { out = JSON.parse(out); } catch (e) { /* keep text */ } }
           }
         }
+        var rh = {};
+        Object.keys(res.headers || {}).forEach(function (k) { rh[k] = res.headers[k]; });
+        if (res.setCookies && res.setCookies.length) { rh["set-cookie"] = res.setCookies.slice(); rh["x-set-cookie"] = res.setCookies.slice(); }
         var response = {
-          data: data, status: res.status, statusText: res.statusText || "",
-          headers: res.headers || {}, config: config,
-          request: { responseURL: res.url || url, res: { responseUrl: res.url || url } }
+          data: out, status: res.status, statusText: res.statusText || "",
+          headers: rh, config: config,
+          request: { url: url, responseURL: res.url || url, res: { responseUrl: res.url || url } }
         };
+        if (typeof config.transformResponse === "function") response.data = config.transformResponse(response.data, rh, res.status);
+        else if (Array.isArray(config.transformResponse)) config.transformResponse.forEach(function (t) { if (typeof t === "function") response.data = t(response.data, rh, res.status); });
         var ok = typeof config.validateStatus === "function"
           ? config.validateStatus(res.status)
           : (res.status >= 200 && res.status < 300);
@@ -197,74 +320,54 @@
         return response;
       }, function (err) {
         if (err && err.isAxiosError) throw err;
-        var e = axiosError(err && err.message ? err.message : "Network Error", config, undefined, "ERR_NETWORK");
+        if (err && err.name === "AbortError") throw axiosError("canceled", config, undefined, "ERR_CANCELED");
+        var msg = err && err.message ? err.message : "Network Error";
+        var code = /timeout|timed out/i.test(msg) ? "ECONNABORTED" : "ERR_NETWORK";
+        throw axiosError(code === "ECONNABORTED" ? "timeout of " + (config.timeout || 0) + "ms exceeded" : msg, config, undefined, code);
+      });
+      return withSignal(config.signal, p).catch(function (e) {
+        if (e && e.name === "AbortError") throw axiosError("canceled", config, undefined, "ERR_CANCELED");
         throw e;
       });
-      }).then(function (response) {
-        var result = Promise.resolve(response);
-        responseInterceptors.forEach(function (pair) { result = result.then(pair.fulfilled, pair.rejected); });
-        return result;
-      }, function (error) {
-        var result = Promise.reject(error);
-        responseInterceptors.forEach(function (pair) { result = result.then(pair.fulfilled, pair.rejected); });
-        return result;
-      });
+    }
+
+    function request(config) {
+      config = mergeConfig(defaults, config);
+      var chain = [dispatch, undefined];
+      interceptors.request.forEach(function (h) { chain.unshift(h.fulfilled, h.rejected); });
+      interceptors.response.forEach(function (h) { chain.push(h.fulfilled, h.rejected); });
+      var promise = Promise.resolve(config);
+      for (var i = 0; i < chain.length; i += 2) promise = promise.then(chain[i], chain[i + 1]);
+      return promise;
     }
     var instance = function (a, b) {
       return typeof a === "string" ? request(Object.assign({}, b, { url: a })) : request(a);
     };
     instance.request = request;
+    instance.getUri = function (c) { c = mergeConfig(defaults, c); return appendParams(joinUrl(c.baseURL, c.url || ""), c.params); };
     ["get", "delete", "head", "options"].forEach(function (m) {
       instance[m] = function (url, config) { return request(Object.assign({}, config, { method: m, url: url })); };
     });
     ["post", "put", "patch"].forEach(function (m) {
       instance[m] = function (url, data, config) { return request(Object.assign({}, config, { method: m, url: url, data: data })); };
     });
-    instance.defaults = defaults;
-    // Axios-compatible interceptor chains. Provider modules install global request/response
-    // interceptors (including Cloudflare cookie cleanup); silently ignoring them breaks auth flows.
-    var requestHandlers = [], responseHandlers = [];
-    instance.interceptors = {
-      request: {
-        use: function (fulfilled, rejected) { requestHandlers.push({ fulfilled: fulfilled, rejected: rejected }); return requestHandlers.length - 1; },
-        eject: function (id) { if (requestHandlers[id]) requestHandlers[id] = null; }
-      },
-      response: {
-        use: function (fulfilled, rejected) { responseHandlers.push({ fulfilled: fulfilled, rejected: rejected }); return responseHandlers.length - 1; },
-        eject: function (id) { if (responseHandlers[id]) responseHandlers[id] = null; }
-      }
-    };
-    var rawRequest = request;
-    request = function (config) {
-      var chain = Promise.resolve(config || {});
-      requestHandlers.forEach(function (h) { if (h) chain = chain.then(h.fulfilled, h.rejected); });
-      return chain.then(function (cfg) { return rawRequest(cfg); }).then(function (res) {
-        var out = Promise.resolve(res);
-        responseHandlers.forEach(function (h) { if (h) out = out.then(h.fulfilled, h.rejected); });
-        return out;
-      }, function (err) {
-        var out = Promise.reject(err);
-        responseHandlers.forEach(function (h) { if (h) out = out.then(h.fulfilled, h.rejected); });
-        return out;
-      });
-    };
-    instance.request = request;
-    instance.get = function (url, config) { return request(Object.assign({}, config, { method: "get", url: url })); };
-    instance.delete = function (url, config) { return request(Object.assign({}, config, { method: "delete", url: url })); };
-    instance.head = function (url, config) { return request(Object.assign({}, config, { method: "head", url: url })); };
-    instance.options = function (url, config) { return request(Object.assign({}, config, { method: "options", url: url })); };
-    ["post", "put", "patch"].forEach(function (m) {
-      instance[m] = function (url, data, config) { return request(Object.assign({}, config, { method: m, url: url, data: data })); };
+    ["postForm", "putForm", "patchForm"].forEach(function (m) {
+      instance[m] = function (url, data, config) { return request(Object.assign({}, config, { method: m.replace("Form", ""), url: url, data: data, headers: Object.assign({}, config && config.headers) })); };
     });
+    instance.defaults = defaults;
+    instance.interceptors = interceptors;
     instance.create = function (cfg) { return createAxios(mergeConfig(defaults, cfg)); };
     instance.isAxiosError = function (e) { return !!(e && e.isAxiosError); };
     instance.isCancel = function (e) { return !!(e && e.code === "ERR_CANCELED"); };
     instance.all = function (p) { return Promise.all(p); };
     instance.spread = function (cb) { return function (arr) { return cb.apply(null, arr); }; };
     instance.CancelToken = { source: function () { return { token: {}, cancel: function () {} }; } };
+    instance.AxiosError = function (message, code, config, req, response) { return axiosError(message, config, response, code); };
     return instance;
   }
-  var axios = createAxios({ headers: {} });
+  var axios = createAxios({ headers: JSON.parse(JSON.stringify(AXIOS_DEFAULT_HEADERS)) });
+  axios.default = axios;
+
 
   // ---------- cheerio (over the browser DOM) ----------
   var containsIds = {}; // needle -> id
@@ -587,58 +690,184 @@
   }
   var cheerio = { load: load, default: { load: load } };
 
-  // ---------- misc polyfills used by provider bundles ----------
-  if (typeof global.Buffer === "undefined") {
-    var Buf = function (bytes) { this.bytes = bytes; this.length = bytes.length; };
-    Buf.from = function (v, enc) {
-      var bytes;
-      if (typeof v === "string") {
-        if (enc === "base64") { var bin = atob(v.replace(/-/g, "+").replace(/_/g, "/")); bytes = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); }
-        else if (enc === "hex") { bytes = new Uint8Array(v.length / 2); for (var j = 0; j < bytes.length; j++) bytes[j] = parseInt(v.substr(j * 2, 2), 16); }
-        else bytes = new TextEncoder().encode(v);
-      } else bytes = new Uint8Array(v);
-      return new Buf(bytes);
-    };
-    Buf.prototype.toString = function (enc) {
-      if (enc === "base64") { var s = ""; for (var i = 0; i < this.bytes.length; i++) s += String.fromCharCode(this.bytes[i]); return btoa(s); }
-      if (enc === "hex") return Array.prototype.map.call(this.bytes, function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
-      return new TextDecoder("utf-8").decode(this.bytes);
-    };
-    global.Buffer = Buf;
-  }
 
-  var consoleStub = {
-    log: function () {}, info: function () {}, debug: function () {}, warn: function () {},
-    error: function () { try { Host.log(Array.prototype.slice.call(arguments).map(String).join(" ")); } catch (e) { /* ignore */ } }
-  };
-  global.console = consoleStub;
+  // ---------- Vega's common headers (single source: PluginJsEngine.COMMON_HEADERS) ----------
+  var COMMON = {};
+  try { COMMON = JSON.parse(Host.commonHeaders()); } catch (e) { COMMON = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" }; }
+
+  // ---------- crypto: expo-crypto style `Crypto` (what Vega passes) and react-native-aes-crypto style `Aes` ----------
+  function hostCrypto(obj) {
+    var r = JSON.parse(Host.crypto(JSON.stringify(obj)));
+    if (r.error) throw new Error(r.error);
+    return r.result;
+  }
+  function digestBytes(alg, bytes) { return b64ToBytes(hostCrypto({ op: "digest", alg: alg, dataB64: bytesToB64(bytes) })); }
+  function hmacBytes(alg, keyBytes, bytes) { return b64ToBytes(hostCrypto({ op: "hmac", alg: alg, keyB64: bytesToB64(keyBytes), dataB64: bytesToB64(bytes) })); }
+  function aesBytes(o) { return b64ToBytes(hostCrypto(Object.assign({ op: "aes" }, o))); }
+
+  var Crypto = Object.freeze({
+    CryptoDigestAlgorithm: Object.freeze({ SHA1: "SHA-1", SHA256: "SHA-256", SHA384: "SHA-384", SHA512: "SHA-512", MD5: "MD5" }),
+    CryptoEncoding: Object.freeze({ HEX: "hex", BASE64: "base64" }),
+    digestStringAsync: function (algorithm, data, options) {
+      return Promise.resolve().then(function () {
+        var out = digestBytes(algorithm, utf8(data));
+        return options && options.encoding === "base64" ? bytesToB64(out) : bytesToHex(out);
+      });
+    },
+    getRandomBytesAsync: function (n) { return Promise.resolve().then(function () { var a = new Uint8Array(n); crypto.getRandomValues(a); return a; }); },
+    randomUUID: function () {
+      var hex = "0123456789abcdef", uuid = "";
+      for (var i = 0; i < 36; i++) {
+        if (i === 8 || i === 13 || i === 18 || i === 23) uuid += "-";
+        else if (i === 14) uuid += "4";
+        else uuid += hex[Math.floor(Math.random() * 16)];
+      }
+      return uuid;
+    }
+  });
+
+  function parseAesAlgorithm(algorithm) {
+    var m = /^aes-(128|192|256)-(cbc|ecb|ctr|gcm)$/i.exec(String(algorithm || "aes-256-cbc"));
+    if (!m) throw new Error("Unsupported AES algorithm: " + algorithm);
+    return { bits: +m[1], mode: m[2].toUpperCase() };
+  }
+  var Aes = Object.freeze({
+    sha1: function (t) { return Promise.resolve().then(function () { return bytesToHex(digestBytes("SHA-1", toBytes(t))); }); },
+    sha256: function (t) { return Promise.resolve().then(function () { return bytesToHex(digestBytes("SHA-256", toBytes(t))); }); },
+    sha512: function (t) { return Promise.resolve().then(function () { return bytesToHex(digestBytes("SHA-512", toBytes(t))); }); },
+    md5: function (t) { return Promise.resolve().then(function () { return bytesToHex(digestBytes("MD5", toBytes(t))); }); },
+    hmac256: function (t, keyHex) { return Promise.resolve().then(function () { return bytesToHex(hmacBytes("HmacSHA256", hexToBytes(keyHex), toBytes(t))); }); },
+    hmac512: function (t, keyHex) { return Promise.resolve().then(function () { return bytesToHex(hmacBytes("HmacSHA512", hexToBytes(keyHex), toBytes(t))); }); },
+    randomKey: function (length) { return Promise.resolve().then(function () { var a = new Uint8Array(length); crypto.getRandomValues(a); return bytesToHex(a); }); },
+    /** password, salt: text; cost: iterations; length: bits (256 -> 64 hex chars). */
+    pbkdf2: function (password, salt, cost, length, algorithm) {
+      return Promise.resolve().then(function () {
+        return bytesToHex(b64ToBytes(hostCrypto({ op: "pbkdf2", passwordB64: bytesToB64(utf8(password)), saltB64: bytesToB64(utf8(salt)), cost: cost, bits: length || 256, alg: algorithm || "sha512" })));
+      });
+    },
+    /** text -> base64 cipher text; key / iv are hex strings (like react-native-aes-crypto). */
+    encrypt: function (text, keyHex, ivHex, algorithm) {
+      return Promise.resolve().then(function () {
+        var a = parseAesAlgorithm(algorithm);
+        return bytesToB64(aesBytes({ mode: a.mode, padding: a.mode === "CBC" || a.mode === "ECB" ? "PKCS5Padding" : "NoPadding", encrypt: true, keyB64: bytesToB64(hexToBytes(keyHex)), ivB64: ivHex ? bytesToB64(hexToBytes(ivHex)) : "", dataB64: bytesToB64(toBytes(text)) }));
+      });
+    },
+    /** base64 cipher text -> text */
+    decrypt: function (cipherB64, keyHex, ivHex, algorithm) {
+      return Promise.resolve().then(function () {
+        var a = parseAesAlgorithm(algorithm);
+        return decodeText(aesBytes({ mode: a.mode, padding: a.mode === "CBC" || a.mode === "ECB" ? "PKCS5Padding" : "NoPadding", encrypt: false, keyB64: bytesToB64(hexToBytes(keyHex)), ivB64: ivHex ? bytesToB64(hexToBytes(ivHex)) : "", dataB64: cipherB64 }));
+      });
+    }
+  });
+
+  // ---------- crypto-js (require("crypto-js")): the commonly used part, synchronous like the real one ----------
+  var CryptoJS = (function () {
+    function WordArray(bytes) { this._b = bytes; }
+    Object.defineProperty(WordArray.prototype, "sigBytes", { get: function () { return this._b.length; } });
+    Object.defineProperty(WordArray.prototype, "words", { get: function () {
+      var w = [], b = this._b;
+      for (var i = 0; i < b.length; i++) w[i >>> 2] = (w[i >>> 2] || 0) | (b[i] << (24 - (i % 4) * 8));
+      return w;
+    } });
+    WordArray.prototype.toString = function (enc) { return (enc || Enc.Hex).stringify(this); };
+    WordArray.prototype.clone = function () { return new WordArray(this._b.slice()); };
+    WordArray.prototype.concat = function (o) { var n = new Uint8Array(this._b.length + o._b.length); n.set(this._b, 0); n.set(o._b, this._b.length); this._b = n; return this; };
+    function wa(bytes) { return new WordArray(bytes); }
+    function bytesOf(x) { return x instanceof WordArray ? x._b : utf8(x); }
+    var Enc = {
+      Hex: { stringify: function (w) { return bytesToHex(w._b); }, parse: function (s) { return wa(hexToBytes(s)); } },
+      Base64: { stringify: function (w) { return bytesToB64(w._b); }, parse: function (s) { return wa(b64ToBytes(String(s).replace(/-/g, "+").replace(/_/g, "/"))); } },
+      Utf8: { stringify: function (w) { return decodeText(w._b); }, parse: function (s) { return wa(utf8(s)); } },
+      Latin1: { stringify: function (w) { var s = ""; for (var i = 0; i < w._b.length; i++) s += String.fromCharCode(w._b[i]); return s; },
+                parse: function (s) { var b = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 255; return wa(b); } }
+    };
+    function hash(alg) { return function (msg) { return wa(digestBytes(alg, bytesOf(msg))); }; }
+    function hmac(alg) { return function (msg, key) { return wa(hmacBytes(alg, bytesOf(key), bytesOf(msg))); }; }
+    function evpKdf(pass, salt, keyLen, ivLen) {
+      var out = new Uint8Array(0), block = new Uint8Array(0);
+      while (out.length < keyLen + ivLen) {
+        var inp = new Uint8Array(block.length + pass.length + salt.length);
+        inp.set(block, 0); inp.set(pass, block.length); inp.set(salt, block.length + pass.length);
+        block = digestBytes("MD5", inp);
+        var n = new Uint8Array(out.length + block.length); n.set(out, 0); n.set(block, out.length); out = n;
+      }
+      return { key: out.slice(0, keyLen), iv: out.slice(keyLen, keyLen + ivLen) };
+    }
+    var MODE = { CBC: { n: "CBC" }, ECB: { n: "ECB" }, CTR: { n: "CTR" } };
+    var PAD = { Pkcs7: { n: "PKCS5Padding" }, NoPadding: { n: "NoPadding" } };
+    function CipherParams(o) { Object.assign(this, o); }
+    CipherParams.prototype.toString = function (fmt) {
+      if (fmt && typeof fmt.stringify === "function") return fmt.stringify(this);
+      if (this.salt) { var head = utf8("Salted__"), all = new Uint8Array(16 + this.ciphertext._b.length); all.set(head, 0); all.set(this.salt._b, 8); all.set(this.ciphertext._b, 16); return bytesToB64(all); }
+      return bytesToB64(this.ciphertext._b);
+    };
+    function AesApi() {}
+    AesApi.encrypt = function (msg, key, cfg) {
+      cfg = cfg || {};
+      var data = bytesOf(msg), keyB, ivB, salt = null;
+      if (typeof key === "string") {
+        salt = new Uint8Array(8); crypto.getRandomValues(salt);
+        var d = evpKdf(utf8(key), salt, 32, 16); keyB = d.key; ivB = d.iv;
+      } else { keyB = key._b; ivB = cfg.iv ? cfg.iv._b : new Uint8Array(0); }
+      var mode = (cfg.mode || MODE.CBC).n, pad = (cfg.padding || PAD.Pkcs7).n;
+      var ct = aesBytes({ mode: mode, padding: pad, encrypt: true, keyB64: bytesToB64(keyB), ivB64: bytesToB64(ivB), dataB64: bytesToB64(data) });
+      return new CipherParams({ ciphertext: wa(ct), key: wa(keyB), iv: wa(ivB), salt: salt ? wa(salt) : undefined });
+    };
+    AesApi.decrypt = function (cipher, key, cfg) {
+      cfg = cfg || {};
+      var ctB, keyB, ivB, salt = null;
+      if (typeof cipher === "string") {
+        var raw = b64ToBytes(cipher.replace(/-/g, "+").replace(/_/g, "/"));
+        if (raw.length > 16 && decodeText(raw.subarray(0, 8)) === "Salted__") { salt = raw.slice(8, 16); ctB = raw.slice(16); } else ctB = raw;
+      } else { ctB = cipher.ciphertext._b; if (cipher.salt) salt = cipher.salt._b; }
+      if (typeof key === "string") { var d = evpKdf(utf8(key), salt || new Uint8Array(0), 32, 16); keyB = d.key; ivB = d.iv; }
+      else { keyB = key._b; ivB = cfg.iv ? cfg.iv._b : new Uint8Array(0); }
+      var mode = (cfg.mode || MODE.CBC).n, pad = (cfg.padding || PAD.Pkcs7).n;
+      return wa(aesBytes({ mode: mode, padding: pad, encrypt: false, keyB64: bytesToB64(keyB), ivB64: bytesToB64(ivB), dataB64: bytesToB64(ctB) }));
+    };
+    var api = {
+      MD5: hash("MD5"), SHA1: hash("SHA-1"), SHA256: hash("SHA-256"), SHA384: hash("SHA-384"), SHA512: hash("SHA-512"),
+      HmacMD5: hmac("HmacMD5"), HmacSHA1: hmac("HmacSHA1"), HmacSHA256: hmac("HmacSHA256"), HmacSHA512: hmac("HmacSHA512"),
+      enc: Enc, mode: MODE, pad: PAD, AES: AesApi,
+      lib: { WordArray: { create: function (bytes) { return wa(bytes ? toBytes(bytes) : new Uint8Array(0)); }, random: function (n) { var b = new Uint8Array(n); crypto.getRandomValues(b); return wa(b); } }, CipherParams: CipherParams }
+    };
+    api.default = api;
+    return api;
+  })();
 
   // ---------- plugin loading / execution ----------
   var moduleCache = {};
+  var providerGlobals = {}; // pluginId -> object a provider may keep between calls (Vega's `providerGlobal`)
 
-  function sha1HexSync(input) {
-    var bytes = Array.prototype.slice.call(new TextEncoder().encode(String(input))), bitLen = bytes.length * 8;
-    bytes.push(128); while ((bytes.length % 64) !== 56) bytes.push(0);
-    for (var i = 7; i >= 0; i--) bytes.push(i < 4 ? (bitLen >>> (i * 8)) & 255 : 0);
-    var h0=0x67452301,h1=0xEFCDAB89,h2=0x98BADCFE,h3=0x10325476,h4=0xC3D2E1F0;
-    function rol(x,n){return (x<<n)|(x>>>(32-n));}
-    for(var off=0;off<bytes.length;off+=64){var w=new Array(80);for(i=0;i<16;i++){var j=off+i*4;w[i]=((bytes[j]<<24)|(bytes[j+1]<<16)|(bytes[j+2]<<8)|bytes[j+3])|0;}for(i=16;i<80;i++)w[i]=rol(w[i-3]^w[i-8]^w[i-14]^w[i-16],1);var a=h0,b=h1,c=h2,d=h3,e=h4;
-      for(i=0;i<80;i++){var f,k;if(i<20){f=(b&c)|((~b)&d);k=0x5A827999;}else if(i<40){f=b^c^d;k=0x6ED9EBA1;}else if(i<60){f=(b&c)|(b&d)|(c&d);k=0x8F1BBCDC;}else{f=b^c^d;k=0xCA62C1D6;}var t=(rol(a,5)+f+e+k+w[i])|0;e=d;d=c;c=rol(b,30);b=a;a=t;}
-      h0=(h0+a)|0;h1=(h1+b)|0;h2=(h2+c)|0;h3=(h3+d)|0;h4=(h4+e)|0;
-    }
-    return [h0,h1,h2,h3,h4].map(function(x){return (x>>>0).toString(16).padStart(8,"0");}).join("");
-  }
-  var cryptoJsStub = {
-    enc: { Hex: { stringify: function (v) { return String(v); } }, Utf8: { stringify: function (v) { return v && v.toString ? v.toString() : String(v); } }, Base64: {} },
-    SHA1: function (v) { var hex=sha1HexSync(v); return { toString: function () { return hex; }, words: [], sigBytes: 20 }; },
-    AES: { decrypt: function () { throw new Error("CryptoJS AES.decrypt is unsupported; use providerContext.Aes.decrypt"); }, encrypt: function () { throw new Error("CryptoJS AES.encrypt is unsupported; use providerContext.Aes.encrypt"); } }
-  };
   function requireStub(name) {
     if (name === "axios") return axios;
     if (name === "cheerio") return cheerio;
-    if (name === "crypto-js" || name === "crypto-js/aes" || name === "crypto-js/sha1") return cryptoJsStub;
-    if (name === "crypto-js/enc-utf8") return cryptoJsStub.enc.Utf8;
-    throw new Error("Module '" + name + "' is not available in plugins");
+    if (name === "crypto-js") return CryptoJS;
+    if (typeof name === "string" && name.indexOf("crypto-js/") === 0) {
+      var sub = name.slice(10);
+      var key = { "enc-hex": "Hex", "enc-base64": "Base64", "enc-utf8": "Utf8" }[sub];
+      return key ? CryptoJS.enc[key] : CryptoJS;
+    }
+    return {}; // like Vega's sandbox, any other module is an empty object
+  }
+
+  // Names Vega's sandbox hides from provider code (they are `undefined` there, so `typeof window === "undefined"`
+  // branches behave the same here). Buffer / process are not provided by Vega either.
+  var HIDDEN = ["globalThis", "self", "window", "document", "navigator", "location", "postMessage", "XMLHttpRequest", "WebSocket",
+    "EventSource", "Worker", "SharedWorker", "BroadcastChannel", "indexedDB", "caches", "importScripts", "localStorage",
+    "sessionStorage", "Buffer", "process"];
+
+  function __awaiter(thisArg, args, PromiseConstructor, generator) {
+    var C = PromiseConstructor || Promise;
+    function adopt(value) { return value instanceof C ? value : new C(function (resolve) { resolve(value); }); }
+    return new C(function (resolve, reject) {
+      function fulfilled(value) { try { step(iterator.next(value)); } catch (e) { reject(e); } }
+      function rejected(value) { try { step(iterator["throw"](value)); } catch (e) { reject(e); } }
+      function step(result) { if (result.done) resolve(result.value); else adopt(result.value).then(fulfilled, rejected); }
+      var iterator = generator.apply(thisArg, args || []);
+      step(iterator.next());
+    });
   }
 
   function loadModule(pluginId, moduleName) {
@@ -647,149 +876,88 @@
     var src = Host.getModule(pluginId, moduleName);
     if (!src) throw new Error("Plugin file missing: " + key + ".js");
     var module = { exports: {} };
-    var fn = new Function("exports", "module", "require", src + "\n//# sourceURL=plugin/" + key + ".js");
-    fn(module.exports, module, requireStub);
+    var params = ["exports", "module", "require", "console", "Promise", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "fetch", "__awaiter", "providerGlobal"].concat(HIDDEN);
+    var fn = new Function(params.join(","), "\"use strict\";\n" + src + "\n//# sourceURL=plugin/" + key + ".js");
+    var args = [module.exports, module, requireStub, providerConsole, Promise, global.setTimeout.bind(global), global.clearTimeout.bind(global),
+      global.setInterval.bind(global), global.clearInterval.bind(global), global.fetch, __awaiter, providerGlobals[pluginId] || (providerGlobals[pluginId] = {})];
+    for (var i = 0; i < HIDDEN.length; i++) args.push(undefined);
+    fn.apply(undefined, args);
     moduleCache[key] = module.exports;
     return module.exports;
   }
 
+  var providerConsole = Object.freeze({
+    log: function () {}, info: function () {}, debug: function () {}, warn: function () {},
+    error: function () { try { Host.log(Array.prototype.slice.call(arguments).map(function (a) { return a && a.message ? a.message : String(a); }).join(" ")); } catch (e) { /* ignore */ } }
+  });
+
   function makeKv(pluginId) {
-    function call(op, key, value) { return JSON.parse(Host.kv(pluginId, op, key || "", value === undefined ? "" : JSON.stringify(value)) || "null"); }
-    return {
-      get: function (k) { return Promise.resolve(call("get", k)); },
-      set: function (k, v) { call("set", k, v); return Promise.resolve(); },
-      delete: function (k) { return Promise.resolve(!!call("delete", k)); },
-      keys: function () { return Promise.resolve(call("keys") || []); },
-      clear: function () { call("clear"); return Promise.resolve(); }
-    };
+    function validate(key) {
+      if (typeof key !== "string" || !key.trim() || key.length > 256) throw new Error("Invalid KV key: must be a non-empty string <= 256 characters");
+      return key;
+    }
+    function call(op, key, valueJson) { return Host.kv(pluginId, op, key || "", valueJson === undefined ? "" : valueJson); }
+    return Object.freeze({
+      get: function (k) {
+        return Promise.resolve().then(function () {
+          var raw = call("get", validate(k));
+          if (raw === "") return undefined; // missing key: undefined (Vega), not null
+          try { return JSON.parse(raw); } catch (e) { return raw; }
+        });
+      },
+      set: function (k, v) {
+        return Promise.resolve().then(function () {
+          validate(k);
+          if (v === undefined) { call("delete", k); return; }
+          var s = JSON.stringify(v);
+          if (s === undefined) throw new Error("KV value must be JSON-serializable");
+          if (s.length > 1000000) throw new Error("KV value exceeds limit of 1000000 bytes");
+          call("set", k, s);
+        });
+      },
+      delete: function (k) { return Promise.resolve().then(function () { return call("delete", validate(k)) === "true"; }); },
+      keys: function () { return Promise.resolve().then(function () { return JSON.parse(call("keys") || "[]"); }); },
+      clear: function () { return Promise.resolve().then(function () { call("clear"); }); }
+    });
   }
 
-  var urlsCache = null;
+  var urlsCache = null, urlsExpires = 0, urlsRequest = null;
   function getBaseUrlFor(value) {
-    var p = urlsCache ? Promise.resolve(urlsCache) : fetch(Host.urlsEndpoint()).then(function (r) {
+    var fresh = urlsCache && Date.now() < urlsExpires;
+    var p = fresh ? Promise.resolve(urlsCache) : (urlsRequest || (urlsRequest = fetch(Host.urlsEndpoint()).then(function (r) {
       if (!r.ok) throw new Error("URL configuration request failed: " + r.status);
       return r.json();
-    }).then(function (d) { urlsCache = d; return d; });
+    }).then(function (d) { urlsCache = d; urlsExpires = Date.now() + 60 * 60 * 1000; return d; })
+      .catch(function (e) { if (urlsCache) return urlsCache; throw e; })
+      .then(function (d) { urlsRequest = null; return d; }, function (e) { urlsRequest = null; throw e; })));
     return p.then(function (d) { return (d[value] && d[value].url) || ""; });
   }
 
-  var commonHeaders = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Windows\"",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-    "Cache-Control": "max-age=0"
-  };
-  var Aes = {
-    sha1: function (value) {
-      var bytes = new TextEncoder().encode(String(value));
-      return crypto.subtle.digest("SHA-1", bytes).then(function (hash) {
-        return Array.prototype.map.call(new Uint8Array(hash), function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
-      });
-    }
-  };
+  /** Cloudflare / browser check: a hidden native WebView loads the page and hands back the HTML and the cookies. */
+  function openWebView(url, options) {
+    return hostAsync(function (id) { Host.webViewAsync(id, String(url), JSON.stringify(options || {})); }).then(function (r) {
+      if (r.cookie === undefined) r.cookie = r.cookies;
+      return r;
+    });
+  }
+  function getCookies(url) {
+    return Promise.resolve().then(function () { return JSON.parse(Host.getCookies(String(url)) || "{}"); });
+  }
+
   function makeContext(pluginId) {
-    var commonHeaders = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-      "Accept-Language": "en-US,en;q=0.9",
-      "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-      "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"',
-      "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none",
-      "Upgrade-Insecure-Requests": "1", "Cache-Control": "max-age=0"
-    };
-    function openWebView(url, options) {
-      options = options || {};
-      return new Promise(function (resolve, reject) {
-        var id = ++seq;
-        webViewPending[id] = function (json) {
-          var r; try { r = JSON.parse(json); } catch (_) { reject(new Error("Invalid WebView response")); return; }
-          if (r.error) { reject(new Error(r.error)); return; }
-          resolve({ data: r.html || "", html: r.html || "", cookies: r.cookies || "", cookieMap: {}, url: url, userAgent: r.userAgent || commonHeaders["User-Agent"] });
-        };
-        try { Host.webViewAsync(id, JSON.stringify({ url: url, options: options })); }
-        catch (e) { delete webViewPending[id]; reject(e); }
-      });
-    }
-    // WebCrypto-backed subset of CryptoJS/Expo AES and SHA-1 used by Vega providers.
-    var Aes = {
-      sha1: function (input) { return crypto.subtle.digest("SHA-1", new TextEncoder().encode(String(input))).then(function (b) { return Array.prototype.map.call(new Uint8Array(b), function (x) { return ("0" + x.toString(16)).slice(-2); }).join(""); }); },
-      decrypt: function (cipherText, key, iv) {
-        try {
-          var raw = atob(String(cipherText).replace(/-/g, "+").replace(/_/g, "/"));
-          var bytes = Uint8Array.from(raw, function (c) { return c.charCodeAt(0); });
-          var keyBytes = new TextEncoder().encode(String(key));
-          if (![16,24,32].includes(keyBytes.length)) return Promise.reject(new Error("AES key must be 16, 24 or 32 UTF-8 bytes"));
-          var ivBytes = new Uint8Array(16); ivBytes.set(new TextEncoder().encode(String(iv || "0000000000000000")).slice(0, 16));
-          return crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]).then(function (k) { return crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBytes }, k, bytes); }).then(function (b) { return new TextDecoder().decode(b); });
-        } catch (e) { return Promise.reject(e); }
-      },
-      encrypt: function (plainText, key, iv) {
-        try {
-          var keyBytes = new TextEncoder().encode(String(key));
-          if (![16,24,32].includes(keyBytes.length)) return Promise.reject(new Error("AES key must be 16, 24 or 32 UTF-8 bytes"));
-          var ivBytes = new Uint8Array(16); ivBytes.set(new TextEncoder().encode(String(iv || "0000000000000000")).slice(0, 16));
-          return crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["encrypt"]).then(function (k) { return crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBytes }, k, new TextEncoder().encode(String(plainText))); }).then(function (b) { var a = new Uint8Array(b), out = ""; for (var i=0;i<a.length;i++) out += String.fromCharCode(a[i]); return btoa(out); });
-        } catch (e) { return Promise.reject(e); }
-      }
-    };
-    // Vega extractor contracts. Keep return shapes compatible with providerContext.extractors.
-    var extractors = {
-      superVideoExtractor: function (html) {
-        var m = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/s.exec(String(html));
-        if (!m) return Promise.resolve((String(html).match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i) || [])[1] || "");
-        var enc = m[2], p = enc.split("',36,")[0].trim(), rest = enc.split("',36,")[1] || "", k = rest.slice(2).split("|"), c = k.length;
-        while (c--) if (k[c]) p = p.replace(new RegExp("\\b" + c.toString(36) + "\\b", "g"), k[c]);
-        return Promise.resolve((p.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i) || [])[1] || "");
-      },
-      gofileExtractor: (function () {
-        var cachedToken = null, cachedWT = null, cachedWTAt = 0;
-        function firstFile(node) { if (!node) return null; if (node.type === "file" && node.link) return node; var children=node.children||{}; var keys=Object.keys(children); for(var i=0;i<keys.length;i++){var found=firstFile(children[keys[i]]);if(found)return found;} return null; }
-        function generateWT(ax) {
-          if (cachedWT && Date.now()-cachedWTAt < 10800000) return Promise.resolve(cachedWT);
-          return ax.get("https://gofile.io/js/wt.obf.js", {headers:{"User-Agent":commonHeaders["User-Agent"],Referer:"https://gofile.io/"}}).then(function(r){
-            var runner = new Function("navigator","window","document","location",String(r.data)+"\nreturn generateWT;");
-            var nav={userAgent:commonHeaders["User-Agent"],language:"en-US"}, loc={href:"https://gofile.io/",protocol:"https:",host:"gofile.io"}, win={navigator:nav,location:loc};
-            var fn=runner(nav,win,{},loc); if(typeof fn!=="function") throw new Error("Gofile website token function missing"); cachedWT=fn;cachedWTAt=Date.now();return fn;
-          }).catch(function(){ return function(token){return token;}; });
-        }
-        return function (id, ax, ctx) {
-          var tokenPromise = cachedToken ? Promise.resolve(cachedToken) : Promise.resolve(ctx && ctx.kvStore ? ctx.kvStore.get("gofile_account_token").catch(function(){return null;}) : null).then(function(saved){
-            if(saved) { cachedToken=saved; return saved; }
-            return ax.post("https://api.gofile.io/accounts", {}, {headers:{"User-Agent":commonHeaders["User-Agent"],Origin:"https://gofile.io",Referer:"https://gofile.io/"}}).then(function(r){var t=r.data&&r.data.data&&r.data.data.token;if(!t)throw new Error("Gofile did not return an account token");cachedToken=t; if(ctx&&ctx.kvStore)ctx.kvStore.set("gofile_account_token",t).catch(function(){});return t;});
-          });
-          return tokenPromise.then(function(token){return generateWT(ax).then(function(makeWT){return {token:token,wt:makeWT(token)};});}).then(function(auth){
-            return ax.get("https://api.gofile.io/contents/"+encodeURIComponent(id), {params:{contentFilter:"",page:1,pageSize:1000,sortField:"name",sortDirection:1},headers:{Accept:"*/*","Accept-Language":"en-US,en;q=0.9",Authorization:"Bearer "+auth.token,Origin:"https://gofile.io",Referer:"https://gofile.io/","User-Agent":commonHeaders["User-Agent"],"X-BL":"en-US","X-Website-Token":auth.wt}}).then(function(r){
-              var data=r.data||{};if(data.status!=="ok"){if(data.status==="error-auth"||r.status===401){cachedToken=null;if(ctx&&ctx.kvStore)ctx.kvStore.delete("gofile_account_token").catch(function(){});}throw new Error("Gofile API returned "+(data.status||"invalid data"));}
-              var file=firstFile(data.data);if(!file||!file.link)throw new Error("No downloadable file found in Gofile response");return {link:file.link,token:auth.token};
-            });
-          });
-        };
-      })(),
-      gdflixExtractor: function (link, signal, ax, ch, headers) { return ax.get(link, { headers: headers, signal: signal }).then(function (r) { var $ = ch.load(r.data); var links=[]; $("a[href]").each(function () { var href=$(this).attr("href")||""; if (/https?:/.test(href) && /download|drive|resume|googleusercontent/i.test(href)) links.push({server: $(this).text().trim() || "GDFlix", link: href, type:"mkv"}); }); return links; }); },
-      hubcloudExtractor: function (link, signal, ax, ch, headers, ctx) {
-        return ax.get(link, { headers: headers, signal: signal }).then(function (r) {
-          var html=String(r.data||""), $=ch.load(html), out=[];
-          var m=/(?:var|let|const)\s+\w+\s*=\s*atob\(atob\(['"]([^'"]+)['"]\)\)/.exec(html);
-          var u=m ? "" : ((html.match(/var\s+url\s*=\s*['"]([^'"]+)['"]/i)||[])[1]||"");
-          if(m) { try { u=atob(atob(m[1])); } catch(_){} } else if(u.indexOf("r=")>=0) { try { u=atob(u.split("r=")[1]); } catch(_){} }
-          if(u && u.indexOf("/")===0) u=new URL(u, link).href;
-          if(u && /^https?:/i.test(u)) out.push({server:"HubCloud",link:u,type:/\.m3u8/i.test(u)?"m3u8":"mkv"});
-          $("a[href]").each(function(){var href=$(this).attr("href")||""; if(/^https?:/i.test(href)&&(/gofile\.io|pixeldrain|drive\.google|\.mkv|\.mp4/i.test(href))) out.push({server:$(this).text().trim()||"HubCloud",link:href,type:/\.mp4/i.test(href)?"mp4":"mkv"});});
-          return out.filter(function(x,i,a){return a.findIndex(function(y){return y.link===x.link;})===i;});
-        });
-      }
-    };
-    return { axios: axios, cheerio: cheerio, getBaseUrl: getBaseUrlFor, commonHeaders: commonHeaders,
-      kvStore: makeKv(pluginId), openWebView: openWebView, Aes: Aes, extractors: extractors,
-      Crypto: Aes, fetch: global.fetch };
+    return Object.freeze({
+      axios: axios,
+      cheerio: cheerio,
+      Crypto: Crypto,
+      Aes: Aes,
+      commonHeaders: Object.assign({}, COMMON), // a fresh copy per call: providers write their Cookie / Referer into it
+      getBaseUrl: getBaseUrlFor,
+      openWebView: openWebView,
+      getCookies: getCookies,
+      kvStore: makeKv(pluginId),
+      // not part of Vega's own context (its provider bundles inline them); kept for providers that still read it
+      extractors: global.__lumoraExtractors || {}
+    });
   }
 
   /** fnName 'catalog' / 'genres' may be a plain array export; anything else is a function export. */
@@ -816,7 +984,9 @@
             }
           });
         }
-        finish(true, JSON.stringify(r === undefined ? null : r));
+        var json;
+        try { json = JSON.stringify(r === undefined ? null : r); } catch (e) { json = "null"; }
+        finish(true, json === undefined ? "null" : json);
       }, function (e) {
         finish(false, String((e && e.message) || e));
       });
@@ -827,5 +997,6 @@
 
   global.__dropPluginCache = function (pluginId) {
     Object.keys(moduleCache).forEach(function (k) { if (k.indexOf(pluginId + "/") === 0) delete moduleCache[k]; });
+    delete providerGlobals[pluginId];
   };
 })(window);
