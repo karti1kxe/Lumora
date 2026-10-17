@@ -1620,6 +1620,8 @@ class MpvPlayerController {
     }
 
     fun togglePlayPause() {
+        // an online video that is still buffering keeps loading; pausing it only stopped the loading
+        if (_isPlaying.value && _isBuffering.value && onlineStreamMode) return
         if (_isPlaying.value) {
             pause()
         } else {

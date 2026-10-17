@@ -2394,6 +2394,7 @@ fun VideoPlayerScreen(
         val choice = session.choices.firstOrNull { it.quality == label } ?: return
         val pos = controller.currentPositionMs.value
         val loadKey = lastLoadedVideoKey
+        session.manualChoice = true
         coroutineScope.launch {
             Toast.makeText(context, "Loading $label…", Toast.LENGTH_SHORT).show()
             val result = com.example.util.media.MediaPlayback.resolveChoice(
@@ -2421,6 +2422,8 @@ fun VideoPlayerScreen(
         val video = currentVideo ?: return
         val st = session.servers.getOrNull(index) ?: return
         if (index == session.selectedServer && !automatic) return
+        // a server picked by hand stays: nothing switches it by itself afterwards
+        if (!automatic) session.manualChoice = true
         val pos = controller.currentPositionMs.value
         val loadKey = lastLoadedVideoKey
         coroutineScope.launch {
@@ -2451,79 +2454,48 @@ fun VideoPlayerScreen(
         applyHlsVariant(v, pos)
     }
 
-    // When a server cannot be played (the player gave up on it) the next server of the website is tried by itself.
+    // The video has really started: from now on the server / quality never changes by itself.
+    val playbackPositionNow by controller.currentPositionMs.collectAsState()
+    LaunchedEffect(playbackPositionNow, isBuffering, pluginSession) {
+        val session = pluginSession ?: return@LaunchedEffect
+        if (!session.hasPlayed && !isBuffering && playbackPositionNow > 300L) session.hasPlayed = true
+    }
+
+    // Only while the video is still connecting for the first time (the start-up buffering) and no server was chosen by
+    // hand: a server that cannot be played is left for the next one of the website. After the first frame, or after a
+    // manual choice, the server stays and the person changes it themselves.
     val streamError by controller.errorMessage.collectAsState()
     LaunchedEffect(streamError, pluginServerIndex, pluginSession) {
         val session = pluginSession ?: return@LaunchedEffect
-        controller.directStreamMaxRetries = if (session.selectedServer + 1 < session.servers.size) 1 else 3
-        if (streamError != null && session.selectedServer + 1 < session.servers.size) {
+        val mayAutoSwitch = !session.manualChoice && !session.hasPlayed
+        controller.directStreamMaxRetries = if (mayAutoSwitch && session.selectedServer + 1 < session.servers.size) 1 else 3
+        if (mayAutoSwitch && streamError != null && session.selectedServer + 1 < session.servers.size) {
             switchPluginServer(session.selectedServer + 1, automatic = true)
         }
     }
 
-    // A server that opens but never starts (stays buffering / black) is left after about 10 s for the next server.
+    // A server that opens but never starts during the start-up buffering is left after about 15 s for the next server.
     LaunchedEffect(pluginServerIndex, pluginSession, lastLoadedVideoKey) {
         val session = pluginSession ?: return@LaunchedEffect
+        if (session.manualChoice || session.hasPlayed) return@LaunchedEffect
         if (session.selectedServer + 1 >= session.servers.size) return@LaunchedEffect
         delay(2000L)
         val basePos = controller.currentPositionMs.value
         var waited = 0L
-        while (waited < 10_000L) {
+        while (waited < 15_000L) {
             delay(500L)
             waited += 500L
+            if (session.manualChoice || session.hasPlayed) return@LaunchedEffect
             if (controller.errorMessage.value != null) return@LaunchedEffect // the error handler above switches
             if (!controller.isBuffering.value && controller.currentPositionMs.value - basePos >= 300L) return@LaunchedEffect // it plays
         }
-        if (session.selectedServer + 1 < session.servers.size) switchPluginServer(session.selectedServer + 1, automatic = true)
-    }
-
-    // Auto (adaptive bitrate) for HLS: one step down when playback keeps stalling, one step up when the read-ahead stays full.
-    LaunchedEffect(hlsVariants, hlsSelectedKey) {
-        if (hlsSelectedKey != "auto" || hlsVariants.size < 2) return@LaunchedEffect
-        val ladder = hlsVariants.sortedByDescending { it.bandwidth }
-        var lastSwitchAt = System.currentTimeMillis()
-        var bufferingSince = 0L
-        var healthySince = 0L
-        val failedUp = HashMap<Long, Long>()
-        while (true) {
-            delay(1000L)
-            val now = System.currentTimeMillis()
-            val curBw = hlsCurrentBandwidth ?: continue
-            val idx = ladder.indexOfFirst { it.bandwidth == curBw }
-            if (idx < 0) continue
-            val buffering = controller.isBuffering.value
-            val ahead = controller.bufferedPositionMs.value - controller.currentPositionMs.value
-            if (now - lastSwitchAt < 15000L) { bufferingSince = 0L; healthySince = 0L; continue }
-            if (buffering && ahead < 2000L) {
-                if (bufferingSince == 0L) bufferingSince = now
-                healthySince = 0L
-            } else {
-                bufferingSince = 0L
-            }
-            if (bufferingSince != 0L && now - bufferingSince >= 4000L) {
-                val lower = ladder.getOrNull(idx + 1)
-                if (lower != null) {
-                    failedUp[curBw] = now
-                    applyHlsVariant(lower, controller.currentPositionMs.value)
-                    lastSwitchAt = now
-                }
-                bufferingSince = 0L
-            } else if (!buffering && controller.isPlaying.value && ahead >= 20_000L) {
-                if (healthySince == 0L) healthySince = now
-                if (now - healthySince >= 25_000L) {
-                    val higher = ladder.getOrNull(idx - 1)
-                    val blockedUntil = higher?.let { failedUp[it.bandwidth] }?.let { it + 180_000L } ?: 0L
-                    if (higher != null && higher.height <= 1080 && now >= blockedUntil) {
-                        applyHlsVariant(higher, controller.currentPositionMs.value)
-                        lastSwitchAt = now
-                    }
-                    healthySince = 0L
-                }
-            } else if (!buffering) {
-                healthySince = 0L
-            }
+        if (!session.manualChoice && !session.hasPlayed && session.selectedServer + 1 < session.servers.size) {
+            switchPluginServer(session.selectedServer + 1, automatic = true)
         }
     }
+
+    // "Auto" HLS quality is chosen once, when the video opens. The quality never steps up or down by itself while it
+    // buffers or plays: only the person changes it (Quality list).
 
     /** Loads [q] at the current position (same moment, same audio track) without touching the saved preference. */
     fun applyOnlineQuality(q: OnlineVideoQuality) {
@@ -2555,51 +2527,8 @@ fun VideoPlayerScreen(
         applyOnlineQuality(q)
     }
 
-    // Auto quality: drop a step when playback keeps stalling, climb a step when the read-ahead cache stays full.
-    LaunchedEffect(onlinePlayback, onlineAutoMode) {
-        val pb = onlinePlayback ?: return@LaunchedEffect
-        if (!onlineAutoMode || pb.qualities.size < 2) return@LaunchedEffect
-        var lastSwitchAt = System.currentTimeMillis()
-        var bufferingSince = 0L
-        var healthySince = 0L
-        val failedUp = HashMap<String, Long>()
-        while (true) {
-            delay(1000L)
-            val now = System.currentTimeMillis()
-            val cur = selectedOnlineQuality ?: continue
-            val buffering = controller.isBuffering.value
-            val ahead = controller.bufferedPositionMs.value - controller.currentPositionMs.value
-            if (now - lastSwitchAt < 15000L) { bufferingSince = 0L; healthySince = 0L; continue }
-            if (buffering && ahead < 2000L) {
-                if (bufferingSince == 0L) bufferingSince = now
-                healthySince = 0L
-            } else {
-                bufferingSince = 0L
-            }
-            if (bufferingSince != 0L && now - bufferingSince >= 4000L) {
-                val lower = OnlineVideoService.stepQuality(pb.qualities, cur, up = false)
-                if (lower != null) {
-                    failedUp[cur] = now
-                    applyOnlineQuality(lower)
-                    lastSwitchAt = now
-                }
-                bufferingSince = 0L
-            } else if (!buffering && controller.isPlaying.value && ahead >= 90_000L) {
-                if (healthySince == 0L) healthySince = now
-                if (now - healthySince >= 20_000L) {
-                    val higher = OnlineVideoService.stepQuality(pb.qualities, cur, up = true)
-                    val blockedUntil = higher?.let { failedUp[it.label] }?.let { it + 180_000L } ?: 0L
-                    if (higher != null && now >= blockedUntil) {
-                        applyOnlineQuality(higher)
-                        lastSwitchAt = now
-                    }
-                    healthySince = 0L
-                }
-            } else if (!buffering) {
-                healthySince = 0L
-            }
-        }
-    }
+    // Auto quality is chosen once, when the video opens. It never drops or climbs a step by itself while the video
+    // buffers or plays: the quality only changes when the person picks another one.
 
     val playlistNames = remember(playlist) {
         if (playlist.isNotEmpty()) playlist.map { it.displayName }
@@ -2957,6 +2886,8 @@ fun VideoPlayerScreen(
             chapterTitle = currentChapterTitle,
             isPlaying = isPlaying,
             onPlayPauseToggle = {
+                // while an online video is buffering it keeps loading: a tap must not pause it (that stopped the loading)
+                if (isPlaying && isBuffering && controller.onlineStreamMode) return@VideoPlayerOverlay
                 isPlaying = !isPlaying
                 if (isPlaying) {
                     controller.play()

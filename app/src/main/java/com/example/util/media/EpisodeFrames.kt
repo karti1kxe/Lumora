@@ -108,7 +108,6 @@ object EpisodeFrames {
         val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, false)
             .filter { !MediaPlayback.needsTorrentEngine(it) && !it.link.startsWith("torrent://", true) }
             .distinctBy { it.link }
-            .sortedBy { MediaPlayback.rankOf(it) }
             .take(MAX_SERVERS_TRIED)
         val preferred = preferred(context, plugin, link)
         // the server that worked last time is tried first

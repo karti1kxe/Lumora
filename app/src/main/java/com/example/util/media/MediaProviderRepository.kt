@@ -107,6 +107,12 @@ object MediaProviderRepository {
                     if (k.isNotBlank() && v.isNotBlank()) headers[k] = v
                 }
             }
+            // like Vega (ProviderManager.withJarCookies): the provider's own cookies (WAF clearance, session) go to the player
+            // with the stream, unless the provider set a Cookie header itself
+            if (isHttp && headers.keys.none { it.equals("Cookie", true) }) {
+                val jarCookie = try { PluginCookieJar.header(url, null) } catch (_: Throwable) { "" }
+                if (jarCookie.isNotBlank()) headers["Cookie"] = jarCookie
+            }
             val subtitles = ArrayList<MediaSubtitle>()
             o.optJSONArray("subtitles")?.let { sa ->
                 for (j in 0 until sa.length()) {

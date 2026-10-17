@@ -118,24 +118,34 @@ object MediaPlayback {
         forDownload: Boolean = false,
         episodeTitle: String = "",
         episodeIndex: Int = -1,
-        /** When playing: the servers are checked for a few seconds and the first one that answers is played. */
-        verify: Boolean = !forDownload
+        /** When playing: the servers are checked for a few seconds and the first one that really delivers video is played. */
+        verify: Boolean = !forDownload,
+        /** When true (a movie / episode was tapped): if no server delivers video the result is a failure, so the player is not opened. */
+        requireWorking: Boolean = false
     ): Result<MediaStream> {
         return try {
             val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, forDownload)
-            var ranked = streams.distinctBy { it.link }.sortedBy { rank(it) }
-            // the server that really delivered this episode's video while its thumbnail was made plays first, without further checks
+            // like Vega: the provider's own order is kept (it lists its best server first); only the check below
+            // moves a server that does not deliver video behind the ones that do
+            var ranked = streams.distinctBy { it.link }
+            // the server that really delivered this episode's video while its thumbnail was made is tried first, but it is
+            // checked like every other one: a frame proves the website's file opens, not that the player can stream it
             val proven = if (!forDownload) EpisodeFrames.preferred(context, plugin, link) else null
-            var provenFirst = false
             if (proven != null) {
                 val i = ranked.indexOfFirst { it.server == proven.server && it.quality == proven.quality && !needsTorrentEngine(it) }
                     .takeIf { it >= 0 } ?: ranked.indexOfFirst { it.server == proven.server && !needsTorrentEngine(it) }
                 if (i > 0) ranked = listOf(ranked[i]) + ranked.filterIndexed { idx, _ -> idx != i }
-                provenFirst = i >= 0
             }
-            if (verify && !provenFirst && ranked.size > 1) {
+            if (verify) {
                 val direct = ranked.filter { !needsTorrentEngine(it) && !it.link.startsWith("torrent://", true) }
-                if (direct.size > 1) ranked = StreamProbe.orderByWorking(context, direct) + ranked.filter { it !in direct }
+                if (direct.isNotEmpty()) {
+                    val outcome = StreamProbe.verify(context, direct)
+                    val hasTorrent = ranked.size > direct.size
+                    if (requireWorking && !outcome.anyWorks && !hasTorrent) {
+                        return Result.failure(PluginException("This video does not play on any server right now. Try again in a moment."))
+                    }
+                    ranked = outcome.ordered + ranked.filter { it !in direct }
+                }
             }
             // direct links first; magnet / .torrent links (torrent providers) are opened with the torrent engine
             var best: MediaStream? = null
@@ -475,7 +485,11 @@ class PluginPlaybackSession(
     @Volatile var subtitles: List<MediaSubtitle> = emptyList(),
     /** The servers of this movie / episode (the playing one and its alternatives) and which one plays. */
     @Volatile var servers: List<MediaStream> = emptyList(),
-    @Volatile var selectedServer: Int = 0
+    @Volatile var selectedServer: Int = 0,
+    /** The person chose a server (or quality) by hand: it stays, nothing switches it by itself any more. */
+    @Volatile var manualChoice: Boolean = false,
+    /** The video has really started once: after that the player never moves to another server on its own. */
+    @Volatile var hasPlayed: Boolean = false
 )
 
 /** Stream URL -> session, so the player (which only gets a VideoItem) can find it. Small, in memory only. */

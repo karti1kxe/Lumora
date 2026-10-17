@@ -350,7 +350,9 @@ fun MediaDetailScreen(
         runBusy(label) {
             val result = MediaPlayback.resolve(
                 context, plugin, v.link, v.type, forDownload,
-                v.title, if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1
+                v.title, if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1,
+                // a tapped video is only opened in the player when one of its servers really delivers video
+                requireWorking = !forDownload
             )
             val stream = result.getOrNull()
             if (stream == null) showResolveError(result.exceptionOrNull()) else onOk(stream)
