@@ -26,6 +26,8 @@ object MediaPlayback {
     private const val STREAM_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
+    internal fun rankOf(s: MediaStream): Int = rank(s)
+
     private fun rank(s: MediaStream): Int {
         val path = s.link.substringBefore('?').substringBefore('#').lowercase()
         val type = s.type.lowercase()
@@ -117,7 +119,16 @@ object MediaPlayback {
         return try {
             val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, forDownload)
             var ranked = streams.distinctBy { it.link }.sortedBy { rank(it) }
-            if (verify && ranked.size > 1) {
+            // the server that really delivered this episode's video while its thumbnail was made plays first, without further checks
+            val proven = if (!forDownload) EpisodeFrames.preferred(context, plugin, link) else null
+            var provenFirst = false
+            if (proven != null) {
+                val i = ranked.indexOfFirst { it.server == proven.server && it.quality == proven.quality && !needsTorrentEngine(it) }
+                    .takeIf { it >= 0 } ?: ranked.indexOfFirst { it.server == proven.server && !needsTorrentEngine(it) }
+                if (i > 0) ranked = listOf(ranked[i]) + ranked.filterIndexed { idx, _ -> idx != i }
+                provenFirst = i >= 0
+            }
+            if (verify && !provenFirst && ranked.size > 1) {
                 val direct = ranked.filter { !needsTorrentEngine(it) && !it.link.startsWith("torrent://", true) }
                 if (direct.size > 1) ranked = StreamProbe.orderByWorking(context, direct) + ranked.filter { it !in direct }
             }

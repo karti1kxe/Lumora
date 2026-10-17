@@ -75,17 +75,13 @@ object MediaProviderRepository {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             var url = o.optString("link", "").trim()
-            // Torrent providers use several shapes: link=magnet, a separate magnet field, a raw infoHash,
-            // or even put the bare hash in link. Normalize all of them before the URL scheme filter below.
-            val magnetField = o.optString("magnet", "").trim()
-            val infoHash = o.optString("infoHash", "").trim().ifBlank {
-                url.takeIf { it.matches(Regex("(?i)^[0-9a-f]{40}$|^[a-z2-7]{32}$")) }.orEmpty()
-            }
-            if (!url.startsWith("http://", true) && !url.startsWith("https://", true) &&
-                !url.startsWith("magnet:", true) && !url.startsWith("torrent://", true)) {
+            if (url.isEmpty()) {
+                // torrent providers: a "magnet" field, or only the info hash (Stremio style)
+                val magnetField = o.optString("magnet", "").trim()
+                val infoHash = o.optString("infoHash", "").trim()
                 url = when {
                     magnetField.startsWith("magnet:", ignoreCase = true) -> magnetField
-                    infoHash.matches(Regex("(?i)^[0-9a-f]{40}$|^[a-z2-7]{32}$")) ->
+                    infoHash.length == 40 || infoHash.length == 32 ->
                         "magnet:?xt=urn:btih:" + infoHash + o.optString("title", "").trim().takeIf { it.isNotEmpty() }
                             ?.let { "&dn=" + java.net.URLEncoder.encode(it, "UTF-8") }.orEmpty()
                     else -> ""

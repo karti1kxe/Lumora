@@ -625,7 +625,7 @@ class MpvPlayerController {
                     view.mpv.setPropertyString("demuxer-max-back-bytes", "8MiB")
                     view.mpv.setPropertyString("cache-pause-wait", "3")
                     val proxyOpt = bypassProxyOption?.let { "," + it }.orEmpty()
-                    view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=4" + proxyOpt)
+                    view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=4,icy=0" + proxyOpt)
                     try { view.mpv.setPropertyString("tls-verify", "no") } catch (_: Throwable) {}
                     try { view.mpv.setPropertyString("stream-buffer-size", "1MiB") } catch (_: Throwable) {}
                     try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "2") } catch (_: Throwable) {}

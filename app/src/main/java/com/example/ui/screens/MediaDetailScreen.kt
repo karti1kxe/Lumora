@@ -444,6 +444,19 @@ fun MediaDetailScreen(
         }
     }
 
+    // The first episodes get their picture (a frame of the video) and their working server prepared in the background,
+    // so by the time one is tapped it already knows which server really plays.
+    LaunchedEffect(videos) {
+        for (pv in videos.take(12)) {
+            launch {
+                com.example.util.media.EpisodeFrames.obtain(
+                    context, plugin, pv.link, pv.type, pv.title,
+                    if (isSeries) allVideos.indexOfFirst { it.link == pv.link }.coerceAtLeast(0) else -1
+                )
+            }
+        }
+    }
+
     Box(modifier = modifier.fillMaxSize().background(pageBg)) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),

@@ -692,7 +692,16 @@ fun VideoPlayerScreen(
         hlsCurrentBandwidth = chosen?.bandwidth
         controller.setOnlineStream(true)
         controller.setDirectStream(true)
-        controller.setHlsBitrate(chosen?.bandwidth)
+        // quality list not readable (request failed / not a master playlist): mpv would pick the HIGHEST rendition, which a
+        // server that only just connects cannot deliver fast enough -> start at a rate the connection can hold
+        val blindCap: Long? = if (variants.isEmpty() && com.example.util.media.HlsVariants.looksLikeHls(stream.link, stream.type)) {
+            val kbps = try {
+                val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                cm.getNetworkCapabilities(cm.activeNetwork)?.linkDownstreamBandwidthKbps ?: 0
+            } catch (_: Throwable) { 0 }
+            if (kbps > 0) (kbps * 600L).coerceIn(800_000L, 4_000_000L) else 2_500_000L
+        } else null
+        controller.setHlsBitrate(chosen?.bandwidth ?: blindCap)
         controller.loadVideo(stream.link, startMs)
         controller.play()
     }
