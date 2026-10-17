@@ -17,6 +17,10 @@ object MediaProviderRepository {
     // A few requests at a time so several rows scrolling into view don't hammer one site.
     private val gate = Semaphore(3)
 
+    fun clearAll() {
+        catalogs.clear(); posts.clear(); infos.clear(); episodeLists.clear()
+    }
+
     fun clear(pluginId: String) {
         catalogs.remove(pluginId)
         val prefix = "$pluginId|"

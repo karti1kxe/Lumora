@@ -114,6 +114,9 @@ object MediaPluginStore {
                 .putString(KEY_BASE, base)
                 .putString(KEY_MANIFEST, text)
                 .apply()
+            // newest code / domains from now on: nothing cached from the previous load is used
+            PluginJsEngine.resetAllCaches()
+            MediaProviderRepository.clearAll()
             changes.value++
             return@withContext Result.success(list)
         }
@@ -128,9 +131,14 @@ object MediaPluginStore {
             val tmp = File(root(context), ".tmp_" + safeName(plugin.value))
             tmp.deleteRecursively()
             tmp.mkdirs()
+            val bases = listOf(base) + candidateBases(getRepoUrl(context)).filter { it != base }
             for (module in MODULES) {
-                val body = fetchText("$base/dist/${plugin.value}/$module.js") ?: continue
-                File(tmp, "$module.js").writeText(body)
+                var body: String? = null
+                for (b in bases) {
+                    body = try { fetchText("$b/dist/${plugin.value}/$module.js") } catch (t: IOException) { if (b == bases.last()) throw t else null }
+                    if (body != null) break
+                }
+                File(tmp, "$module.js").writeText(body ?: continue)
             }
             if (!File(tmp, "catalog.js").isFile || !File(tmp, "posts.js").isFile) {
                 tmp.deleteRecursively()
@@ -157,9 +165,25 @@ object MediaPluginStore {
         }
     }
 
+    /**
+     * After a repository was loaded: every plugin that is already downloaded is fetched again, so what runs is always the
+     * latest code of the repository (a plugin that fails to update keeps its old files). Returns how many were updated.
+     */
+    suspend fun updateInstalled(context: Context): Int {
+        val wanted = getManifest(context).filter { m -> getInstalled(context).any { it.value == m.value } }
+        var updated = 0
+        for (plugin in wanted) {
+            if (download(context, plugin).isSuccess) updated++
+        }
+        return updated
+    }
+
     /** Returns the body, null on HTTP errors (404 etc.), throws on network failures. */
     private fun fetchText(url: String): String? {
-        val req = Request.Builder().url(url).header("User-Agent", "Lumora").build()
+        // always the newest file: a cache-busting query (raw.githubusercontent.com) and no-cache headers, like Vega's own download
+        val fresh = if (url.startsWith("https://raw.githubusercontent.com/")) url + (if (url.contains('?')) "&" else "?") + "t=" + System.currentTimeMillis() else url
+        val req = Request.Builder().url(fresh).header("User-Agent", "Lumora")
+            .header("Cache-Control", "no-cache, no-store, must-revalidate").header("Pragma", "no-cache").build()
         return client.newCall(req).execute().use { resp ->
             if (resp.isSuccessful) resp.body?.string() else null
         }

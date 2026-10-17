@@ -22,6 +22,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -41,26 +42,24 @@ import java.util.concurrent.atomic.AtomicInteger
 object PluginJsEngine {
     private const val TAG = "PluginJsEngine"
     private const val DEFAULT_UA =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
     private const val UPSTREAM_URLS = "https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/urls.json"
     private const val MAX_BODY_BYTES = 12L * 1024 * 1024
     private const val MAX_REDIRECTS = 10
     private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
 
-    /** Vega's `commonHeaders` (providers/headers.ts): merged under every provider request, and given to the provider as providerContext.commonHeaders. */
+    /**
+     * Vega's `commonHeaders` (src/lib/providers/headers.ts, Android): merged under every provider request and given to the
+     * provider as providerContext.commonHeaders. It must stay exactly Vega's small set: the browser-navigation headers that
+     * used to be added here (Accept: text/html, Sec-Fetch-Mode: navigate, Upgrade-Insecure-Requests ...) were sent with the
+     * JSON / AJAX / POST calls of the providers too, so many hosts answered with a web page instead of the link.
+     */
     private val COMMON_HEADERS: Map<String, String> = linkedMapOf(
+        "sec-ch-ua" to "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"",
+        "sec-ch-ua-mobile" to "?1",
+        "sec-ch-ua-platform" to "\"Android\"",
         "User-Agent" to DEFAULT_UA,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language" to "en-US,en;q=0.9",
-        "sec-ch-ua" to "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-        "sec-ch-ua-mobile" to "?0",
-        "sec-ch-ua-platform" to "\"Windows\"",
-        "Sec-Fetch-Dest" to "document",
-        "Sec-Fetch-Mode" to "navigate",
-        "Sec-Fetch-Site" to "none",
-        "Sec-Fetch-User" to "?1",
-        "Upgrade-Insecure-Requests" to "1",
-        "Cache-Control" to "max-age=0"
+        "Accept-Language" to "en-US,en;q=0.9"
     )
 
     /** Host -> true when its requests only worked through the AntiDPI / DoH proxy (false: direct). The next request starts that way. */
@@ -110,6 +109,19 @@ object PluginJsEngine {
         } finally {
             calls.remove(id)
         }
+    }
+
+    /** A repository was (re)loaded: forget every cached module and every cached provider URL list (domains change often). */
+    fun resetAllCaches() {
+        val wv = webView ?: return
+        mainHandler.post { wv.evaluateJavascript("if(window.__dropAllPluginCaches)__dropAllPluginCaches()", null) }
+    }
+
+    /** GitHub raw answers are cached by its CDN for minutes: files that decide where a provider's site is get a fresh copy. */
+    private fun freshUrl(url: String): String {
+        val u = url.toHttpUrlOrNull() ?: return url
+        if (!u.host.equals("raw.githubusercontent.com", true)) return url
+        return u.newBuilder().setQueryParameter("t", System.currentTimeMillis().toString()).build().toString()
     }
 
     /** Forget the JS modules cached for [pluginId] (after it was downloaded again or removed). */
@@ -275,6 +287,7 @@ object PluginJsEngine {
         val req = JSONObject(reqJson)
         var url = req.getString("url")
         var method = req.optString("method", "GET").uppercase()
+        if (method == "GET") url = freshUrl(url)
         val follow = req.optBoolean("follow", true)
         val binary = req.optBoolean("binary", false)
         val timeoutSec = (req.optLong("timeout", 0L) / 1000L).coerceIn(0L, 90L)

@@ -152,6 +152,11 @@ fun MediaPluginManager(
             val result = MediaPluginStore.refreshManifest(context, repoUrl)
             result.onFailure { errorText = it.message ?: "Could not load the repository" }
             isLoading = false
+            // the providers that are already downloaded are refreshed from the repository too (latest code, latest site addresses)
+            if (result.isSuccess) {
+                val n = MediaPluginStore.updateInstalled(context)
+                if (n > 0) Toast.makeText(context, "$n provider(s) updated", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 

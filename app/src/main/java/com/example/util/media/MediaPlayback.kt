@@ -26,6 +26,11 @@ object MediaPlayback {
     private const val STREAM_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
+    private val PLAYER_OWN_HEADERS = setOf(
+        "host", "connection", "content-length", "content-type", "accept-encoding", "range", "if-range",
+        "transfer-encoding", "te", "upgrade-insecure-requests"
+    )
+
     internal fun rankOf(s: MediaStream): Int = rank(s)
 
     private fun rank(s: MediaStream): Int {
@@ -190,6 +195,10 @@ object MediaPlayback {
         val extra = LinkedHashMap<String, String>()
         for ((k, v) in stream.headers) {
             if (k.equals("User-Agent", true) || k.equals("Referer", true) || k.equals("Referrer", true)) continue
+            // headers the player builds itself (or that only make sense for a request body) must not be forced on a media request:
+            // a provider copies them from its page requests, and e.g. Accept-Encoding / Range / Host make servers answer with
+            // compressed, partial or wrong data - the player then only buffers
+            if (k.lowercase() in PLAYER_OWN_HEADERS) continue
             extra[k] = v
         }
         if (!isTorrent) {

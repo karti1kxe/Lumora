@@ -693,7 +693,7 @@
 
   // ---------- Vega's common headers (single source: PluginJsEngine.COMMON_HEADERS) ----------
   var COMMON = {};
-  try { COMMON = JSON.parse(Host.commonHeaders()); } catch (e) { COMMON = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" }; }
+  try { COMMON = JSON.parse(Host.commonHeaders()); } catch (e) { COMMON = { "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36", "Accept-Language": "en-US,en;q=0.9" }; }
 
   // ---------- crypto: expo-crypto style `Crypto` (what Vega passes) and react-native-aes-crypto style `Aes` ----------
   function hostCrypto(obj) {
@@ -998,5 +998,12 @@
   global.__dropPluginCache = function (pluginId) {
     Object.keys(moduleCache).forEach(function (k) { if (k.indexOf(pluginId + "/") === 0) delete moduleCache[k]; });
     delete providerGlobals[pluginId];
+  };
+
+  /** Repository (re)loaded: every cached module, every provider's own cached urls.json and the runtime's one are dropped, so the newest domains / code are used. */
+  global.__dropAllPluginCaches = function () {
+    Object.keys(moduleCache).forEach(function (k) { delete moduleCache[k]; });
+    Object.keys(providerGlobals).forEach(function (k) { delete providerGlobals[k]; });
+    urlsCache = null; urlsExpires = 0; urlsRequest = null;
   };
 })(window);
