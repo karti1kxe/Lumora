@@ -62,3 +62,25 @@
 # Media plugins (Network > Media): WebView JavaScript bridge methods are called by name from plugin_runtime.js
 -keepattributes JavascriptInterface
 -keep class com.example.util.media.PluginJsEngine$Bridge { *; }
+
+
+# CloudStream extensions (.cs3, Network > Media > CloudStream repositories)
+# An extension is compiled against the CloudStream library classes (cloudstream-lib) and the libraries it uses, and is
+# loaded by class name at runtime, so none of them may be renamed or removed by R8.
+-keep class com.lagradost.** { *; }
+-dontwarn com.lagradost.**
+-keep class kotlin.** { *; }
+-keep class kotlinx.** { *; }
+-dontwarn kotlinx.**
+-keep class org.jsoup.** { *; }
+-keep class com.fleeksoft.** { *; }
+-dontwarn com.fleeksoft.**
+-keep class io.ktor.** { *; }
+-dontwarn io.ktor.**
+-keep class dev.whyoleg.** { *; }
+-dontwarn dev.whyoleg.**
+-keep class okhttp3.** { *; }
+-keep class okio.** { *; }
+-dontwarn org.slf4j.**
+-dontwarn javax.**
+-dontwarn java.lang.invoke.**

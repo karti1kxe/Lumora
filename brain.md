@@ -285,3 +285,17 @@ NewPipeExtractor has no "Posts" tab, so Posts shows an empty-state message.
   (`MediaProviderRepository.searchPosts`) and shows a result grid (`MediaPostGrid`).
 - `HighResImage` / `HighResImageLoader`: sharp full-width images (detail backdrop, banner). Separate memory/disk cache from
   the 480 px `LinkThumbnail`, tries larger TMDB/IMDb/WordPress variants first.
+
+## 12. CloudStream repositories (Network > Media)
+- The repository field of the Media list accepts a **Vega** link (manifest.json) *or* a **CloudStream** link: repo.json / plugins.json URL,
+  GitHub project URL, `cloudstreamrepo://...` / `https://cs.repo/?...` link, or a cutt.ly / py.md shortcode. `MediaPluginStore.refreshManifest`
+  detects the kind; a CloudStream repo (repo.json -> pluginLists -> plugins.json) is stored as a normalised manifest with `engine = cloudstream`.
+- Downloading a CloudStream provider saves `media_plugins/<internalName>/plugin.cs3` (sha256 checked against the repository) and loads it.
+  `MediaPluginInfo.engine/url/fileHash` tell the two kinds apart; the provider page, title page, search and player are the existing ones.
+- New Gradle module `cloudstream-lib/`: the CloudStream `library` sources (GPL-3.0, github.com/recloudstream/cloudstream) merged into plain
+  Android code (expect/actual resolved), plus app-side classes extensions need (`Plugin`, `CloudStreamApp`, `CommonActivity`, `DataStore`,
+  `VideoClickAction`, `CloudflareKiller`). `com.lagradost.lumora.CloudStreamEngine` loads a .cs3 (PathClassLoader + manifest.json) and answers
+  catalog / posts / search / info / streams as JSON in the Vega shape, so `MediaProviderRepository` just routes `isCs(...)` plugins to it.
+- A title's episodes come from `load()` (one season = one quality option, anime Dubbed/Subbed = audio); `loadLinks()` gives servers + subtitles.
+  Not supported yet: separate audio tracks, `getVideoInterceptor`, extension settings screens.
+- R8 keep rules for the library and its dependencies are at the end of `app/proguard-rules.pro`.

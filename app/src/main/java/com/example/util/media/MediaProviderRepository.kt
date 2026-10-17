@@ -1,6 +1,7 @@
 package com.example.util.media
 
 import android.content.Context
+import com.lagradost.lumora.CloudStreamEngine
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
@@ -16,6 +17,20 @@ object MediaProviderRepository {
     private val episodeLists = ConcurrentHashMap<String, List<MediaDirectLink>>()
     // A few requests at a time so several rows scrolling into view don't hammer one site.
     private val gate = Semaphore(3)
+
+    /** CloudStream extensions run natively ([CloudStreamEngine]); everything else is a Vega JavaScript plugin. */
+    private fun isCs(context: Context, pluginId: String) = MediaPluginStore.isCloudStream(context, pluginId)
+
+    private suspend fun csCall(context: Context, pluginId: String, block: suspend () -> String): String {
+        try {
+            MediaPluginStore.ensureCloudStreamLoaded(context, pluginId)
+            return block()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            throw if (t is PluginException) t else PluginException(t.message ?: "The provider failed")
+        }
+    }
 
     fun clearAll() {
         catalogs.clear(); posts.clear(); infos.clear(); episodeLists.clear()
@@ -33,8 +48,12 @@ object MediaProviderRepository {
     suspend fun loadInfo(context: Context, pluginId: String, link: String, force: Boolean = false): MediaInfo {
         val key = "$pluginId|$link"
         if (!force) infos[key]?.let { return it }
-        val args = org.json.JSONObject().put("link", link).put("provider", pluginId).toString()
-        val json = PluginJsEngine.call(context, pluginId, "meta", "getMeta", args, timeoutMs = 120_000L)
+        val json = if (isCs(context, pluginId)) {
+            csCall(context, pluginId) { CloudStreamEngine.infoJson(context, pluginId, link) }
+        } else {
+            val args = org.json.JSONObject().put("link", link).put("provider", pluginId).toString()
+            PluginJsEngine.call(context, pluginId, "meta", "getMeta", args, timeoutMs = 120_000L)
+        }
         val info = parseInfo(json)
         infos[key] = info
         return info
@@ -44,6 +63,8 @@ object MediaProviderRepository {
     suspend fun loadEpisodes(context: Context, pluginId: String, episodesLink: String): List<MediaDirectLink> {
         val key = "$pluginId|$episodesLink"
         episodeLists[key]?.let { return it }
+        // a CloudStream title lists its episodes directly in getMeta: there is no separate episode request
+        if (isCs(context, pluginId)) return emptyList()
         val args = org.json.JSONObject().put("url", episodesLink).toString()
         val json = PluginJsEngine.call(context, pluginId, "episodes", "getEpisodes", args, timeoutMs = 120_000L)
         val arr = JSONArray(json)
@@ -68,12 +89,16 @@ object MediaProviderRepository {
 
     /** Playable sources of a movie / episode link (getStream). Not cached: stream links expire. */
     suspend fun loadStreams(context: Context, pluginId: String, link: String, type: String, forDownload: Boolean): List<MediaStream> {
-        val args = org.json.JSONObject()
-            .put("link", link)
-            .put("type", type)
-            .put("isDownload", forDownload)
-            .toString()
-        val json = PluginJsEngine.call(context, pluginId, "stream", "getStream", args, timeoutMs = 120_000L)
+        val json = if (isCs(context, pluginId)) {
+            csCall(context, pluginId) { CloudStreamEngine.streamsJson(context, pluginId, link) }
+        } else {
+            val args = org.json.JSONObject()
+                .put("link", link)
+                .put("type", type)
+                .put("isDownload", forDownload)
+                .toString()
+            PluginJsEngine.call(context, pluginId, "stream", "getStream", args, timeoutMs = 120_000L)
+        }
         val arr = try { JSONArray(json) } catch (_: Throwable) { return emptyList() }
         val out = ArrayList<MediaStream>()
         for (i in 0 until arr.length()) {
@@ -193,8 +218,12 @@ object MediaProviderRepository {
 
     suspend fun loadCatalog(context: Context, pluginId: String, force: Boolean = false): Catalog {
         if (!force) catalogs[pluginId]?.let { return it }
-        val categories = parseEntries(PluginJsEngine.call(context, pluginId, "catalog", "catalog"))
-        val genres = try {
+        val cs = isCs(context, pluginId)
+        val categories = parseEntries(
+            if (cs) csCall(context, pluginId) { CloudStreamEngine.catalogJson(context, pluginId) }
+            else PluginJsEngine.call(context, pluginId, "catalog", "catalog")
+        )
+        val genres = if (cs) emptyList() else try {
             parseEntries(PluginJsEngine.call(context, pluginId, "catalog", "genres"))
         } catch (_: PluginException) {
             emptyList()
@@ -210,12 +239,16 @@ object MediaProviderRepository {
     suspend fun loadPosts(context: Context, pluginId: String, filter: String, page: Int, force: Boolean = false): List<MediaPost> {
         val key = "$pluginId|$filter|$page"
         if (!force) posts[key]?.let { return it }
-        val args = org.json.JSONObject()
-            .put("filter", filter)
-            .put("page", page)
-            .put("providerValue", pluginId)
-            .toString()
-        val json = gate.withPermit { PluginJsEngine.call(context, pluginId, "posts", "getPosts", args) }
+        val json = if (isCs(context, pluginId)) {
+            gate.withPermit { csCall(context, pluginId) { CloudStreamEngine.postsJson(context, pluginId, filter, page) } }
+        } else {
+            val args = org.json.JSONObject()
+                .put("filter", filter)
+                .put("page", page)
+                .put("providerValue", pluginId)
+                .toString()
+            gate.withPermit { PluginJsEngine.call(context, pluginId, "posts", "getPosts", args) }
+        }
         val list = parsePosts(json)
         posts[key] = list
         return list
@@ -223,12 +256,16 @@ object MediaProviderRepository {
 
     /** Search inside one plugin (the plugin's own getSearchPosts). Not cached. */
     suspend fun searchPosts(context: Context, pluginId: String, query: String, page: Int): List<MediaPost> {
-        val args = org.json.JSONObject()
-            .put("searchQuery", query)
-            .put("page", page)
-            .put("providerValue", pluginId)
-            .toString()
-        val json = gate.withPermit { PluginJsEngine.call(context, pluginId, "posts", "getSearchPosts", args) }
+        val json = if (isCs(context, pluginId)) {
+            gate.withPermit { csCall(context, pluginId) { CloudStreamEngine.searchJson(context, pluginId, query, page) } }
+        } else {
+            val args = org.json.JSONObject()
+                .put("searchQuery", query)
+                .put("page", page)
+                .put("providerValue", pluginId)
+                .toString()
+            gate.withPermit { PluginJsEngine.call(context, pluginId, "posts", "getSearchPosts", args) }
+        }
         return parsePosts(json)
     }
 

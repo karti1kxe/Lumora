@@ -1,14 +1,27 @@
 package com.example.util.media
 
-/** One provider plugin listed in a repository's manifest.json (Vega-style). */
+/** One provider plugin listed in a repository: a Vega manifest.json entry, or a CloudStream plugins.json entry. */
 data class MediaPluginInfo(
     val value: String,
     val name: String,
     val version: String,
     val icon: String,
     val type: String,
-    val installedAt: Long = 0L
-)
+    val installedAt: Long = 0L,
+    /** [MediaPluginInfo.ENGINE_VEGA] (JavaScript provider) or [MediaPluginInfo.ENGINE_CLOUDSTREAM] (a CloudStream .cs3 extension). */
+    val engine: String = ENGINE_VEGA,
+    /** CloudStream only: where the .cs3 file is downloaded from. */
+    val url: String = "",
+    /** CloudStream only: the "sha256-..." the repository lists for the .cs3 file (empty = not checked). */
+    val fileHash: String = ""
+) {
+    val isCloudStream: Boolean get() = engine == ENGINE_CLOUDSTREAM
+
+    companion object {
+        const val ENGINE_VEGA = "vega"
+        const val ENGINE_CLOUDSTREAM = "cloudstream"
+    }
+}
 
 /** A category row of a plugin (e.g. "New", "Netflix") or one of its genres. [filter] is passed back to the plugin. */
 data class MediaCatalogEntry(val title: String, val filter: String)

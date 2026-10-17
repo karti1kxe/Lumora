@@ -97,6 +97,8 @@ android {
   packaging {
     resources {
       excludes += "/META-INF/{AL2.0,LGPL2.1}"
+      // CloudStream runtime libraries (cloudstream-lib) bring multi-release jars with identical entries
+      pickFirsts += listOf("META-INF/versions/**", "META-INF/*.kotlin_module")
       excludes += listOf("META-INF/DEPENDENCIES", "META-INF/INDEX.LIST", "META-INF/LICENSE*", "META-INF/NOTICE*", "META-INF/*.kotlin_module.bak")
     }
     jniLibs {
@@ -225,6 +227,8 @@ dependencies {
   // implementation(libs.retrofit)
   implementation(libs.androidx.media)
   implementation(libs.mpv.android.lib)
+  // CloudStream extension runtime (.cs3 providers, Network > Media > CloudStream repositories)
+  implementation(project(":cloudstream-lib"))
   // yt-dlp for Android (Network tab): resolves YouTube and the other sites yt-dlp supports to playable stream URLs.
   implementation(libs.youtubedl.android.library)
   // libtorrent4j (github.com/aldenml/libtorrent4j): Torrent / magnet video streaming (util/TorrentStreamEngine.kt).

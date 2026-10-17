@@ -229,7 +229,7 @@ fun MediaPluginManager(
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                     if (repoUrl.isEmpty()) {
                         Text(
-                            text = "Provider plugins URL...",
+                            text = "Vega or CloudStream repository link...",
                             fontSize = 15.sp,
                             color = secondaryText.copy(alpha = 0.8f),
                             maxLines = 1,
