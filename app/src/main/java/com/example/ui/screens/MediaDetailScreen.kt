@@ -215,7 +215,7 @@ fun MediaDetailScreen(
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
-    val pageBg = MaterialTheme.colorScheme.background
+    val pageBg = Color.Transparent
 
     // ---- title details (getMeta) ----
     var info by remember(plugin.value, post.link) { mutableStateOf<MediaInfo?>(null) }
@@ -478,7 +478,7 @@ fun MediaDetailScreen(
                         .padding(vertical = 6.dp)
                         .clip(cardShape)
                         .background(surfaceColor)
-                        .border(1.5.dp, AccentGradient, cardShape)
+                        .then(if (isDark) Modifier.border(1.5.dp, AccentGradient, cardShape) else Modifier.border(1.5.dp, borderColor, cardShape))
                         .padding(1.5.dp)
                 ) {
                     Box(

@@ -496,7 +496,7 @@ fun FloatingDirectoryPickerSheet(
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(14.dp))
                                         .background(if (isDark) Color(0xFF1E293B).copy(alpha = 0.40f) else Color(0xFFF1F5F9).copy(alpha = 0.70f))
-                                        .border(1.dp, borderColor.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+                                        .border(1.dp, if (isDark) borderColor.copy(alpha = 0.6f) else borderColor, RoundedCornerShape(14.dp))
                                         .clickable {
                                             if (item.isDirectory) {
                                                 currentDir = item.file
@@ -581,7 +581,7 @@ fun FloatingDirectoryPickerSheet(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
                             .background(if (isDark) Color(0x1A38BDF8) else Color(0x150284C7))
-                            .border(1.dp, borderColor.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                            .border(1.dp, if (isDark) borderColor.copy(alpha = 0.5f) else borderColor, RoundedCornerShape(16.dp))
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -613,7 +613,7 @@ fun FloatingDirectoryPickerSheet(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
                             .background(if (isDark) Color(0xFF1E293B).copy(alpha = 0.40f) else Color(0xFFF1F5F9).copy(alpha = 0.70f))
-                            .border(1.dp, borderColor.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                            .border(1.dp, if (isDark) borderColor.copy(alpha = 0.5f) else borderColor, RoundedCornerShape(16.dp))
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {

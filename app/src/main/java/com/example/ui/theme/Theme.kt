@@ -69,8 +69,13 @@ fun VideoPlayerTheme(
     // Light or Dark chosen by hand: folder / video cards (and every card surface) use the "ice" tone of the Sort & View panel.
     val systemMode = themeMode == ThemeMode.SYSTEM
     com.example.ui.components.LumoraSurfaceStyle.systemMode = systemMode
-    if (!systemMode) {
+    // System: white surfaces with an ice outline. Light chosen by hand: ice surfaces with a pure white outline.
+    if (systemMode) {
+        LightGlassSurface = Color.White
+        LightGlassBorder = Color(0xFFDAE3E9)
+    } else {
         LightGlassSurface = Color(0xFFDAE3E9)
+        LightGlassBorder = Color.White
     }
 
     if (effectiveAmoled) {

@@ -118,7 +118,7 @@ fun MediaPluginManager(
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
-    val outerBg = if (isDark) Color.White.copy(alpha = 0.04f) else Color(0xFF0F172A).copy(alpha = 0.035f)
+    val outerBg = Color.Transparent
 
     val tick by MediaPluginStore.changes.collectAsState()
     val manifest = remember(tick) { MediaPluginStore.getManifest(context) }

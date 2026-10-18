@@ -539,6 +539,8 @@ fun HomeScreen(
         DarkBackgroundStart
     } else if (isDark) {
         Color(0xFF1B2630)
+    } else if (uiState.themeMode == ThemeMode.SYSTEM) {
+        Color.White
     } else {
         Color(0xFFDAE3E9)
     }
@@ -2870,10 +2872,10 @@ fun HomeScreen(
                             if (isDark) {
                                 Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f)))
                             } else {
-                                Brush.linearGradient(listOf(Color.White.copy(alpha = 0.95f), Color(0xFFF1F5F9).copy(alpha = 0.95f)))
+                                Brush.linearGradient(listOf(com.example.ui.theme.LightGlassSurface, com.example.ui.theme.LightGlassSurface))
                             }
                         )
-                        .border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape)
+                        .then(if (isDark) Modifier.border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape) else Modifier.border(1.5.dp, com.example.ui.theme.LightGlassBorder, fabShape))
                         .bounceClick(scaleDown = 0.88f) {
                             // Resume = the video that was really watched LAST in this folder, from the exact
                             // second it was left at (the player restores the saved position by itself).
@@ -2941,8 +2943,8 @@ fun HomeScreen(
                         .size(60.dp)
                         .shadow(18.dp, fabShape, ambientColor = com.example.ui.theme.AccentSkyBlue.copy(alpha = 0.50f), spotColor = com.example.ui.theme.AccentPink.copy(alpha = 0.60f))
                         .clip(fabShape)
-                        .background(if (isDark) Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f))) else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.95f), Color(0xFFF1F5F9).copy(alpha = 0.95f))))
-                        .border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape)
+                        .background(if (isDark) Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f))) else Brush.linearGradient(listOf(com.example.ui.theme.LightGlassSurface, com.example.ui.theme.LightGlassSurface)))
+                        .then(if (isDark) Modifier.border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape) else Modifier.border(1.5.dp, com.example.ui.theme.LightGlassBorder, fabShape))
                         .bounceClick(scaleDown = 0.88f) {
                             coroutineScope.launch(Dispatchers.IO) {
                                 val folderPath = selectedMusicFolder?.path
@@ -2978,8 +2980,8 @@ fun HomeScreen(
                         .size(60.dp)
                         .shadow(18.dp, fabShape, ambientColor = com.example.ui.theme.AccentSkyBlue.copy(alpha = 0.50f), spotColor = com.example.ui.theme.AccentPink.copy(alpha = 0.60f))
                         .clip(fabShape)
-                        .background(if (isDark) Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f))) else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.95f), Color(0xFFF1F5F9).copy(alpha = 0.95f))))
-                        .border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape)
+                        .background(if (isDark) Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f))) else Brush.linearGradient(listOf(com.example.ui.theme.LightGlassSurface, com.example.ui.theme.LightGlassSurface)))
+                        .then(if (isDark) Modifier.border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape) else Modifier.border(1.5.dp, com.example.ui.theme.LightGlassBorder, fabShape))
                         .bounceClick(scaleDown = 0.88f) {
                             val pl = selectedPlaylist ?: return@bounceClick
                             coroutineScope.launch(Dispatchers.IO) {
@@ -3020,8 +3022,8 @@ fun HomeScreen(
                         .height(60.dp)
                         .shadow(18.dp, fabShape, ambientColor = com.example.ui.theme.AccentSkyBlue.copy(alpha = 0.50f), spotColor = com.example.ui.theme.AccentPink.copy(alpha = 0.60f))
                         .clip(fabShape)
-                        .background(if (isDark) Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f))) else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.95f), Color(0xFFF1F5F9).copy(alpha = 0.95f))))
-                        .border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape)
+                        .background(if (isDark) Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f))) else Brush.linearGradient(listOf(com.example.ui.theme.LightGlassSurface, com.example.ui.theme.LightGlassSurface)))
+                        .then(if (isDark) Modifier.border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape) else Modifier.border(1.5.dp, com.example.ui.theme.LightGlassBorder, fabShape))
                         .bounceClick(scaleDown = 0.92f) { playlistCreateRequest++ }
                         .padding(horizontal = 20.dp)
                         .testTag("playlist_create_fab"),

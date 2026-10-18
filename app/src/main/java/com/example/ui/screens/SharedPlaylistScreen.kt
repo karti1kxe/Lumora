@@ -485,10 +485,10 @@ fun SharedPlaylistScreen(
                     if (isDark) {
                         Brush.linearGradient(listOf(Color(0xFF1E293B).copy(alpha = 0.95f), Color(0xFF0F172A).copy(alpha = 0.95f)))
                     } else {
-                        Brush.linearGradient(listOf(Color.White.copy(alpha = 0.95f), Color(0xFFF1F5F9).copy(alpha = 0.95f)))
+                        Brush.linearGradient(listOf(com.example.ui.theme.LightGlassSurface, com.example.ui.theme.LightGlassSurface))
                     }
                 )
-                .border(1.5.dp, AccentGradient, fabShape)
+                .then(if (isDark) Modifier.border(1.5.dp, com.example.ui.theme.AccentGradient, fabShape) else Modifier.border(1.5.dp, com.example.ui.theme.LightGlassBorder, fabShape))
                 .clickable {
                     // Automatic playback of either the top song or a random song from the playlist
                     playPlaylist(startIndex = 0, isShuffle = false)

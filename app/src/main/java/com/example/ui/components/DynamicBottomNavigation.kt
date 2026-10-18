@@ -62,6 +62,7 @@ import com.example.ui.theme.DarkGlassBorder
 import com.example.ui.theme.DarkTextPrimary
 import com.example.ui.theme.DarkTextSecondary
 import com.example.ui.theme.LightGlassBorder
+import com.example.ui.theme.LightGlassSurface
 import com.example.ui.theme.LightTextPrimary
 import com.example.ui.theme.LightTextSecondary
 
@@ -149,14 +150,14 @@ fun DynamicBottomNavigation(
         if (alphaFactor >= 0.99f) Color(0xFF0B1120)
         else Color(0xFF0B1120).copy(alpha = (0.55f + 0.40f * alphaFactor).coerceIn(0.35f, 0.95f))
     } else {
-        if (alphaFactor >= 0.99f) Color(0xFFFFFFFF)
-        else Color(0xFFFFFFFF).copy(alpha = (0.60f + 0.35f * alphaFactor).coerceIn(0.40f, 0.96f))
+        if (alphaFactor >= 0.99f) LightGlassSurface
+        else LightGlassSurface.copy(alpha = (0.60f + 0.35f * alphaFactor).coerceIn(0.40f, 0.96f))
     }
 
     val borderColor = if (isDark) {
         DarkGlassBorder.copy(alpha = (0.30f + 0.40f * alphaFactor).coerceIn(0.25f, 0.85f))
     } else {
-        LightGlassBorder.copy(alpha = (0.35f + 0.45f * alphaFactor).coerceIn(0.30f, 0.90f))
+        LightGlassBorder
     }
 
     val pillShape = RoundedCornerShape(32.dp)

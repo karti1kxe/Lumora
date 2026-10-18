@@ -226,7 +226,6 @@ fun CustomPlaylistsTabContent(
         onSelectionModeChange(isSelectionMode)
     }
 
-    var showCreatePlaylistDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var renamePlaylistName by remember { mutableStateOf("") }
     var renamePlaylistTargetId by remember { mutableStateOf<String?>(null) }
@@ -1275,7 +1274,7 @@ fun CustomPlaylistsTabContent(
                             modifier = Modifier
                                 .clip(CircleShape)
                                 .background(AccentGradient)
-                                .clickable { showCreatePlaylistDialog = true }
+                                .clickable { playlistSheetStage = 1 }
                                 .padding(horizontal = 14.dp, vertical = 7.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1331,7 +1330,7 @@ fun CustomPlaylistsTabContent(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(14.dp))
                                         .background(AccentGradient)
-                                        .clickable { showCreatePlaylistDialog = true }
+                                        .clickable { playlistSheetStage = 1 }
                                         .padding(horizontal = 16.dp, vertical = 10.dp)
                                 ) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1815,25 +1814,6 @@ fun CustomPlaylistsTabContent(
                     }
                 )
             }
-        }
-
-        // Create Playlist Dialog
-        if (showCreatePlaylistDialog) {
-            RenameDialog(
-                title = if (selectedMediaTab == "AUDIO") "Create Audio Playlist" else "Create Video Playlist",
-                initialText = "",
-                isDark = isDark,
-                alphaRatio = (uiState.glassBlurTransparency / 100f).coerceIn(0.2f, 1f),
-                onDismiss = { showCreatePlaylistDialog = false },
-                onConfirm = { name ->
-                    showCreatePlaylistDialog = false
-                    if (name.isNotBlank()) {
-                        PlaylistManager.createPlaylist(context, name, mediaType = selectedMediaTab)
-                        refreshPlaylists()
-                        Toast.makeText(context, "Playlist created: $name", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            )
         }
 
         // ---- Floating "+ Create Playlist": translucent bottom sheets ----
