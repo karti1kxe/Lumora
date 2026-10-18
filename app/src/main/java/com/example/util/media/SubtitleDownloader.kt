@@ -80,46 +80,4 @@ object SubtitleDownloader {
         file.writeBytes(body)
         return file
     }
-
-    /**
-     * A segmented HLS subtitle (a playlist of WebVTT pieces, like the subtitle renditions of a master playlist) as one
-     * local .vtt file, or null when it could not be fetched. A playlist that points straight at a .vtt file works too.
-     */
-    fun downloadHls(context: Context, playlistUrl: String, headers: Map<String, String> = emptyMap()): File? {
-        if (!playlistUrl.startsWith("http://", true) && !playlistUrl.startsWith("https://", true)) return null
-        val dir = File(context.applicationContext.cacheDir, "plugin_subtitles").apply { mkdirs() }
-        val key = MessageDigest.getInstance("MD5").digest(("hls:" + playlistUrl).toByteArray()).joinToString("") { "%02x".format(it) }
-        val file = File(dir, "$key.vtt")
-        if (file.length() > 0L) return file
-        fun get(url: String): ByteArray? {
-            var body = try { fetch(client, url, headers) } catch (_: Throwable) { null }
-            if (body == null) {
-                val proxy = try { NetworkBypass.okHttpProxy(context) } catch (_: Throwable) { null }
-                if (proxy != null) body = try { fetch(client.newBuilder().proxy(proxy).build(), url, headers) } catch (_: Throwable) { null }
-            }
-            return body
-        }
-        val listing = get(playlistUrl) ?: return null
-        val text = String(listing, Charsets.UTF_8)
-        if (!text.trimStart().startsWith("#EXTM3U")) {
-            // not a playlist: the link is already the subtitle itself
-            file.writeBytes(listing)
-            return file
-        }
-        val base = try { java.net.URI(playlistUrl) } catch (_: Throwable) { return null }
-        val segments = text.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
-            .map { try { base.resolve(it).toString() } catch (_: Throwable) { it } }
-        if (segments.isEmpty()) return null
-        val sb = StringBuilder("WEBVTT\n\n")
-        for (seg in segments) {
-            val part = get(seg) ?: continue
-            val body = String(part, Charsets.UTF_8).replace("\r\n", "\n").removePrefix("\uFEFF")
-            // every segment repeats the WEBVTT header (up to its first blank line): only the cues are kept
-            val cues = if (body.trimStart().startsWith("WEBVTT")) body.substringAfter("\n\n", "") else body
-            if (cues.isNotBlank()) sb.append(cues.trim()).append("\n\n")
-        }
-        if (sb.length <= 8) return null
-        file.writeText(sb.toString())
-        return file
-    }
 }

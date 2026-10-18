@@ -231,8 +231,6 @@ dependencies {
   implementation(project(":cloudstream-lib"))
   // yt-dlp for Android (Network tab): resolves YouTube and the other sites yt-dlp supports to playable stream URLs.
   implementation(libs.youtubedl.android.library)
-  // ffmpeg for yt-dlp: merges several audio languages + subtitles + fonts into one .mkv (util/FfmpegMuxer.kt)
-  implementation(libs.youtubedl.android.ffmpeg)
   // libtorrent4j (github.com/aldenml/libtorrent4j): Torrent / magnet video streaming (util/TorrentStreamEngine.kt).
   // The Java API plus one native library per ABI (the APK splits above pick the matching one).
   implementation(libs.libtorrent4j)

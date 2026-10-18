@@ -628,12 +628,8 @@ class MpvPlayerController {
                     view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=4,icy=0" + proxyOpt)
                     try { view.mpv.setPropertyString("tls-verify", "no") } catch (_: Throwable) {}
                     try { view.mpv.setPropertyString("stream-buffer-size", "1MiB") } catch (_: Throwable) {}
-                    // A provider (Vega / CloudStream) movie is not a live channel: it often carries several audio languages and
-                    // subtitle tracks (MKV / HLS audio + subtitle groups). The tiny IPTV probe stopped before they were found, so
-                    // they never reached the track lists. Provider streams get a probe big enough to list every track.
-                    val providerStream = currentFilePath?.let { com.example.util.media.PluginPlaybackSessions.get(it) != null } == true
-                    try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", if (providerStream) "10" else "2") } catch (_: Throwable) {}
-                    try { view.mpv.setPropertyString("demuxer-lavf-probesize", if (providerStream) "20000000" else "2000000") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "2") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-probesize", "2000000") } catch (_: Throwable) {}
                     // HLS channels whose segments use odd file extensions (.jpg/.txt/none) are refused by ffmpeg
                     // unless extensions are allowed - a common reason why "some channels never play".
                     try { view.mpv.setPropertyString("demuxer-lavf-o", "allowed_extensions=ALL,extension_picky=0,fflags=+discardcorrupt" + proxyOpt) } catch (_: Throwable) {}

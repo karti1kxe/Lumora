@@ -305,16 +305,7 @@ object MediaPlayback {
     }
 
     /** One row of the download list: a file the website offers (server, quality, format, size). */
-    data class DownloadOption(
-        val stream: MediaStream,
-        val title: String,
-        val detail: String,
-        val quality: String?,
-        /** Total size of the download in bytes when known / estimated (all selected tracks together), 0 = unknown. */
-        val estimatedBytes: Long = 0L,
-        /** The other audio languages and the subtitles that are downloaded and merged into the file. */
-        val extraTracks: List<com.example.util.ExtraTrack> = emptyList()
-    )
+    data class DownloadOption(val stream: MediaStream, val title: String, val detail: String, val quality: String?)
 
     private val QUALITY_RE = Regex("(?i)(?<![0-9a-zA-Z])(2160|1440|1080|720|576|480|360|240)p(?![a-zA-Z])")
 
@@ -381,66 +372,27 @@ object MediaPlayback {
         }
     }
 
-    /** The subtitles the plugin listed next to a stream, as tracks to merge into the downloaded file. */
-    private fun pluginSubTracks(s: MediaStream): List<com.example.util.ExtraTrack> =
-        s.subtitles.distinctBy { it.uri }.map { sub ->
-            com.example.util.ExtraTrack("sub", sub.title.ifBlank { sub.language }.ifBlank { "Subtitle" }, sub.language, sub.uri, false)
-        }
-
     private fun optionsOf(s: MediaStream): List<DownloadOption> {
         val format = formatOf(s)
         val headers = s.headers
-        val pluginSubs = pluginSubTracks(s)
         if (format == "HLS") {
-            // a master playlist is opened to list its qualities (each one downloads its own rendition) together with the
-            // audio languages and subtitles that belong to it: they are downloaded too and merged into the file
-            val master = HlsVariants.fetchMaster(s.link, headers, null, 4000)
-            if (master != null && master.variants.isNotEmpty()) {
-                val durationSec = HlsVariants.fetchDurationSec(master.variants.first().uri, headers, 5000)
-                return master.variants.map { v ->
-                    val audios = master.renditions
-                        .filter { it.type == "AUDIO" && (v.audioGroup.isBlank() || it.groupId == v.audioGroup) }
-                        .distinctBy { it.uri }
-                    val hlsSubs = master.renditions
-                        .filter { it.type == "SUBTITLES" && (v.subtitleGroup.isBlank() || it.groupId == v.subtitleGroup) }
-                        .distinctBy { it.uri }
-                    val tracks = audios.map { com.example.util.ExtraTrack("audio", it.name, it.language, it.uri, true) } +
-                        hlsSubs.map { com.example.util.ExtraTrack("sub", it.name, it.language, it.uri, true) } +
-                        pluginSubs
-                    // BANDWIDTH already counts the audio of the variant; the separate audio languages come on top
-                    val bytes = if (durationSec > 0.0 && v.bandwidth > 0L) {
-                        (v.bandwidth / 8.0 * durationSec).toLong() + audios.size * (16_000.0 * durationSec).toLong()
-                    } else 0L
-                    val audioCount = audios.size
-                    val subCount = tracks.count { it.kind == "sub" }
+            // a master playlist is opened to list its qualities (each one downloads its own rendition)
+            val variants = HlsVariants.fetch(s.link, headers, null, 4000)
+            if (variants.isNotEmpty()) {
+                return variants.map { v ->
                     DownloadOption(
                         stream = s.copy(link = v.uri, type = "m3u8", quality = v.label, subtitles = emptyList(), alternatives = emptyList()),
                         title = s.server,
-                        detail = listOf(
-                            v.label, "HLS",
-                            if (bytes > 0L) "≈ " + formatSize(bytes) else v.bitrateText(),
-                            if (audioCount > 0) "$audioCount audio" else "",
-                            if (subCount > 0) "$subCount subs" else ""
-                        ).filter { it.isNotBlank() }.joinToString(" · "),
-                        quality = v.label,
-                        estimatedBytes = bytes,
-                        extraTracks = tracks
+                        detail = listOf(v.label, "HLS", v.bitrateText()).filter { it.isNotBlank() }.joinToString(" · "),
+                        quality = v.label
                     )
                 }
             }
         }
         val quality = qualityOf(s)
         val size = if (format == "Torrent" || format == "HLS" || format == "DASH") -1L else probeSize(s.link, headers)
-        val detail = listOfNotNull(
-            quality, format, size.takeIf { it > 0L }?.let { formatSize(it) },
-            pluginSubs.size.takeIf { it > 0 }?.let { "$it subs" }
-        ).joinToString(" · ")
-        return listOf(
-            DownloadOption(
-                s.copy(subtitles = emptyList(), alternatives = emptyList()), s.server, detail, quality,
-                estimatedBytes = size.coerceAtLeast(0L), extraTracks = pluginSubs
-            )
-        )
+        val detail = listOfNotNull(quality, format, size.takeIf { it > 0L }?.let { formatSize(it) }).joinToString(" · ")
+        return listOf(DownloadOption(s.copy(subtitles = emptyList(), alternatives = emptyList()), s.server, detail, quality))
     }
 
     /** The download list of a movie / episode: every file / quality the website offers, best quality first, with sizes when known. */
@@ -493,14 +445,7 @@ object MediaPlayback {
     }
 
     /** Starts the download right away (no sheet); the plugin's headers are sent with it. Returns the status message. */
-    fun startDownload(
-        context: Context,
-        plugin: MediaPluginInfo,
-        title: String,
-        poster: String,
-        stream: MediaStream,
-        option: DownloadOption? = null
-    ): String {
+    fun startDownload(context: Context, plugin: MediaPluginInfo, title: String, poster: String, stream: MediaStream): String {
         val request = DownloadRequest(
             source = stream.link,
             title = title,
@@ -508,10 +453,9 @@ object MediaPlayback {
             isAudio = false,
             formatSpec = null,
             container = null,
-            estimatedBytes = option?.estimatedBytes ?: 0L,
+            estimatedBytes = 0L,
             thumbnailUrl = poster.ifBlank { null },
-            headers = stream.headers,
-            extraTracks = option?.extraTracks ?: emptyList()
+            headers = stream.headers
         )
         return try {
             DownloadManager.enqueueCustom(context, request)

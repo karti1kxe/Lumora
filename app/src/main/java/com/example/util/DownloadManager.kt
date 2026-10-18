@@ -139,8 +139,7 @@ object DownloadManager {
                 formatSpec = req.formatSpec,
                 container = req.container,
                 thumbnailUrl = req.thumbnailUrl,
-                headers = req.headers,
-                extraTracks = req.extraTracks
+                headers = req.headers
             )
         )
         // Direct provider links often have no size metadata in the plugin response. Probe the origin in
@@ -555,12 +554,6 @@ object DownloadManager {
                 ?: throw IllegalStateException("Nothing was downloaded")
         }
 
-        // media-plugin streams: the other audio languages, the subtitles and their fonts are merged into the file
-        if (!item.isAudio && item.extraTracks.isNotEmpty()) {
-            out = withContext(Dispatchers.IO) { mergeExtraTracks(app, id, item, dir, out, pid, isCancelled) }
-            if (stops.containsKey(id)) return
-        }
-
         if (item.isAudio) {
             DownloadStore.update(app, id, persist = true) {
                 it.copy(status = DownloadStatus.PROCESSING, speedBps = 0L, etaSec = -1L, note = "Adding cover picture…")
@@ -579,70 +572,6 @@ object DownloadManager {
             ?: throw IllegalStateException("Could not save the file (is the storage full?)")
         complete(app, id, saved)
         try { dir.deleteRecursively() } catch (_: Throwable) {}
-    }
-
-    /**
-     * Downloads the extra audio languages and subtitles of [item] and merges them (with the fonts of ASS subtitles) into
-     * one Matroska file together with [media]. Never fails the download: when ffmpeg is missing or anything goes wrong,
-     * the plain [media] file is returned.
-     */
-    private fun mergeExtraTracks(app: Context, id: String, item: DownloadItem, dir: File, media: File, pid: String, isCancelled: () -> Boolean): File {
-        if (!FfmpegMuxer.isAvailable(app)) {
-            Log.w(TAG, "ffmpeg is not available: extra audio / subtitle tracks are skipped")
-            return media
-        }
-        fun note(text: String) {
-            DownloadStore.update(app, id, persist = true) {
-                it.copy(status = DownloadStatus.PROCESSING, speedBps = 0L, etaSec = -1L, note = text)
-            }
-        }
-        val audios = ArrayList<FfmpegMuxer.Part>()
-        val subs = ArrayList<FfmpegMuxer.Part>()
-        try {
-            val audioTracks = item.extraTracks.filter { it.kind == "audio" }
-            audioTracks.forEachIndexed { i, t ->
-                if (isCancelled()) return media
-                note("Downloading audio ${i + 1} of ${audioTracks.size}…")
-                try {
-                    downloadOnce(item.copy(source = t.url), "b", dir, pid, AtomicReference<String?>(null), "xa$i")
-                    finished(dir, "xa$i")?.let { audios.add(FfmpegMuxer.Part(it, t.title, t.language)) }
-                } catch (c: Throwable) {
-                    if (isCancelled()) return media
-                    Log.w(TAG, "audio track ${t.title} could not be downloaded", c)
-                }
-            }
-            val subTracks = item.extraTracks.filter { it.kind == "sub" }
-            subTracks.forEachIndexed { j, t ->
-                if (isCancelled()) return media
-                note("Downloading subtitles ${j + 1} of ${subTracks.size}…")
-                try {
-                    val file = if (t.hls) com.example.util.media.SubtitleDownloader.downloadHls(app, t.url, item.headers)
-                    else com.example.util.media.SubtitleDownloader.download(app, t.url, item.headers)
-                    if (file != null) {
-                        val copy = File(dir, "xs$j.${file.extension.ifBlank { "srt" }}")
-                        file.copyTo(copy, overwrite = true)
-                        subs.add(FfmpegMuxer.Part(copy, t.title, t.language))
-                    }
-                } catch (c: Throwable) {
-                    Log.w(TAG, "subtitle ${t.title} could not be downloaded", c)
-                }
-            }
-            if (isCancelled() || (audios.isEmpty() && subs.isEmpty())) return media
-            note("Merging audio, subtitles and fonts…")
-            val merged = File(dir, "merged.mkv")
-            val ok = FfmpegMuxer.mux(app, media, audios, subs, merged, isCancelled)
-            if (!ok || !merged.isFile || merged.length() <= 0L) {
-                merged.delete()
-                return media
-            }
-            media.delete()
-            audios.forEach { it.file.delete() }
-            subs.forEach { it.file.delete() }
-            return merged
-        } catch (t: Throwable) {
-            Log.w(TAG, "extra tracks could not be merged", t)
-            return media
-        }
     }
 
     /**

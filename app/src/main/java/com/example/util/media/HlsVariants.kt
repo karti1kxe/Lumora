@@ -13,10 +13,7 @@ data class HlsVariant(
     val frameRate: Double,
     /** Video codec only (e.g. avc1.640028), blank when the playlist does not say. */
     val videoCodec: String,
-    val uri: String,
-    /** GROUP-ID of the EXT-X-MEDIA audio / subtitle renditions this variant plays with (blank = none / muxed in). */
-    val audioGroup: String = "",
-    val subtitleGroup: String = ""
+    val uri: String
 ) {
     /** "1080p", or the bitrate when the playlist has no resolution. */
     val label: String get() = if (height > 0) "${height}p" else bitrateText()
@@ -43,20 +40,6 @@ data class HlsVariant(
     ).filter { it.isNotBlank() }.joinToString(" · ")
 }
 
-/** One alternate rendition (EXT-X-MEDIA) of a master playlist that has its own playlist: an audio language or a subtitle. */
-data class HlsRendition(
-    /** "AUDIO" or "SUBTITLES". */
-    val type: String,
-    val groupId: String,
-    val name: String,
-    val language: String,
-    val uri: String,
-    val isDefault: Boolean
-)
-
-/** The qualities and the audio / subtitle renditions of a master playlist. */
-data class HlsMaster(val variants: List<HlsVariant>, val renditions: List<HlsRendition>)
-
 /** Reads the renditions (the quality list) out of an HLS master playlist. */
 object HlsVariants {
     fun looksLikeHls(link: String, type: String?): Boolean {
@@ -74,27 +57,6 @@ object HlsVariants {
 
     /** Like [fetch], but null when the request itself failed (so the caller can try another route); empty = answered, no master playlist. */
     fun fetchResult(url: String, headers: Map<String, String>, proxy: Proxy? = null, timeoutMs: Int = 7000): List<HlsVariant>? {
-        val (text, base) = fetchText(url, headers, proxy, timeoutMs) ?: return null
-        return parseMaster(text, base)
-    }
-
-    /** The quality list together with the audio / subtitle renditions; null when the request itself failed. */
-    fun fetchMaster(url: String, headers: Map<String, String>, proxy: Proxy? = null, timeoutMs: Int = 7000): HlsMaster? {
-        val (text, base) = fetchText(url, headers, proxy, timeoutMs) ?: return null
-        return HlsMaster(parseMaster(text, base), parseRenditions(text, base))
-    }
-
-    /** Length of a media playlist in seconds (sum of its EXTINF entries); 0 when it cannot be read. */
-    fun fetchDurationSec(url: String, headers: Map<String, String>, timeoutMs: Int = 6000): Double {
-        val (text, _) = fetchText(url, headers, null, timeoutMs, maxBytes = 8 * 1024 * 1024) ?: return 0.0
-        var sum = 0.0
-        for (line in text.lineSequence()) {
-            if (line.startsWith("#EXTINF:")) sum += line.substringAfter(':').substringBefore(',').trim().toDoubleOrNull() ?: 0.0
-        }
-        return sum
-    }
-
-    private fun fetchText(url: String, headers: Map<String, String>, proxy: Proxy?, timeoutMs: Int, maxBytes: Int = 2 * 1024 * 1024): Pair<String, String>? {
         return try {
             val conn = (URL(url).openConnection(proxy ?: Proxy.NO_PROXY) as HttpURLConnection).apply {
                 connectTimeout = timeoutMs
@@ -114,40 +76,20 @@ object HlsVariants {
                 val text = conn.inputStream.use { ins ->
                     val bos = java.io.ByteArrayOutputStream()
                     val buf = ByteArray(16 * 1024)
-                    while (bos.size() < maxBytes) {
+                    while (bos.size() < 2 * 1024 * 1024) {
                         val n = ins.read(buf)
                         if (n < 0) break
                         bos.write(buf, 0, n)
                     }
                     bos.toString("UTF-8")
                 }
-                text to conn.url.toString()
+                parseMaster(text, conn.url.toString())
             } finally {
                 conn.disconnect()
             }
         } catch (_: Throwable) {
             null
         }
-    }
-
-    /** The EXT-X-MEDIA audio / subtitle renditions that have their own playlist (renditions muxed into the variant are not listed). */
-    fun parseRenditions(text: String, baseUrl: String): List<HlsRendition> {
-        if (!text.trimStart().startsWith("#EXTM3U")) return emptyList()
-        val out = ArrayList<HlsRendition>()
-        for (raw in text.lines()) {
-            val line = raw.trim()
-            if (!line.startsWith("#EXT-X-MEDIA:")) continue
-            val attrs = parseAttributes(line.substringAfter(':'))
-            val type = attrs["TYPE"].orEmpty().uppercase()
-            if (type != "AUDIO" && type != "SUBTITLES") continue
-            val uri = attrs["URI"].orEmpty()
-            if (uri.isBlank()) continue
-            val abs = try { URI(baseUrl).resolve(uri).toString() } catch (_: Throwable) { uri }
-            val lang = attrs["LANGUAGE"].orEmpty()
-            val name = attrs["NAME"].orEmpty().ifBlank { lang }.ifBlank { if (type == "AUDIO") "Audio" else "Subtitle" }
-            out.add(HlsRendition(type, attrs["GROUP-ID"].orEmpty(), name, lang, abs, attrs["DEFAULT"].equals("YES", true)))
-        }
-        return out
     }
 
     fun parseMaster(text: String, baseUrl: String): List<HlsVariant> {
@@ -175,7 +117,7 @@ object HlsVariants {
                             l.startsWith("vp9") || l.startsWith("av01") || l.startsWith("dvh")
                     }.orEmpty()
                     val abs = try { URI(baseUrl).resolve(uriLine).toString() } catch (_: Throwable) { uriLine }
-                    out.add(HlsVariant(bw, w, h, fps, video, abs, attrs["AUDIO"].orEmpty(), attrs["SUBTITLES"].orEmpty()))
+                    out.add(HlsVariant(bw, w, h, fps, video, abs))
                 }
                 i = j
             }

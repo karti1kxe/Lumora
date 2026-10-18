@@ -4,12 +4,20 @@ import com.example.R
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -25,6 +33,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -37,13 +47,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
@@ -51,11 +65,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.coerceAtLeast
-import androidx.compose.ui.unit.coerceAtMost
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.state.AppLanguage
+import kotlinx.coroutines.launch
 import com.example.ui.state.TabNavigationStyle
 import com.example.ui.theme.AccentGradient
 import com.example.ui.theme.AccentPink
@@ -162,7 +175,7 @@ fun DynamicBottomNavigation(
         LightGlassBorder
     }
 
-    val pillShape = RoundedCornerShape(32.dp)
+    val pillShape = RoundedCornerShape(28.dp)
 
     Box(
         modifier = modifier
@@ -178,7 +191,7 @@ fun DynamicBottomNavigation(
                 modifier = Modifier
                     .fillMaxWidth()
                     .widthIn(max = 560.dp)
-                    .height(64.dp)
+                    .height(56.dp)
                     .shadow(
                         elevation = 20.dp,
                         shape = pillShape,
@@ -194,10 +207,10 @@ fun DynamicBottomNavigation(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(0.95f)
-                        .height(48.dp)
-                        .clip(RoundedCornerShape(24.dp))
+                        .height(40.dp)
+                        .clip(RoundedCornerShape(20.dp))
                         .background(AccentGradient)
-                        .shadow(8.dp, RoundedCornerShape(24.dp), spotColor = AccentSkyBlue.copy(alpha = 0.4f))
+                        .shadow(8.dp, RoundedCornerShape(20.dp), spotColor = AccentSkyBlue.copy(alpha = 0.4f))
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
@@ -233,7 +246,7 @@ fun DynamicBottomNavigation(
                 modifier = Modifier
                     .fillMaxWidth()
                     .widthIn(max = 560.dp)
-                    .height(64.dp)
+                    .height(56.dp)
                     .shadow(
                         elevation = 20.dp,
                         shape = pillShape,
@@ -243,160 +256,168 @@ fun DynamicBottomNavigation(
                     .clip(pillShape)
                     .background(navBgColor)
                     .border(1.2.dp, borderColor, pillShape)
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                    .padding(horizontal = 6.dp, vertical = 5.dp),
                 contentAlignment = Alignment.Center
             ) {
-                // A single shared liquid-glass indicator travels between tabs. Rendering one
-                // surface (instead of four independently fading backgrounds) makes the gradient
-                // visibly flow to the next tab when the user swipes/taps.
                 androidx.compose.foundation.layout.BoxWithConstraints(
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(46.dp)
                 ) {
-                    // The selected tab grows to show its title to the right of the icon; every other tab is just
-                    // a centred icon in an equal slot, so all the icons sit exactly on the centre of their slot.
-                    val tabCount = activeTabs.size
+                    // The selected tab is wider (icon + label); every other tab is icon-only and
+                    // centred in its own slot. The indicator is computed from the same weights so
+                    // it is always exactly centred behind the selected tab.
+                    val selectedWeight = 2.25f
+                    val widthDp = maxWidth.value
+                    val totalWeight = (activeTabs.size - 1) + selectedWeight
                     val selectedIndex = activeTabs.indexOf(selectedTab).coerceAtLeast(0)
-                    val equalWidth = maxWidth / tabCount
-                    val selectedWidth = (maxWidth * 0.34f).coerceAtLeast(equalWidth).coerceAtMost(maxWidth - 32.dp * (tabCount - 1))
-                    val otherWidth = if (tabCount > 1) (maxWidth - selectedWidth) / (tabCount - 1) else maxWidth
-                    val navSpec: androidx.compose.animation.core.TweenSpec<androidx.compose.ui.unit.Dp> = when (tabNavigationStyle) {
-                        TabNavigationStyle.NONE -> tween(0)
-                        TabNavigationStyle.ELASTIC_SLIDE -> tween(320, easing = FastOutSlowInEasing)
-                        TabNavigationStyle.DEPTH_ZOOM -> tween(300, easing = FastOutSlowInEasing)
-                        TabNavigationStyle.FLIP_FADE -> tween(270, easing = FastOutSlowInEasing)
-                        TabNavigationStyle.MINIMAL_FADE, TabNavigationStyle.DEFAULT -> tween(300, easing = FastOutSlowInEasing)
+                    val targetLeft = widthDp * selectedIndex / totalWeight
+                    val targetRight = widthDp * (selectedIndex + selectedWeight) / totalWeight
+                    val restWidth = widthDp * selectedWeight / totalWeight
+
+                    // Liquid motion: the two edges of the blob are animated independently. The
+                    // leading edge snaps ahead (slightly overshooting), the trailing edge lags and
+                    // catches up, so the gradient stretches while travelling and then settles.
+                    val leftEdge = remember { Animatable(targetLeft) }
+                    val rightEdge = remember { Animatable(targetRight) }
+                    LaunchedEffect(targetLeft, targetRight, tabNavigationStyle) {
+                        if (tabNavigationStyle == TabNavigationStyle.NONE) {
+                            leftEdge.snapTo(targetLeft)
+                            rightEdge.snapTo(targetRight)
+                        } else {
+                            val movingRight = targetRight >= rightEdge.value
+                            val leadSpec = spring<Float>(
+                                dampingRatio = if (tabNavigationStyle == TabNavigationStyle.ELASTIC_SLIDE) 0.55f else 0.72f,
+                                stiffness = 520f
+                            )
+                            val lagSpec = spring<Float>(dampingRatio = 0.85f, stiffness = 170f)
+                            launch { leftEdge.animateTo(targetLeft, if (movingRight) lagSpec else leadSpec) }
+                            launch { rightEdge.animateTo(targetRight, if (movingRight) leadSpec else lagSpec) }
+                        }
                     }
-                    // Liquid motion: the edge of the highlight that leads the move is pulled quickly, the trailing edge
-                    // follows a moment later, so the highlight stretches and then settles back into its pill shape.
-                    val dirState = remember { intArrayOf(selectedIndex, 1) }
-                    if (dirState[0] != selectedIndex) {
-                        dirState[1] = if (selectedIndex > dirState[0]) 1 else -1
-                        dirState[0] = selectedIndex
-                    }
-                    val movingRight = dirState[1] > 0
-                    val noMotion = tabNavigationStyle == TabNavigationStyle.NONE
-                    val fastSpec: androidx.compose.animation.core.FiniteAnimationSpec<androidx.compose.ui.unit.Dp> =
-                        if (noMotion) androidx.compose.animation.core.snap()
-                        else spring(dampingRatio = 0.78f, stiffness = 520f)
-                    val slowSpec: androidx.compose.animation.core.FiniteAnimationSpec<androidx.compose.ui.unit.Dp> =
-                        if (noMotion) androidx.compose.animation.core.snap()
-                        else spring(dampingRatio = 0.86f, stiffness = 210f)
-                    val targetLeft = otherWidth * selectedIndex
-                    val targetRight = targetLeft + selectedWidth
-                    val indicatorLeft by animateDpAsState(
-                        targetValue = targetLeft,
-                        animationSpec = if (movingRight) slowSpec else fastSpec,
-                        label = "liquidIndicatorLeft"
+
+                    // Slowly drifting gradient phase gives the surface a floating, liquid shimmer.
+                    val gradientTransition = rememberInfiniteTransition(label = "liquidGradient")
+                    val gradientPhase by gradientTransition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(3200, easing = FastOutSlowInEasing),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "liquidGradientPhase"
                     )
-                    val indicatorRight by animateDpAsState(
-                        targetValue = targetRight,
-                        animationSpec = if (movingRight) fastSpec else slowSpec,
-                        label = "liquidIndicatorRight"
-                    )
-                    val animatedIndicatorX = indicatorLeft
-                    val indicatorWidth = (indicatorRight - indicatorLeft).coerceAtLeast(24.dp)
-                    val indicatorScale by animateFloatAsState(
-                        targetValue = if (tabNavigationStyle == TabNavigationStyle.ELASTIC_SLIDE) 1.025f else 1f,
-                        animationSpec = tween(300, easing = FastOutSlowInEasing),
-                        label = "liquidIndicatorScale"
-                    )
+
+                    val indicatorLeft = leftEdge.value
+                    val indicatorRight = rightEdge.value
+                    val stretch = ((indicatorRight - indicatorLeft) - restWidth).coerceAtLeast(0f)
+                    val squash = (stretch / widthDp).coerceIn(0f, 0.25f)
+                    val indicatorShape = RoundedCornerShape(20.dp)
 
                     Box(
                         modifier = Modifier
-                            .offset(x = animatedIndicatorX)
-                            .width(indicatorWidth)
-                            .height(44.dp)
-                            .scale(indicatorScale)
-                            .clip(RoundedCornerShape(22.dp))
-                            .background(AccentGradient)
-                            .border(1.dp, Color.White.copy(alpha = if (isDark) 0.18f else 0.34f), RoundedCornerShape(22.dp))
-                            .shadow(12.dp, RoundedCornerShape(22.dp), spotColor = AccentPink.copy(alpha = 0.42f))
+                            .align(Alignment.CenterStart)
+                            .offset(x = (indicatorLeft + 2f).dp)
+                            .width((indicatorRight - indicatorLeft - 4f).coerceAtLeast(0f).dp)
+                            .height(40.dp)
+                            .graphicsLayer { scaleY = 1f - squash }
+                            .shadow(
+                                elevation = 10.dp,
+                                shape = indicatorShape,
+                                ambientColor = AccentSkyBlue.copy(alpha = 0.30f),
+                                spotColor = AccentPink.copy(alpha = 0.42f)
+                            )
+                            .clip(indicatorShape)
+                            .drawBehind {
+                                val w = size.width
+                                drawRect(
+                                    brush = Brush.linearGradient(
+                                        colors = listOf(AccentSkyBlue, AccentPink, AccentSkyBlue),
+                                        start = Offset(-w * gradientPhase, 0f),
+                                        end = Offset(w * (2f - gradientPhase), size.height)
+                                    )
+                                )
+                                drawRect(
+                                    brush = Brush.verticalGradient(
+                                        colors = listOf(Color.White.copy(alpha = 0.26f), Color.Transparent),
+                                        endY = size.height * 0.65f
+                                    )
+                                )
+                            }
+                            .border(1.dp, Color.White.copy(alpha = if (isDark) 0.18f else 0.34f), indicatorShape)
                     )
 
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Start,
+                        modifier = Modifier.fillMaxSize(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         activeTabs.forEach { tab ->
-                        val isSelected = selectedTab == tab
-                        val itemWeight = 1f / activeTabs.size
-
-                        // The selected-tab motion is deliberately non-bouncy. It stays fluid even
-                        // on lower-end devices and honours the user's Appearance > Animation style.
-                        val targetScale = when (tabNavigationStyle) {
-                            TabNavigationStyle.ELASTIC_SLIDE -> if (isSelected) 1.035f else 0.975f
-                            TabNavigationStyle.DEPTH_ZOOM -> if (isSelected) 1.02f else 0.965f
-                            TabNavigationStyle.FLIP_FADE -> if (isSelected) 1.015f else 0.98f
-                            TabNavigationStyle.MINIMAL_FADE, TabNavigationStyle.DEFAULT -> if (isSelected) 1.01f else 0.99f
-                            TabNavigationStyle.NONE -> 1f
-                        }
-                        val scale by animateFloatAsState(
-                            targetValue = targetScale,
-                            animationSpec = when (tabNavigationStyle) {
-                                TabNavigationStyle.ELASTIC_SLIDE -> tween(300, easing = FastOutSlowInEasing)
-                                TabNavigationStyle.DEPTH_ZOOM -> tween(240, easing = FastOutSlowInEasing)
-                                TabNavigationStyle.FLIP_FADE -> tween(220, easing = FastOutSlowInEasing)
-                                TabNavigationStyle.MINIMAL_FADE, TabNavigationStyle.DEFAULT -> tween(200, easing = FastOutSlowInEasing)
-                                TabNavigationStyle.NONE -> tween(0)
-                            },
-                            label = "tabScale"
-                        )
-
-                        val itemTranslationY by animateFloatAsState(
-                            targetValue = when (tabNavigationStyle) {
-                                TabNavigationStyle.DEPTH_ZOOM -> if (isSelected) -1.5f else 0f
-                                TabNavigationStyle.FLIP_FADE -> if (isSelected) -1f else 0f
-                                else -> 0f
-                            },
-                            animationSpec = tween(220, easing = FastOutSlowInEasing),
-                            label = "tabTranslation"
-                        )
-
-                        val slotWidth by animateDpAsState(
-                            targetValue = if (isSelected) selectedWidth else otherWidth,
-                            animationSpec = navSpec,
-                            label = "tabSlotWidth"
-                        )
-                        Box(
-                            modifier = Modifier
-                                .width(slotWidth)
-                                .height(52.dp)
-                                .scale(scale)
-                                .graphicsLayer {
-                                    translationY = itemTranslationY
-                                }
-                                .clip(RoundedCornerShape(26.dp))
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null,
-                                    onClick = { onTabSelected(tab) }
+                            key(tab) {
+                                val isSelected = selectedTab == tab
+                                val animatedWeight by animateFloatAsState(
+                                    targetValue = if (isSelected) selectedWeight else 1f,
+                                    animationSpec = if (tabNavigationStyle == TabNavigationStyle.NONE) {
+                                        tween(0)
+                                    } else {
+                                        spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow)
+                                    },
+                                    label = "tabWeight"
                                 )
-                                .testTag("bottom_nav_tab_${tab.id}"),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            // The shared liquid indicator is rendered behind this row.
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center
-                            ) {
-                                StyledIcon(
-                                    drawableRes = if (isSelected) tab.activeIcon else tab.inactiveIcon,
-                                    contentDescription = tab.getTitle(lang),
-                                    tint = if (isSelected) Color.White else if (isDark) DarkTextSecondary else LightTextSecondary,
-                                    modifier = Modifier.size(if (isSelected) 22.dp else 24.dp)
+                                val contentColor by animateColorAsState(
+                                    targetValue = if (isSelected) Color.White else if (isDark) DarkTextSecondary else LightTextSecondary,
+                                    animationSpec = tween(if (tabNavigationStyle == TabNavigationStyle.NONE) 0 else 200),
+                                    label = "tabContentColor"
                                 )
-                                if (isSelected) {
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = tab.getTitle(lang),
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        softWrap = false,
-                                        overflow = TextOverflow.Clip
-                                    )
+
+                                Box(
+                                    modifier = Modifier
+                                        .weight(animatedWeight.coerceAtLeast(0.01f))
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(23.dp))
+                                        .clickable(
+                                            interactionSource = remember { MutableInteractionSource() },
+                                            indication = null,
+                                            onClick = { onTabSelected(tab) }
+                                        )
+                                        .testTag("bottom_nav_tab_${tab.id}"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.Center
+                                    ) {
+                                        StyledIcon(
+                                            drawableRes = if (isSelected) tab.activeIcon else tab.inactiveIcon,
+                                            contentDescription = tab.getTitle(lang),
+                                            tint = contentColor,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                        // The label grows out of the icon to its right.
+                                        AnimatedVisibility(
+                                            visible = isSelected,
+                                            enter = fadeIn(tween(220, delayMillis = 60)) +
+                                                expandHorizontally(
+                                                    animationSpec = tween(300, easing = FastOutSlowInEasing),
+                                                    expandFrom = Alignment.Start
+                                                ),
+                                            exit = fadeOut(tween(120)) +
+                                                shrinkHorizontally(
+                                                    animationSpec = tween(220, easing = FastOutSlowInEasing),
+                                                    shrinkTowards = Alignment.Start
+                                                )
+                                        ) {
+                                            Text(
+                                                text = tab.getTitle(lang),
+                                                modifier = Modifier.padding(start = 6.dp),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = contentColor,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                overflow = TextOverflow.Clip
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -405,5 +426,4 @@ fun DynamicBottomNavigation(
             }
         }
     }
-}
 }

@@ -49,9 +49,7 @@ data class DownloadRequest(
     /** Cover / thumbnail of the link (embedded into downloaded audio, shown on the Download page). */
     val thumbnailUrl: String? = null,
     /** HTTP headers (Referer / User-Agent / ...) the link needs; used by media-plugin streams. */
-    val headers: Map<String, String> = emptyMap(),
-    /** More audio languages / subtitles merged into the video (media-plugin streams). */
-    val extraTracks: List<ExtraTrack> = emptyList()
+    val headers: Map<String, String> = emptyMap()
 )
 
 /** Loads the quality list of a link with yt-dlp (used by the download options sheet). */

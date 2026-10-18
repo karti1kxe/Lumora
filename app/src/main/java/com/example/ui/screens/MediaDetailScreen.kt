@@ -417,7 +417,7 @@ fun MediaDetailScreen(
                 v.title, if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1
             )
         } else {
-            MediaPlayback.startDownload(context, plugin, name, v.poster, opt.stream, opt)
+            MediaPlayback.startDownload(context, plugin, name, v.poster, opt.stream)
         }
         Toast.makeText(context, "$message (see Network › Download)", Toast.LENGTH_SHORT).show()
     }
