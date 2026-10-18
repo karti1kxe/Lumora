@@ -40,10 +40,13 @@ object EpisodeFrames {
     private const val PARTIAL_BYTES = 5 * 1024 * 1024
     private const val RETRY_FAILED_AFTER_MS = 6L * 60L * 60L * 1000L
 
-    private val gate = Semaphore(3)
+    private val gate = Semaphore(4)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val inflight = ConcurrentHashMap<String, CompletableDeferred<String?>>()
     private val failedAt = ConcurrentHashMap<String, Long>()
+
+    /** A pull-down refresh: episodes whose picture could not be made earlier are tried again at once. */
+    fun retryFailed() { failedAt.clear() }
 
     private fun key(plugin: MediaPluginInfo, link: String) = plugin.value + "|" + link
 

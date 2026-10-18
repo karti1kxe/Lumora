@@ -33,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -106,6 +107,10 @@ object MediaDetailState {
     var refreshRequest by mutableIntStateOf(0)
     /** True from the pull-down until the provider page has loaded its categories again (drives the refresh indicator). */
     var providerRefreshing by androidx.compose.runtime.mutableStateOf(false)
+    /** Pull-down on an open title page: bumped by the Home screen, handled by [MediaDetailScreen] (details, episodes and pictures load again). */
+    var titleRefreshRequest by mutableIntStateOf(0)
+    /** True from the pull-down until the title page has its details and episodes again (drives the refresh indicator). */
+    var titleRefreshing by androidx.compose.runtime.mutableStateOf(false)
     /** "plugin|link" -> [season index, audio index, quality index] */
     val selections = HashMap<String, IntArray>()
 
@@ -218,19 +223,53 @@ fun MediaDetailScreen(
     val pageBg = Color.Transparent
 
     // ---- title details (getMeta) ----
-    var info by remember(plugin.value, post.link) { mutableStateOf<MediaInfo?>(null) }
+    // A title opened before shows at once from the saved copy; the fresh details load quietly behind it.
+    val infoPeek = remember(plugin.value, post.link) { MediaProviderRepository.peekInfo(context, plugin.value, post.link) }
+    var info by remember(plugin.value, post.link) { mutableStateOf<MediaInfo?>(infoPeek?.value) }
     var infoError by remember(plugin.value, post.link) { mutableStateOf<String?>(null) }
     var reload by remember(plugin.value, post.link) { mutableIntStateOf(0) }
     LaunchedEffect(plugin.value, post.link, reload) {
-        info = null
-        infoError = null
+        val shownAlready = info != null
+        val forced = reload > 0
+        val stale = infoPeek != null && infoPeek.ageMs >= MediaProviderRepository.FRESH_MS
+        if (shownAlready && !forced && !stale) return@LaunchedEffect
+        if (!shownAlready) infoError = null
         try {
-            info = MediaProviderRepository.loadInfo(context, plugin.value, post.link, force = reload > 0)
+            info = MediaProviderRepository.loadInfo(context, plugin.value, post.link, force = forced || shownAlready)
+            infoError = null
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            infoError = t.message ?: "Could not load this title"
+            // what is already on screen stays; only an empty page shows the error
+            if (info == null) infoError = t.message ?: "Could not load this title"
         }
+    }
+
+    // pull-down on the title page (the Home screen bumps the request): details, episodes and every picture load again,
+    // the page itself stays on screen the whole time
+    val titleTick = MediaDetailState.titleRefreshRequest
+    var handledTitleTick by remember(plugin.value, post.link) { mutableIntStateOf(titleTick) }
+    var episodesReload by remember { mutableIntStateOf(0) }
+    LaunchedEffect(titleTick) {
+        if (titleTick == handledTitleTick) return@LaunchedEffect
+        handledTitleTick = titleTick
+        try {
+            com.example.util.media.EpisodeFrames.retryFailed()
+            com.example.ui.components.ImageReloadSignal.bump()
+            info = MediaProviderRepository.loadInfo(context, plugin.value, post.link, force = true)
+            infoError = null
+            episodesReload++
+            com.example.ui.components.ImageReloadSignal.bump()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+        } finally {
+            MediaDetailState.titleRefreshing = false
+        }
+    }
+    // leaving the page must not leave the refresh flag on for the next screen
+    DisposableEffect(plugin.value, post.link) {
+        onDispose { MediaDetailState.titleRefreshing = false }
     }
 
     val loaded = info
@@ -262,24 +301,36 @@ fun MediaDetailScreen(
 
     // ---- episodes of the selected quality (a series may need getEpisodes first) ----
     val optionKey = (option?.link?.episodesLink ?: option?.link?.directLinks?.firstOrNull()?.link).orEmpty() + "|" + audio?.label + "|" + option?.label
-    var episodes by remember(optionKey) { mutableStateOf<List<MediaDirectLink>?>(null) }
+    val epPeek = remember(optionKey) {
+        option?.link?.episodesLink?.let { MediaProviderRepository.peekEpisodes(context, plugin.value, it) }
+    }
+    var episodes by remember(optionKey) { mutableStateOf<List<MediaDirectLink>?>(epPeek?.value) }
     var episodesError by remember(optionKey) { mutableStateOf<String?>(null) }
-    var episodesReload by remember(optionKey) { mutableIntStateOf(0) }
-    LaunchedEffect(optionKey, episodesReload) {
+    var episodesRetry by remember(optionKey) { mutableIntStateOf(0) }
+    // a pull-down refresh that happened before this option was opened must not force-reload it again
+    val reloadAtOpen = remember(optionKey) { episodesReload }
+    LaunchedEffect(optionKey, episodesRetry, episodesReload) {
         val l = option?.link ?: return@LaunchedEffect
         val epLink = l.episodesLink
         if (epLink == null) {
             episodes = l.directLinks
             return@LaunchedEffect
         }
-        episodes = null
-        episodesError = null
+        val shownAlready = episodes != null
+        val forced = episodesRetry > 0 || episodesReload != reloadAtOpen
+        val stale = epPeek != null && epPeek.ageMs >= MediaProviderRepository.FRESH_MS
+        if (shownAlready && !forced && !stale) return@LaunchedEffect
+        if (!shownAlready) {
+            episodes = null
+            episodesError = null
+        }
         try {
-            episodes = MediaProviderRepository.loadEpisodes(context, plugin.value, epLink)
+            episodes = MediaProviderRepository.loadEpisodes(context, plugin.value, epLink, force = forced || shownAlready)
+            episodesError = null
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            episodesError = t.message ?: "Could not load the episodes"
+            if (episodes == null) episodesError = t.message ?: "Could not load the episodes"
         }
     }
 
@@ -474,7 +525,7 @@ fun MediaDetailScreen(
     // The first episodes get their picture (a frame of the video) and their working server prepared in the background,
     // so by the time one is tapped it already knows which server really plays.
     LaunchedEffect(videos) {
-        for (pv in videos.take(6)) {
+        for (pv in videos.take(12)) {
             launch {
                 com.example.util.media.EpisodeFrames.obtain(
                     context, plugin, pv.link, pv.type, pv.title,
@@ -676,7 +727,7 @@ fun MediaDetailScreen(
                         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp)) {
                             Text(text = episodesError.orEmpty(), fontSize = 13.sp, color = secondaryText)
                             Spacer(modifier = Modifier.height(10.dp))
-                            DetailPill("Retry", primaryText, surfaceColor, borderColor) { episodesReload++ }
+                            DetailPill("Retry", primaryText, surfaceColor, borderColor) { episodesRetry++ }
                         }
                     }
                     episodes == null && option != null -> item(key = "episodes-loading") {
@@ -705,7 +756,8 @@ fun MediaDetailScreen(
                                 durationMs = 0L,
                                 dateModified = 0L,
                                 isOnline = true,
-                                thumbnailUrl = framePath,
+                                // the plugin's own picture shows at once; it is replaced by a frame of the video as soon as that is ready
+                                thumbnailUrl = framePath ?: v.poster.takeIf { it.startsWith("http") },
                                 channelName = listOf(v.qualityLabel, plugin.name).filter { it.isNotBlank() }.joinToString(" · ")
                             )
                         }

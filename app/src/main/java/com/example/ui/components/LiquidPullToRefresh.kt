@@ -20,7 +20,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -47,7 +50,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.example.ui.theme.AccentSkyBlue
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.roundToInt
@@ -62,6 +68,22 @@ import kotlin.math.sin
  * - Smooth, non-snapping spring return of content upon refresh completion with zero layout jumps or thumbnail reloads.
  * - Single refresh trigger guarantee with elastic resistance.
  */
+/** Plain bookkeeping of one pull gesture / refresh cycle (kept outside composition on purpose). */
+private class RefreshFlags {
+    /** The finger is pulling right now. */
+    var dragging = false
+    /** A refresh cycle (hold -> wait -> exit) is running: nothing else may start one. */
+    var busy = false
+    /** Bumped when the user released past the threshold. */
+    var tick by mutableIntStateOf(0)
+    var handledTick = 0
+    /** True while the indicator is held open (spinner shown). */
+    var holding by mutableStateOf(false)
+}
+
+/** The pull-down indicator can never stay on screen longer than this, whatever the screen below reports. */
+private const val MAX_REFRESH_VISIBLE_MS = 20_000L
+
 @Composable
 fun LiquidPullToRefresh(
     isRefreshing: Boolean,
@@ -69,6 +91,8 @@ fun LiquidPullToRefresh(
     modifier: Modifier = Modifier,
     isDark: Boolean = true,
     refreshThreshold: Dp = 80.dp,
+    /** Whenever this changes (another tab / page / folder is shown) the indicator is reset at once, so nothing stays stuck on the next screen. */
+    resetKey: Any? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -79,11 +103,18 @@ fun LiquidPullToRefresh(
     val pullOffset = remember { Animatable(0f) }
     val exitScale = remember { Animatable(1f) }
     val exitAlpha = remember { Animatable(1f) }
-    var refreshTriggered by remember { mutableStateOf(false) }
+    val flags = remember { RefreshFlags() }
+    val refreshingNow = rememberUpdatedState(isRefreshing)
+    val onRefreshNow = rememberUpdatedState(onRefresh)
 
-    LaunchedEffect(isRefreshing) {
-        if (!isRefreshing) refreshTriggered = false
-        if (isRefreshing) {
+    // One cycle for every refresh: the indicator is held open, waits (with a hard limit) until the screen below says it
+    // is done, then glides away. A refresh that finishes instantly, never starts, or is cut short still always ends here.
+    LaunchedEffect(isRefreshing, flags.tick) {
+        val fresh = flags.tick != flags.handledTick
+        flags.handledTick = flags.tick
+        if (isRefreshing || fresh) {
+            flags.busy = true
+            flags.holding = true
             exitScale.snapTo(1f)
             exitAlpha.snapTo(1f)
             pullOffset.animateTo(
@@ -93,15 +124,24 @@ fun LiquidPullToRefresh(
                     stiffness = Spring.StiffnessMediumLow
                 )
             )
-        } else {
-            // Smooth expressive exit: fade indicator & glide content back up with smooth easing
-            coroutineScope.launch {
+            if (!refreshingNow.value) {
+                withTimeoutOrNull(700L) { snapshotFlow { refreshingNow.value }.first { it } }
+            }
+            if (refreshingNow.value) {
+                withTimeoutOrNull(MAX_REFRESH_VISIBLE_MS) { snapshotFlow { refreshingNow.value }.first { !it } }
+            }
+            delay(180L)
+        }
+        flags.holding = false
+        if (!flags.dragging && pullOffset.value > 0f) {
+            // Smooth expressive exit: fade indicator & glide content back up
+            launch {
                 exitScale.animateTo(
                     targetValue = 0.2f,
                     animationSpec = tween(durationMillis = 200, easing = FastOutLinearInEasing)
                 )
             }
-            coroutineScope.launch {
+            launch {
                 exitAlpha.animateTo(
                     targetValue = 0f,
                     animationSpec = tween(durationMillis = 180, easing = LinearEasing)
@@ -117,13 +157,48 @@ fun LiquidPullToRefresh(
             exitScale.snapTo(1f)
             exitAlpha.snapTo(1f)
         }
+        flags.busy = false
     }
 
-    val nestedScrollConnection = remember(isRefreshing, thresholdPx) {
+    // Another page / tab / folder is on screen now: whatever the old one was doing, this one starts clean.
+    LaunchedEffect(resetKey) {
+        if (pullOffset.value != 0f || flags.busy || flags.holding) {
+            flags.dragging = false
+            flags.holding = false
+            pullOffset.snapTo(0f)
+            exitScale.snapTo(1f)
+            exitAlpha.snapTo(1f)
+            flags.busy = false
+        }
+    }
+
+    // The finger is up: refresh when pulled far enough, otherwise glide back. Safe to call any number of times.
+    fun release() {
+        flags.dragging = false
+        if (flags.busy || refreshingNow.value) return
+        if (pullOffset.value >= thresholdPx) {
+            flags.busy = true
+            flags.tick++
+            onRefreshNow.value()
+        } else if (pullOffset.value > 0f) {
+            coroutineScope.launch {
+                pullOffset.animateTo(
+                    0f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                )
+            }
+        }
+    }
+
+    val nestedScrollConnection = remember(thresholdPx) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                 // When content is pulled down and user scrolls up, consume scroll to push content back up
-                if (source == NestedScrollSource.UserInput && available.y < 0 && pullOffset.value > 0f && !isRefreshing) {
+                if (source == NestedScrollSource.UserInput && available.y < 0 && pullOffset.value > 0f && !flags.busy && !refreshingNow.value) {
+                    flags.dragging = true
                     val newOffset = (pullOffset.value + available.y).coerceAtLeast(0f)
                     coroutineScope.launch { pullOffset.snapTo(newOffset) }
                     return Offset(0f, available.y)
@@ -137,7 +212,8 @@ fun LiquidPullToRefresh(
                 source: NestedScrollSource
             ): Offset {
                 // When at top of list and user pulls down, move content down with natural resistance
-                if (source == NestedScrollSource.UserInput && available.y > 0 && !isRefreshing) {
+                if (source == NestedScrollSource.UserInput && available.y > 0 && !flags.busy && !refreshingNow.value) {
+                    flags.dragging = true
                     val current = pullOffset.value
                     val progressFraction = (current / maxDragPx).coerceIn(0f, 1f)
                     val resistanceRatio = (1f - progressFraction * 0.72f).coerceIn(0.18f, 0.62f)
@@ -150,17 +226,7 @@ fun LiquidPullToRefresh(
             }
 
             override suspend fun onPreFling(available: androidx.compose.ui.unit.Velocity): androidx.compose.ui.unit.Velocity {
-                if (pullOffset.value >= thresholdPx && !isRefreshing) {
-                    if (!refreshTriggered) { refreshTriggered = true; onRefresh() }
-                } else if (!isRefreshing && pullOffset.value > 0f) {
-                    pullOffset.animateTo(
-                        0f,
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioNoBouncy,
-                            stiffness = Spring.StiffnessMediumLow
-                        )
-                    )
-                }
+                release()
                 return super.onPreFling(available)
             }
 
@@ -168,17 +234,7 @@ fun LiquidPullToRefresh(
                 consumed: androidx.compose.ui.unit.Velocity,
                 available: androidx.compose.ui.unit.Velocity
             ): androidx.compose.ui.unit.Velocity {
-                if (pullOffset.value >= thresholdPx && !isRefreshing) {
-                    if (!refreshTriggered) { refreshTriggered = true; onRefresh() }
-                } else if (!isRefreshing && pullOffset.value > 0f) {
-                    pullOffset.animateTo(
-                        0f,
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioNoBouncy,
-                            stiffness = Spring.StiffnessMediumLow
-                        )
-                    )
-                }
+                release()
                 return super.onPostFling(consumed, available)
             }
         }
@@ -188,26 +244,11 @@ fun LiquidPullToRefresh(
         modifier = modifier
             .fillMaxSize()
             .nestedScroll(nestedScrollConnection)
-            .pointerInput(isRefreshing, thresholdPx) {
+            .pointerInput(thresholdPx) {
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
-                        val allUp = event.changes.all { !it.pressed }
-                        if (allUp && !isRefreshing) {
-                            if (pullOffset.value >= thresholdPx) {
-                                if (!refreshTriggered) { refreshTriggered = true; onRefresh() }
-                            } else if (pullOffset.value > 0f && !pullOffset.isRunning) {
-                                coroutineScope.launch {
-                                    pullOffset.animateTo(
-                                        0f,
-                                        animationSpec = spring(
-                                            dampingRatio = Spring.DampingRatioNoBouncy,
-                                            stiffness = Spring.StiffnessMediumLow
-                                        )
-                                    )
-                                }
-                            }
-                        }
+                        if (event.changes.all { !it.pressed }) release()
                     }
                 }
             }
@@ -226,7 +267,8 @@ fun LiquidPullToRefresh(
         }
 
         // 2. M3 Expressive Morphing Refresh Animation rendered naturally in the revealed top space
-        if (currentOffset > 4f || isRefreshing) {
+        val spinning = isRefreshing || flags.holding
+        if (currentOffset > 4f) {
             val rawProgress = (currentOffset / thresholdPx)
             val progress = rawProgress.coerceIn(0f, 1f)
             val overDrag = (rawProgress - 1f).coerceAtLeast(0f)
@@ -269,13 +311,13 @@ fun LiquidPullToRefresh(
                 label = "pulseScale"
             )
 
-            val currentScale = if (isRefreshing) {
+            val currentScale = if (spinning) {
                 (pulseScale * exitScale.value).coerceAtLeast(0f)
             } else {
                 (0.65f + progress * 0.35f + overDrag * 0.08f).coerceIn(0.65f, 1.12f) * exitScale.value
             }
 
-            val currentAlpha = if (isRefreshing) {
+            val currentAlpha = if (spinning) {
                 exitAlpha.value
             } else {
                 (progress * 1.2f).coerceIn(0.15f, 1f) * exitAlpha.value
@@ -290,7 +332,7 @@ fun LiquidPullToRefresh(
             ) {
                 M3ExpressiveMorphIndicator(
                     progress = progress,
-                    isRefreshing = isRefreshing,
+                    isRefreshing = spinning,
                     morphPhase = morphPhase,
                     spinAngle = spinAngle,
                     isDark = isDark,

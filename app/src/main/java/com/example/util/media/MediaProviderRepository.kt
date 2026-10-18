@@ -5,6 +5,8 @@ import com.lagradost.lumora.CloudStreamEngine
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
+import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 /** Loads a plugin's categories and thumbnails through [PluginJsEngine] and keeps them in memory for the session. */
@@ -21,6 +23,64 @@ object MediaProviderRepository {
     private val episodeLists = ConcurrentHashMap<String, List<MediaDirectLink>>()
     // A few requests at a time so several rows scrolling into view don't hammer one site.
     private val gate = Semaphore(3)
+
+    // ------------------------------------------------------------------ disk copy of titles / episode lists
+    // A title that was opened before (details + episode list) shows at once from here while the fresh copy loads quietly
+    // behind it, so opening a movie / web series never waits on the plugin's website again.
+    class Peeked<T>(val value: T, val ageMs: Long)
+
+    /** A copy younger than this is used as it is; an older one is shown at once and refreshed in the background. */
+    const val FRESH_MS = 10 * 60_000L
+    private const val DISK_KEEP_MS = 14L * 24L * 60L * 60L * 1000L
+    @Volatile private var appCtx: Context? = null
+
+    private fun md5(text: String): String =
+        MessageDigest.getInstance("MD5").digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+
+    private fun metaDir(context: Context): File = File(context.applicationContext.cacheDir, "media_meta_cache").apply { mkdirs() }
+
+    private fun metaFile(context: Context, kind: String, pluginId: String, key: String): File =
+        File(metaDir(context), md5(pluginId) + "_" + kind + "_" + md5(key) + ".json")
+
+    private fun diskRead(context: Context, kind: String, pluginId: String, key: String): Pair<Long, String>? = try {
+        val f = metaFile(context, kind, pluginId, key)
+        if (f.isFile && f.length() > 2L) {
+            val age = System.currentTimeMillis() - f.lastModified()
+            if (age > DISK_KEEP_MS) { f.delete(); null } else f.readText(Charsets.UTF_8) to age
+        } else null
+    } catch (_: Throwable) { null }
+
+    private fun diskWrite(context: Context, kind: String, pluginId: String, key: String, json: String) {
+        try {
+            val f = metaFile(context, kind, pluginId, key)
+            val tmp = File(f.parentFile, f.name + ".tmp")
+            tmp.writeText(json, Charsets.UTF_8)
+            if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+        } catch (_: Throwable) {}
+    }
+
+    /** The details of a title opened before (memory, then disk), whatever its age; null when it was never loaded. */
+    fun peekInfo(context: Context, pluginId: String, link: String): Peeked<MediaInfo>? {
+        appCtx = context.applicationContext
+        val key = "$pluginId|$link"
+        infos[key]?.let { return Peeked(it, 0L) }
+        val (json, age) = diskRead(context, "info", pluginId, key) ?: return null
+        val info = try { parseInfo(json) } catch (_: Throwable) { return null }
+        infos[key] = info
+        return Peeked(info, age)
+    }
+
+    /** The episode list behind [episodesLink] from an earlier visit (memory, then disk); null when it was never loaded. */
+    fun peekEpisodes(context: Context, pluginId: String, episodesLink: String): Peeked<List<MediaDirectLink>>? {
+        appCtx = context.applicationContext
+        val key = "$pluginId|$episodesLink"
+        episodeLists[key]?.let { return Peeked(it, 0L) }
+        val (json, age) = diskRead(context, "ep", pluginId, key) ?: return null
+        val list = try { parseEpisodes(json) } catch (_: Throwable) { return null }
+        if (list.isEmpty()) return null
+        episodeLists[key] = list
+        return Peeked(list, age)
+    }
 
     /** CloudStream extensions run natively ([CloudStreamEngine]); everything else is a Vega JavaScript plugin. */
     private fun isCs(context: Context, pluginId: String) = MediaPluginStore.isCloudStream(context, pluginId)
@@ -48,12 +108,22 @@ object MediaProviderRepository {
         infos.keys.filter { it.startsWith(prefix) }.forEach { infos.remove(it) }
         episodeLists.keys.filter { it.startsWith(prefix) }.forEach { episodeLists.remove(it) }
         streamCache.keys.filter { it.startsWith(prefix) }.forEach { streamCache.remove(it) }
+        appCtx?.let { c ->
+            try {
+                val pre = md5(pluginId) + "_"
+                metaDir(c).listFiles { f -> f.name.startsWith(pre) }?.forEach { it.delete() }
+            } catch (_: Throwable) {}
+        }
     }
 
     /** Details of one title (getMeta). */
     suspend fun loadInfo(context: Context, pluginId: String, link: String, force: Boolean = false): MediaInfo {
         val key = "$pluginId|$link"
-        if (!force) infos[key]?.let { return it }
+        appCtx = context.applicationContext
+        if (!force) {
+            infos[key]?.let { return it }
+            peekInfo(context, pluginId, link)?.let { if (it.ageMs < FRESH_MS) return it.value }
+        }
         val json = if (isCs(context, pluginId)) {
             csCall(context, pluginId) { CloudStreamEngine.infoJson(context, pluginId, link) }
         } else {
@@ -62,17 +132,29 @@ object MediaProviderRepository {
         }
         val info = parseInfo(json)
         infos[key] = info
+        diskWrite(context, "info", pluginId, key, json)
         return info
     }
 
     /** Episodes behind a quality option's episodesLink (getEpisodes). */
-    suspend fun loadEpisodes(context: Context, pluginId: String, episodesLink: String): List<MediaDirectLink> {
+    suspend fun loadEpisodes(context: Context, pluginId: String, episodesLink: String, force: Boolean = false): List<MediaDirectLink> {
         val key = "$pluginId|$episodesLink"
-        episodeLists[key]?.let { return it }
+        appCtx = context.applicationContext
+        if (!force) {
+            episodeLists[key]?.let { return it }
+            peekEpisodes(context, pluginId, episodesLink)?.let { if (it.ageMs < FRESH_MS) return it.value }
+        }
         // a CloudStream title lists its episodes directly in getMeta: there is no separate episode request
         if (isCs(context, pluginId)) return emptyList()
         val args = org.json.JSONObject().put("url", episodesLink).toString()
         val json = PluginJsEngine.call(context, pluginId, "episodes", "getEpisodes", args, timeoutMs = 120_000L)
+        val out = parseEpisodes(json)
+        episodeLists[key] = out
+        if (out.isNotEmpty()) diskWrite(context, "ep", pluginId, key, json)
+        return out
+    }
+
+    private fun parseEpisodes(json: String): List<MediaDirectLink> {
         val arr = JSONArray(json)
         val out = ArrayList<MediaDirectLink>()
         for (i in 0 until arr.length()) {
@@ -89,7 +171,6 @@ object MediaProviderRepository {
                 )
             )
         }
-        episodeLists[key] = out
         return out
     }
 

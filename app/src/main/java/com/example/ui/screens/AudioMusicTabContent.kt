@@ -387,7 +387,7 @@ fun AudioMusicTabContent(
                 }
             } finally {
                 if (showIndicator) {
-                    withContext(Dispatchers.Main) { isScanning = false }
+                    withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) { isScanning = false }
                 }
             }
         }
@@ -692,6 +692,7 @@ fun AudioMusicTabContent(
             isRefreshing = isScanning,
             onRefresh = { scanAudioFiles(force = true, showIndicator = true) },
             isDark = isDark,
+            resetKey = selectedFolder?.path,
             modifier = Modifier.fillMaxSize()
         ) {
             Box(modifier = Modifier.fillMaxSize()) {

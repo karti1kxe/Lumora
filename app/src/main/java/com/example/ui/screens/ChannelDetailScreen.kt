@@ -84,6 +84,16 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableIntStateOf
+import com.example.ui.components.AddToPlaylistDialog
+import com.example.ui.components.OnlineDownloadSheet
+import com.example.ui.components.OnlineQuickActionBar
+import com.example.ui.components.shareOnlineLink
+import com.example.ui.components.swipeLeftForActions
+import com.example.ui.theme.DarkBackgroundStart
+import com.example.util.OnlineMediaLibrary
+import com.example.util.OnlineVideoQueue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -169,6 +179,21 @@ fun ChannelDetailScreen(
     var visibleFields by remember { mutableStateOf(VisibleFields()) }
     val focusRequester = remember { FocusRequester() }
 
+    // ---- swipe (right -> left) quick actions, same bottom toolbar as the Online folders: nothing is selected ----
+    val actionKind = if (isAudioMode) OnlineMediaLibrary.KIND_AUDIO else OnlineMediaLibrary.KIND_VIDEO
+    var actionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    if (actionTarget != null) lastActionTarget = actionTarget
+    var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    var downloadTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
+    var watchLaterList by remember(actionKind) { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
+    var hiddenVersion by remember(actionKind) { mutableIntStateOf(0) }
+    LaunchedEffect(actionKind) {
+        OnlineMediaLibrary.attach(context)
+        watchLaterList = withContext(Dispatchers.IO) { OnlineMediaLibrary.watchLater(context, actionKind) }
+    }
+    val hiddenUrls = remember(hiddenVersion, actionKind) { OnlineMediaLibrary.notInterestedSet(context, actionKind) }
+
     LaunchedEffect(isSearchOpen) {
         if (isSearchOpen) {
             try { focusRequester.requestFocus() } catch (_: Throwable) {}
@@ -210,6 +235,9 @@ fun ChannelDetailScreen(
             isFullScreenAudioOpen -> {
                 AudioPlaybackManager.collapseToMiniPlayer()
             }
+            actionTarget != null -> {
+                actionTarget = null
+            }
             isSearchOpen -> {
                 isSearchOpen = false
                 searchQuery = ""
@@ -225,6 +253,9 @@ fun ChannelDetailScreen(
 
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
+    LaunchedEffect(listState.isScrollInProgress, gridState.isScrollInProgress) {
+        if (listState.isScrollInProgress || gridState.isScrollInProgress) actionTarget = null
+    }
 
     LaunchedEffect(channel?.channelUrl) {
         val url = channel?.channelUrl
@@ -375,7 +406,13 @@ fun ChannelDetailScreen(
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
-    val backgroundColor = if (isDark) Color(0xFF0B1120) else Color(0xFFF1F5F9)
+    // Same colour as the Home screen (AMOLED black / dark slate / white in System mode / ice in Light mode), never plain white
+    val backgroundColor = when {
+        isDark && uiState?.amoledBlackMode == true -> DarkBackgroundStart
+        isDark -> Color(0xFF1B2630)
+        uiState?.themeMode == ThemeMode.SYSTEM -> Color.White
+        else -> Color(0xFFDAE3E9)
+    }
 
     val currentDensity = LocalDensity.current
     val currentAppScale = (uiState?.appScale ?: 75f).coerceIn(1f, 100f)
@@ -387,7 +424,11 @@ fun ChannelDetailScreen(
         )
     }
 
-    val activeTracks = if (selectedSectionId == "shorts") shortsTracks else tracks
+    val rawActiveTracks = if (selectedSectionId == "shorts") shortsTracks else tracks
+    // "Not interested" videos / songs disappear from the channel too
+    val activeTracks = remember(rawActiveTracks, hiddenUrls) {
+        if (hiddenUrls.isEmpty()) rawActiveTracks else rawActiveTracks.filter { it.videoUrl !in hiddenUrls }
+    }
     val filteredTracks = remember(activeTracks, searchQuery) {
         if (searchQuery.isBlank()) activeTracks
         else activeTracks.filter { it.title.contains(searchQuery, ignoreCase = true) }
@@ -650,15 +691,19 @@ fun ChannelDetailScreen(
                                             ) { track ->
                                                 if (!isAudioMode && onPlayVideo != null) {
                                                     val vItem = remember(track) { track.toOnlineVideoItem() }
-                                                    com.example.ui.components.VideoItemGridCard(
-                                                        video = vItem,
-                                                        isDark = isDark,
-                                                        visibleFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false),
-                                                        onClick = {
-                                                            com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist, track.title)
-                                                            onPlayVideo.invoke(vItem, sortedTracks.map { it.toOnlineVideoItem() })
-                                                        }
-                                                    )
+                                                    Box(Modifier.swipeLeftForActions { actionTarget = track }) {
+                                                        com.example.ui.components.VideoItemGridCard(
+                                                            video = vItem,
+                                                            isDark = isDark,
+                                                            visibleFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false),
+                                                            onClick = {
+                                                                actionTarget = null
+                                                                OnlineMediaLibrary.rememberMeta(context, OnlineMediaLibrary.KIND_VIDEO, track)
+                                                                com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist, track.title)
+                                                                onPlayVideo.invoke(vItem, sortedTracks.map { it.toOnlineVideoItem() })
+                                                            }
+                                                        )
+                                                    }
                                                     return@items
                                                 }
                                                 val trackItem = remember(track) { track.toAudioTrackItem() }
@@ -668,14 +713,16 @@ fun ChannelDetailScreen(
                                                 } else 0f
                                                 val displayItem = if (progress != trackItem.playbackProgress) trackItem.copy(playbackProgress = progress) else trackItem
 
-                                                AudioTrackGridCard(
-                                                    track = displayItem,
-                                                    isCurrent = isCurrent,
-                                                    isPlaying = isCurrent && isPlaying,
-                                                    isDark = isDark,
-                                                    visibleFields = visibleFields,
-                                                    onClick = { playChannelAudio(track, sortedTracks) }
-                                                )
+                                                Box(Modifier.swipeLeftForActions { actionTarget = track }) {
+                                                    AudioTrackGridCard(
+                                                        track = displayItem,
+                                                        isCurrent = isCurrent,
+                                                        isPlaying = isCurrent && isPlaying,
+                                                        isDark = isDark,
+                                                        visibleFields = visibleFields,
+                                                        onClick = { actionTarget = null; playChannelAudio(track, sortedTracks) }
+                                                    )
+                                                }
                                             }
                                             if (isLoadingMore) {
                                                 item(span = { GridItemSpan(maxLineSpan) }) {
@@ -701,15 +748,19 @@ fun ChannelDetailScreen(
                                             ) { track ->
                                                 if (!isAudioMode && onPlayVideo != null) {
                                                     val vItem = remember(track) { track.toOnlineVideoItem() }
-                                                    com.example.ui.components.VideoItemCard(
-                                                        video = vItem,
-                                                        isDark = isDark,
-                                                        visibleFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false),
-                                                        onClick = {
-                                                            com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist, track.title)
-                                                            onPlayVideo.invoke(vItem, sortedTracks.map { it.toOnlineVideoItem() })
-                                                        }
-                                                    )
+                                                    Box(Modifier.swipeLeftForActions { actionTarget = track }) {
+                                                        com.example.ui.components.VideoItemCard(
+                                                            video = vItem,
+                                                            isDark = isDark,
+                                                            visibleFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false),
+                                                            onClick = {
+                                                                actionTarget = null
+                                                                OnlineMediaLibrary.rememberMeta(context, OnlineMediaLibrary.KIND_VIDEO, track)
+                                                                com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist, track.title)
+                                                                onPlayVideo.invoke(vItem, sortedTracks.map { it.toOnlineVideoItem() })
+                                                            }
+                                                        )
+                                                    }
                                                     return@items
                                                 }
                                                 val trackItem = remember(track) { track.toAudioTrackItem() }
@@ -719,14 +770,16 @@ fun ChannelDetailScreen(
                                                 } else 0f
                                                 val displayItem = if (progress != trackItem.playbackProgress) trackItem.copy(playbackProgress = progress) else trackItem
 
-                                                AudioTrackListCard(
-                                                    track = displayItem,
-                                                    isCurrent = isCurrent,
-                                                    isPlaying = isCurrent && isPlaying,
-                                                    isDark = isDark,
-                                                    visibleFields = visibleFields,
-                                                    onClick = { playChannelAudio(track, sortedTracks) }
-                                                )
+                                                Box(Modifier.swipeLeftForActions { actionTarget = track }) {
+                                                    AudioTrackListCard(
+                                                        track = displayItem,
+                                                        isCurrent = isCurrent,
+                                                        isPlaying = isCurrent && isPlaying,
+                                                        isDark = isDark,
+                                                        visibleFields = visibleFields,
+                                                        onClick = { actionTarget = null; playChannelAudio(track, sortedTracks) }
+                                                    )
+                                                }
                                             }
                                             if (isLoadingMore) {
                                                 item {
@@ -829,6 +882,118 @@ fun ChannelDetailScreen(
                         isDark = isDark,
                         glassBlurTransparency = uiState?.glassBlurTransparency ?: 75f,
                         onCollapse = { AudioPlaybackManager.collapseToMiniPlayer() }
+                    )
+                }
+            }
+
+            // ---- swipe toolbar: Play next / Play last / Playlist / Watch later / Not interested / Download / Share ----
+            val barTransparency = uiState?.glassBlurTransparency ?: 75f
+            AnimatedVisibility(
+                visible = actionTarget != null && !isFullScreenAudioOpen,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(vertical = 18.dp)
+            ) {
+                val t = actionTarget ?: lastActionTarget
+                if (t != null) {
+                    OnlineQuickActionBar(
+                        isDark = isDark,
+                        alphaRatio = (barTransparency / 100f).coerceIn(0.15f, 1.0f),
+                        isSavedForLater = watchLaterList.any { it.videoUrl == t.videoUrl },
+                        onPlayNext = {
+                            if (isAudioMode) {
+                                val track = t.toAudioTrackItem()
+                                val q = AudioPlaybackManager.queue.value.toMutableList()
+                                q.removeAll { it.path == track.path }
+                                val cur = q.indexOfFirst { it.path == AudioPlaybackManager.currentTrack.value?.path }
+                                if (cur >= 0) q.add(cur + 1, track) else q.add(0, track)
+                                AudioPlaybackManager.updateQueue(q)
+                            } else {
+                                OnlineMediaLibrary.rememberMeta(context, actionKind, t)
+                                OnlineVideoQueue.addNext(t)
+                            }
+                            Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
+                            actionTarget = null
+                        },
+                        onPlayLast = {
+                            if (isAudioMode) {
+                                val track = t.toAudioTrackItem()
+                                val q = AudioPlaybackManager.queue.value.toMutableList()
+                                q.removeAll { it.path == track.path }
+                                q.add(track)
+                                AudioPlaybackManager.updateQueue(q)
+                                Toast.makeText(context, "Added to queue: ${t.title}", Toast.LENGTH_SHORT).show()
+                            } else {
+                                OnlineMediaLibrary.rememberMeta(context, actionKind, t)
+                                OnlineVideoQueue.addLast(t)
+                                Toast.makeText(context, "Added to the end of the queue", Toast.LENGTH_SHORT).show()
+                            }
+                            actionTarget = null
+                        },
+                        onSaveToPlaylist = {
+                            OnlineMediaLibrary.rememberMeta(context, actionKind, t)
+                            playlistTarget = t
+                            actionTarget = null
+                        },
+                        onWatchLater = {
+                            val saved = OnlineMediaLibrary.toggleWatchLater(context, actionKind, t)
+                            watchLaterList = OnlineMediaLibrary.watchLater(context, actionKind)
+                            Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
+                            actionTarget = null
+                        },
+                        onNotInterested = {
+                            OnlineMediaLibrary.markNotInterested(context, actionKind, t.videoUrl)
+                            if (!isAudioMode) OnlineVideoQueue.remove(t.videoUrl)
+                            watchLaterList = OnlineMediaLibrary.watchLater(context, actionKind)
+                            hiddenVersion++
+                            Toast.makeText(
+                                context,
+                                if (isAudioMode) "Okay, you will see fewer songs like this" else "Okay, you will see fewer videos like this",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            actionTarget = null
+                        },
+                        onShare = {
+                            shareOnlineLink(context, t.title, t.videoUrl)
+                            actionTarget = null
+                        },
+                        onDownload = {
+                            downloadTarget = t
+                            actionTarget = null
+                        }
+                    )
+                }
+            }
+
+            downloadTarget?.let { t ->
+                OnlineDownloadSheet(
+                    isDark = isDark,
+                    glassBlurTransparency = barTransparency,
+                    url = t.videoUrl,
+                    title = t.title,
+                    author = t.artist,
+                    thumbnailUrl = t.thumbnailUrl,
+                    audioOnly = isAudioMode,
+                    onDismiss = { downloadTarget = null }
+                )
+            }
+
+            playlistTarget?.let { t ->
+                if (isAudioMode) {
+                    AddToPlaylistDialog(
+                        selectedAudioTracks = listOf(t.toAudioTrackItem()),
+                        isDark = isDark,
+                        glassBlurTransparency = barTransparency,
+                        onDismiss = { playlistTarget = null },
+                        onPlaylistUpdated = { playlistTarget = null }
+                    )
+                } else {
+                    AddToPlaylistDialog(
+                        selectedVideos = listOf(t.toOnlineVideoItem()),
+                        isDark = isDark,
+                        glassBlurTransparency = barTransparency,
+                        onDismiss = { playlistTarget = null },
+                        onPlaylistUpdated = { playlistTarget = null }
                     )
                 }
             }

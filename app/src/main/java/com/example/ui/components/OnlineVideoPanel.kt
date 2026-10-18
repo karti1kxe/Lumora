@@ -25,6 +25,7 @@ import com.example.ui.theme.AccentGradient
 import com.example.ui.theme.AccentPink
 import com.example.ui.theme.AccentSkyBlue
 import com.example.util.OnlineMediaLibrary
+import com.example.util.PlaybackHistoryManager
 import com.example.util.OnlineVideoQueue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -95,11 +96,11 @@ object OnlineVideoFeedState {
     var sortTouched by mutableStateOf(false)
     /** "Watch later" videos: always pinned at the very top of the feed. */
     var watchLater by mutableStateOf<List<OnlineTrackResult>>(emptyList())
-    /** Last opened feed item; keep it at the top on return unless playback reached the watched threshold. */
-    var resumeTrack by mutableStateOf<OnlineTrackResult?>(null)
     /** Bumped whenever the "Not interested" list changes so the visible list is recomputed. */
     var hiddenVersion by mutableIntStateOf(0)
     var initialized = false
+    /** Which half-watched videos were pinned last time; when it changes the feed starts at the top so they are seen. */
+    var lastResumeKey: String = ""
     var lastQuery: String = ""
     var extractor: SearchExtractor? = null
     var nextPage: Page? = null
@@ -125,6 +126,37 @@ private fun formatViews(count: Long): String {
         else -> count.toString()
     }
     return "$t views"
+}
+
+private val YT_ID_RE = Regex("(?:v=|youtu\\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})")
+
+/**
+ * Online videos that were started and not finished (position saved, not completed), the one watched last first.
+ * A video that is watched to the end has its saved position cleared, so it leaves this list by itself.
+ */
+private fun inProgressOnlineVideos(context: android.content.Context): List<OnlineTrackResult> {
+    val out = ArrayList<OnlineTrackResult>()
+    val seen = HashSet<String>()
+    try {
+        for (rec in PlaybackHistoryManager.getAllPlaybackRecords(context)) {
+            if (!rec.path.startsWith(OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX)) continue
+            if (rec.positionMs < 3_000L || rec.isFinished) continue
+            val url = OnlineVideoService.toWatchUrl(rec.path)
+            if (url.isBlank() || !seen.add(url)) continue
+            val meta = OnlineMediaLibrary.getMeta(OnlineMediaLibrary.KIND_VIDEO, url, context)
+            out.add(
+                meta ?: OnlineTrackResult(
+                    videoUrl = url,
+                    title = rec.title.ifBlank { url },
+                    artist = "",
+                    durationSec = rec.durationMs / 1000L,
+                    thumbnailUrl = YT_ID_RE.find(url)?.groupValues?.get(1)?.let { "https://i.ytimg.com/vi/$it/hqdefault.jpg" }
+                )
+            )
+            if (out.size >= 20) break
+        }
+    } catch (_: Throwable) {}
+    return out
 }
 
 /** Converts a search/feed result into the app's regular VideoItem so the existing cards and player are reused. */
@@ -165,10 +197,18 @@ fun OnlineVideoPanel(
     val st = OnlineVideoFeedState
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
 
+    val isFeedMode = searchQuery.isBlank()
+    // Videos that were started and not finished wait at the very top of the feed until they are completed.
+    val resumeVideos = remember { inProgressOnlineVideos(context) }
+    val resumeKey = resumeVideos.joinToString("|") { it.videoUrl }
+    if (isFeedMode && st.lastResumeKey != resumeKey) {
+        // the pinned block changed (a video was just left half-way / finished): show the feed from the top again
+        st.lastResumeKey = resumeKey
+        st.listIndex = 0; st.listOffset = 0; st.gridIndex = 0; st.gridOffset = 0
+    }
     val listState = rememberLazyListState(st.listIndex, st.listOffset)
     val gridState = rememberLazyGridState(st.gridIndex, st.gridOffset)
     var job by remember { mutableStateOf<Job?>(null) }
-    val isFeedMode = searchQuery.isBlank()
 
     // ---- swipe (right -> left) quick actions: nothing is selected, the bar just appears at the bottom ----
     var actionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
@@ -240,6 +280,7 @@ fun OnlineVideoPanel(
                 }
                 // the pull-to-refresh animation must always end, whatever happened above
                 st.isRefreshing = false
+                if (token == st.token) ImageReloadSignal.bump()
             }
         }
     }
@@ -390,13 +431,14 @@ fun OnlineVideoPanel(
         }
     }
     // Watch-later videos are pinned above everything else in the recommendation feed; hidden ones never show.
-    val shown = remember(sorted, isFeedMode, st.watchLater, hidden, st.resumeTrack) {
-        val pinned = if (isFeedMode) st.watchLater.filter { it.videoUrl !in hidden } else emptyList()
-        val resume = st.resumeTrack?.takeIf { isFeedMode && it.videoUrl !in hidden && !OnlineVideoRecommender.isCompleted(context, it.videoUrl) }
+    val shown = remember(sorted, isFeedMode, st.watchLater, hidden, resumeVideos) {
+        // 1) half-watched videos (most recent first), 2) watch later, 3) the recommendations
+        val resume = if (isFeedMode) resumeVideos.filter { it.videoUrl !in hidden } else emptyList()
+        val resumeUrls = resume.map { it.videoUrl }.toSet()
+        val later = if (isFeedMode) st.watchLater.filter { it.videoUrl !in hidden && it.videoUrl !in resumeUrls } else emptyList()
+        val pinned = resume + later
         val pinnedUrls = pinned.map { it.videoUrl }.toSet()
-        val resumeItems = resume?.takeIf { it.videoUrl !in pinnedUrls }?.let { listOf(it) } ?: emptyList()
-        val reservedUrls = pinnedUrls + resumeItems.map { it.videoUrl }
-        pinned + resumeItems + sorted.filter { it.videoUrl !in reservedUrls && it.videoUrl !in hidden }
+        pinned + sorted.filter { it.videoUrl !in pinnedUrls && it.videoUrl !in hidden }
     }
     val cardFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false)
 
@@ -433,7 +475,8 @@ fun OnlineVideoPanel(
     }
 
     fun play(r: OnlineTrackResult) {
-        st.resumeTrack = r
+        // kept so the video can come back at the top of the feed (with its picture) if it is left half-way
+        OnlineMediaLibrary.rememberMeta(context, OnlineMediaLibrary.KIND_VIDEO, r)
         OnlineVideoRecommender.recordOpened(context, r.videoUrl, r.artist, r.title)
         prepareAfterWatch(r)
         val tappedPath = "${OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX}${r.videoUrl}"

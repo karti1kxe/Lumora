@@ -932,7 +932,8 @@ fun HomeScreen(
                     }
                 }
             } finally {
-                withContext(Dispatchers.Main) {
+                // NonCancellable: even when this scan was cut short the pull-to-refresh flag must be cleared, or the animation sticks
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
                     if (showIndicator) {
                         isManualRefreshing = false
                     }
@@ -2110,21 +2111,55 @@ fun HomeScreen(
                 // 5. Main Content Area with Browser-like Liquid Pull-to-Refresh
                 // an open provider page (Network > Media) refreshes its own categories on pull-down, not the folder list
                 val providerPageOpen = effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads &&
-                    MediaDetailState.provider != null
+                    MediaDetailState.provider != null && MediaDetailState.plugin == null
+                // Safety net for every page that is refreshed by a pull-down: a flag that nobody switched off (the page was left,
+                // or it was never on screen) can never keep the indicator stuck or block the next pull.
+                val onlineVideoPanelOpen = isOnlineVideoOpen && effectiveSelectedTab == NavigationTab.HOME
+                LaunchedEffect(
+                    com.example.ui.components.OnlineVideoFeedState.isRefreshing,
+                    MediaDetailState.providerRefreshing,
+                    MediaDetailState.titleRefreshing,
+                    onlineVideoPanelOpen, providerPageOpen
+                ) {
+                    if (com.example.ui.components.OnlineVideoFeedState.isRefreshing && !onlineVideoPanelOpen) {
+                        com.example.ui.components.OnlineVideoFeedState.isRefreshing = false
+                    }
+                    if (MediaDetailState.providerRefreshing && !providerPageOpen) MediaDetailState.providerRefreshing = false
+                    if (com.example.ui.components.OnlineVideoFeedState.isRefreshing ||
+                        MediaDetailState.providerRefreshing || MediaDetailState.titleRefreshing
+                    ) {
+                        kotlinx.coroutines.delay(25_000L)
+                        com.example.ui.components.OnlineVideoFeedState.isRefreshing = false
+                        MediaDetailState.providerRefreshing = false
+                        MediaDetailState.titleRefreshing = false
+                    }
+                }
+                // an open title page (movie / series inside a plugin) refreshes its own details, episodes and pictures
+                val titlePageOpen = effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads && MediaDetailState.plugin != null
+                // the pull-down indicator starts clean on every page / tab / folder change (nothing stays stuck after Back)
+                val pullResetKey = listOf<Any?>(
+                    effectiveSelectedTab, showDownloads, isOnlineVideoOpen,
+                    MediaDetailState.provider?.value, MediaDetailState.plugin?.value, MediaDetailState.post?.link
+                )
                 LiquidPullToRefresh(
-                    isRefreshing = if (isOnlineVideoOpen) com.example.ui.components.OnlineVideoFeedState.isRefreshing
+                    isRefreshing = if (onlineVideoPanelOpen) com.example.ui.components.OnlineVideoFeedState.isRefreshing
                     else if (providerPageOpen) MediaDetailState.providerRefreshing
+                    else if (titlePageOpen) MediaDetailState.titleRefreshing
                     else isManualRefreshing,
                     onRefresh = {
-                        if (isOnlineVideoOpen) {
+                        if (onlineVideoPanelOpen) {
                             com.example.ui.components.OnlineVideoFeedState.isRefreshing = true
                             com.example.ui.components.OnlineVideoFeedState.refreshRequest++
                         } else if (providerPageOpen) {
                             MediaDetailState.providerRefreshing = true
                             MediaDetailState.refreshRequest++
+                        } else if (titlePageOpen) {
+                            MediaDetailState.titleRefreshing = true
+                            MediaDetailState.titleRefreshRequest++
                         } else reloadFolders(true)
                     },
                     isDark = isDark,
+                    resetKey = pullResetKey,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
