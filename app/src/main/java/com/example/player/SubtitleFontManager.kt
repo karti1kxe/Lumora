@@ -257,6 +257,10 @@ object SubtitleFontManager {
 
                     // Extract Embedded MKV Video Fonts & attachments if playing MKV container
                     extractEmbeddedMkvFonts(videoPath, fontsDir, context)
+
+                    // Embedded ASS/SSA tracks are rendered by libass itself: find the fonts they
+                    // use and fetch the missing ones from Google Fonts (background, never blocks).
+                    try { GoogleFontsManager.ensureForMkv(context, videoPath, fontsDir) } catch (_: Throwable) {}
                 }
             }
 
@@ -271,6 +275,15 @@ object SubtitleFontManager {
                         Log.w(TAG, "Failed to copy custom font: ${file.name}", e)
                     }
                 }
+            }
+
+            // Google Fonts: fonts this ASS/SSA script uses that nobody provides are installed from
+            // the offline cache right now and downloaded in the background when online.
+            if (!assContent.isNullOrBlank() &&
+                (assContent.contains("[V4+ Styles]", ignoreCase = true) ||
+                    assContent.contains("[V4 Styles]", ignoreCase = true))
+            ) {
+                try { GoogleFontsManager.ensureForScript(context, assContent, fontsDir) } catch (_: Throwable) {}
             }
 
             // Register all font files present in fontsDir so style detection knows they are available

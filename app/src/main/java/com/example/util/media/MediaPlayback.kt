@@ -350,14 +350,20 @@ object MediaPlayback {
             connectTimeout = 4000
             readTimeout = 4000
             instanceFollowRedirects = true
-            for ((k, v) in headers) if (k.isNotBlank() && v.isNotBlank() && !k.equals("Host", true)) { try { setRequestProperty(k, v) } catch (_: Throwable) {} }
+            for ((k, v) in headers) if (k.isNotBlank() && v.isNotBlank() && !k.equals("Host", true) && !k.equals("Accept-Encoding", true)) { try { setRequestProperty(k, v) } catch (_: Throwable) {} }
             if (headers.keys.none { it.equals("User-Agent", true) }) setRequestProperty("User-Agent", STREAM_UA)
+            // Ask for the representation's actual byte length, not a compressed transfer size.
+            setRequestProperty("Accept-Encoding", "identity")
             if (range) setRequestProperty("Range", "bytes=0-0")
         }
         try {
             val head = open("HEAD", false)
             try {
-                val len = if (head.responseCode in 200..399) head.getHeaderFieldLong("Content-Length", -1L) else -1L
+                val len = if (head.responseCode in 200..399) {
+                    head.getHeaderFieldLong("Content-Length", -1L).takeIf { it > 0L }
+                        ?: head.getHeaderField("Content-Range")?.substringAfterLast('/', "")?.toLongOrNull()?.takeIf { it > 0L }
+                        ?: -1L
+                } else -1L
                 if (len > 0L) return len
             } finally { head.disconnect() }
             val get = open("GET", true)
@@ -376,6 +382,7 @@ object MediaPlayback {
         val format = formatOf(s)
         val headers = s.headers
         if (format == "HLS") {
+            // HLS is a playlist plus many changing segments, not one file with a reliable fixed size.
             // a master playlist is opened to list its qualities (each one downloads its own rendition)
             val variants = HlsVariants.fetch(s.link, headers, null, 4000)
             if (variants.isNotEmpty()) {
@@ -383,7 +390,7 @@ object MediaPlayback {
                     DownloadOption(
                         stream = s.copy(link = v.uri, type = "m3u8", quality = v.label, subtitles = emptyList(), alternatives = emptyList()),
                         title = s.server,
-                        detail = listOf(v.label, "HLS", v.bitrateText()).filter { it.isNotBlank() }.joinToString(" · "),
+                        detail = listOf(v.label, "HLS", v.bitrateText(), "size varies (adaptive stream)").filter { it.isNotBlank() }.joinToString(" · "),
                         quality = v.label
                     )
                 }
@@ -391,7 +398,8 @@ object MediaPlayback {
         }
         val quality = qualityOf(s)
         val size = if (format == "Torrent" || format == "HLS" || format == "DASH") -1L else probeSize(s.link, headers)
-        val detail = listOfNotNull(quality, format, size.takeIf { it > 0L }?.let { formatSize(it) }).joinToString(" · ")
+        val detail = listOf(quality, format, size.takeIf { it > 0L }?.let { formatSize(it) } ?: "size unavailable")
+            .filter { !it.isNullOrBlank() }.joinToString(" · ")
         return listOf(DownloadOption(s.copy(subtitles = emptyList(), alternatives = emptyList()), s.server, detail, quality))
     }
 

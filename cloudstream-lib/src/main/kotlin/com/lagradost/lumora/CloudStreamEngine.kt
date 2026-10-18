@@ -389,8 +389,8 @@ object CloudStreamEngine {
         // for the slowest or hanging server.
         val firstAt = AtomicLong(0L)
         val lastAt = AtomicLong(0L)
-        val idleMs = if (forDownload) 3_000L else 1_000L
-        val afterFirstMs = if (forDownload) 10_000L else 3_000L
+        val idleMs = if (forDownload) 1_500L else 500L
+        val afterFirstMs = if (forDownload) 6_000L else 1_800L
         val loadError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
         val job = fetchScope.launch {
             try {

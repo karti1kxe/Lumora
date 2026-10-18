@@ -287,6 +287,59 @@ class MpvPlayerController {
         }
     }
 
+    // Google Fonts auto-download: when fonts used by an ASS/SSA subtitle finish downloading, the
+    // subtitle is rebuilt / re-initialised so libass picks up the real font instead of the fallback.
+    private val googleFontsListener: () -> Unit = { onGoogleFontsInstalled() }
+    init {
+        GoogleFontsManager.addListener(googleFontsListener)
+    }
+
+    private fun onGoogleFontsInstalled() {
+        if (isReleased) return
+        val ctx = mpvView?.context ?: return
+        if (rawEditorEnabled || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
+        playerScope.launch {
+            try {
+                // External ASS/SSA files go through our own preparation (missing fonts replaced by
+                // the fallback): rebuild them now that the font exists.
+                var changed = false
+                for ((prepared, source) in preparedSubtitleSources.entries.toList()) {
+                    if (!source.exists()) continue
+                    val before = try { File(prepared).takeIf { it.exists() }?.readText() } catch (_: Throwable) { null }
+                    val newPath = UniversalSubtitleEngine.prepareSubtitleForPlayback(
+                        context = ctx,
+                        file = source,
+                        videoFps = _estimatedFps.value.takeIf { it > 0.0 } ?: 24.0,
+                        videoPath = currentFilePath
+                    )
+                    if (newPath != prepared) continue
+                    val after = try { File(prepared).readText() } catch (_: Throwable) { null }
+                    if (before != after) changed = true
+                }
+                // Embedded ASS/SSA tracks are read by libass directly; it only re-scans the fonts
+                // folder when the track is re-initialised.
+                val selected = _subtitleTracks.value.firstOrNull { it.isSelected }
+                val embeddedAss = selected != null && !selected.isExternal && isCurrentSubtitleNativeAssSsa()
+                if (embeddedAss) {
+                    withMpvLock(Unit) { v ->
+                        try {
+                            val sid = v.mpv.getPropertyInt("sid") ?: 0
+                            if (sid > 0) {
+                                v.mpv.setPropertyString("sid", "no")
+                                v.mpv.setPropertyInt("sid", sid)
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                } else if (changed) {
+                    withMpvLock(Unit) { v ->
+                        try { markSubtitleReload(); v.mpv.command("sub-reload") } catch (_: Throwable) {}
+                    }
+                }
+                if (embeddedAss || changed) nudgeRedrawIfPaused()
+            } catch (_: Throwable) {}
+        }
+    }
+
     private val _currentPositionMs = MutableStateFlow(0L)
     val currentPositionMs: StateFlow<Long> = _currentPositionMs.asStateFlow()
 
@@ -628,8 +681,10 @@ class MpvPlayerController {
                     view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=4,icy=0" + proxyOpt)
                     try { view.mpv.setPropertyString("tls-verify", "no") } catch (_: Throwable) {}
                     try { view.mpv.setPropertyString("stream-buffer-size", "1MiB") } catch (_: Throwable) {}
-                    try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "2") } catch (_: Throwable) {}
-                    try { view.mpv.setPropertyString("demuxer-lavf-probesize", "2000000") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "3") } catch (_: Throwable) {}
+                    // A small probe can start video quickly but miss later audio/subtitle streams and chapter metadata
+                    // in remote containers. Keep it bounded while allowing MPV to discover the full track table.
+                    try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
                     // HLS channels whose segments use odd file extensions (.jpg/.txt/none) are refused by ffmpeg
                     // unless extensions are allowed - a common reason why "some channels never play".
                     try { view.mpv.setPropertyString("demuxer-lavf-o", "allowed_extensions=ALL,extension_picky=0,fflags=+discardcorrupt" + proxyOpt) } catch (_: Throwable) {}
@@ -2342,6 +2397,7 @@ class MpvPlayerController {
                     // and subtitle state should expose the ORIGINAL uploaded format instead.
                     val exposedCodec = if (type == "sub" && isExternalTrack && matchedOriginalName.isNotBlank()) {
                         val originalExt = matchedOriginalName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                            .ifBlank { extFilename.substringBefore('?').substringAfterLast('.', "").lowercase(Locale.ROOT) }
                         if (originalExt in setOf("srt", "ass", "ssa", "vtt", "ttml", "dfxp", "smi", "sub", "lrc", "txt", "sbv", "mpl2", "stl", "sup")) originalExt else codec
                     } else codec
 
@@ -2367,7 +2423,7 @@ class MpvPlayerController {
                         if (rawTitle.isNotBlank()) SubtitleFontManager.registerVideoEmbeddedFont(rawTitle)
                     }
                 }
-                if (audioList.isNotEmpty()) _audioTracks.value = audioList
+                if (_audioTracks.value != audioList) _audioTracks.value = audioList
                 if (subList.isNotEmpty()) {
                     // Advanced ASS/SSA uses a generated external track as the rendering
                     // implementation of the original logical subtitle. MPV necessarily exposes
@@ -2456,7 +2512,14 @@ class MpvPlayerController {
                             } catch (_: Throwable) {}
                         }
                     }
+                } else if (System.currentTimeMillis() >= subtitleReloadUntilMs && _subtitleTracks.value.isNotEmpty()) {
+                    // MPV reports a zero/empty subtitle list briefly while opening a new source. Clear stale
+                    // tracks only after the protected sub-reload window, so the UI never shows the previous file's tracks.
+                    _subtitleTracks.value = emptyList()
                 }
+            } else {
+                _audioTracks.value = emptyList()
+                if (System.currentTimeMillis() >= subtitleReloadUntilMs) _subtitleTracks.value = emptyList()
             }
 
             val chapCount = view.mpv.getPropertyInt("chapter-list/count") ?: 0
@@ -4734,6 +4797,7 @@ class MpvPlayerController {
         pollingJob?.cancel()
         pollingJob = null
         advancedAssJob?.cancel()
+        GoogleFontsManager.removeListener(googleFontsListener)
         try {
             playerScope.cancel()
         } catch (_: Throwable) {}
