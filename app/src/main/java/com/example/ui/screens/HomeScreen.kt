@@ -2110,7 +2110,7 @@ fun HomeScreen(
                 // 5. Main Content Area with Browser-like Liquid Pull-to-Refresh
                 // an open provider page (Network > Media) refreshes its own categories on pull-down, not the folder list
                 val providerPageOpen = effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads &&
-                    MediaDetailState.provider != null && MediaDetailState.plugin == null
+                    MediaDetailState.provider != null
                 LiquidPullToRefresh(
                     isRefreshing = if (isOnlineVideoOpen) com.example.ui.components.OnlineVideoFeedState.isRefreshing
                     else if (providerPageOpen) MediaDetailState.providerRefreshing

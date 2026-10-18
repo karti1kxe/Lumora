@@ -95,6 +95,8 @@ object OnlineVideoFeedState {
     var sortTouched by mutableStateOf(false)
     /** "Watch later" videos: always pinned at the very top of the feed. */
     var watchLater by mutableStateOf<List<OnlineTrackResult>>(emptyList())
+    /** Last opened feed item; keep it at the top on return unless playback reached the watched threshold. */
+    var resumeTrack by mutableStateOf<OnlineTrackResult?>(null)
     /** Bumped whenever the "Not interested" list changes so the visible list is recomputed. */
     var hiddenVersion by mutableIntStateOf(0)
     var initialized = false
@@ -388,10 +390,13 @@ fun OnlineVideoPanel(
         }
     }
     // Watch-later videos are pinned above everything else in the recommendation feed; hidden ones never show.
-    val shown = remember(sorted, isFeedMode, st.watchLater, hidden) {
+    val shown = remember(sorted, isFeedMode, st.watchLater, hidden, st.resumeTrack) {
         val pinned = if (isFeedMode) st.watchLater.filter { it.videoUrl !in hidden } else emptyList()
+        val resume = st.resumeTrack?.takeIf { isFeedMode && it.videoUrl !in hidden && !OnlineVideoRecommender.isCompleted(context, it.videoUrl) }
         val pinnedUrls = pinned.map { it.videoUrl }.toSet()
-        pinned + sorted.filter { it.videoUrl !in pinnedUrls && it.videoUrl !in hidden }
+        val resumeItems = resume?.takeIf { it.videoUrl !in pinnedUrls }?.let { listOf(it) } ?: emptyList()
+        val reservedUrls = pinnedUrls + resumeItems.map { it.videoUrl }
+        pinned + resumeItems + sorted.filter { it.videoUrl !in reservedUrls && it.videoUrl !in hidden }
     }
     val cardFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false)
 
@@ -428,6 +433,7 @@ fun OnlineVideoPanel(
     }
 
     fun play(r: OnlineTrackResult) {
+        st.resumeTrack = r
         OnlineVideoRecommender.recordOpened(context, r.videoUrl, r.artist, r.title)
         prepareAfterWatch(r)
         val tappedPath = "${OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX}${r.videoUrl}"

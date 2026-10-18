@@ -79,8 +79,10 @@ fun LiquidPullToRefresh(
     val pullOffset = remember { Animatable(0f) }
     val exitScale = remember { Animatable(1f) }
     val exitAlpha = remember { Animatable(1f) }
+    var refreshTriggered by remember { mutableStateOf(false) }
 
     LaunchedEffect(isRefreshing) {
+        if (!isRefreshing) refreshTriggered = false
         if (isRefreshing) {
             exitScale.snapTo(1f)
             exitAlpha.snapTo(1f)
@@ -149,7 +151,7 @@ fun LiquidPullToRefresh(
 
             override suspend fun onPreFling(available: androidx.compose.ui.unit.Velocity): androidx.compose.ui.unit.Velocity {
                 if (pullOffset.value >= thresholdPx && !isRefreshing) {
-                    onRefresh()
+                    if (!refreshTriggered) { refreshTriggered = true; onRefresh() }
                 } else if (!isRefreshing && pullOffset.value > 0f) {
                     pullOffset.animateTo(
                         0f,
@@ -167,7 +169,7 @@ fun LiquidPullToRefresh(
                 available: androidx.compose.ui.unit.Velocity
             ): androidx.compose.ui.unit.Velocity {
                 if (pullOffset.value >= thresholdPx && !isRefreshing) {
-                    onRefresh()
+                    if (!refreshTriggered) { refreshTriggered = true; onRefresh() }
                 } else if (!isRefreshing && pullOffset.value > 0f) {
                     pullOffset.animateTo(
                         0f,
@@ -193,7 +195,7 @@ fun LiquidPullToRefresh(
                         val allUp = event.changes.all { !it.pressed }
                         if (allUp && !isRefreshing) {
                             if (pullOffset.value >= thresholdPx) {
-                                onRefresh()
+                                if (!refreshTriggered) { refreshTriggered = true; onRefresh() }
                             } else if (pullOffset.value > 0f && !pullOffset.isRunning) {
                                 coroutineScope.launch {
                                     pullOffset.animateTo(

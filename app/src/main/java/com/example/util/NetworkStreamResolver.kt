@@ -353,6 +353,11 @@ object NetworkStreamResolver {
     internal fun prepareYtDlpForDownload(context: Context): Boolean {
         if (!ensureYtDlp(context)) return false
         waitForRunningUpdate()
+        // Keep the extracted yt-dlp current for downloads too. The previous implementation only initialized
+        // the bundled copy here, so sites could keep failing with a stale extractor indefinitely.
+        try { updateYtDlp(context, force = false) } catch (t: Throwable) {
+            Log.w(TAG, "scheduled yt-dlp refresh failed; using installed version", t)
+        }
         return true
     }
 

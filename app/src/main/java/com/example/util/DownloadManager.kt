@@ -510,9 +510,10 @@ object DownloadManager {
                 try {
                     runOnce()
                 } catch (t: Throwable) {
-                    // sites change all the time: one more try with the newest yt-dlp before giving up
+                    // Sites change frequently. Try updating yt-dlp, but still retry once with the installed
+                    // extractor when the updater is rate-limited or the network cannot reach GitHub.
                     if (stops.containsKey(id)) throw t
-                    if (!NetworkStreamResolver.forceYtDlpUpdate(app)) throw t
+                    NetworkStreamResolver.forceYtDlpUpdate(app)
                     runOnce()
                 }
             }
@@ -740,8 +741,9 @@ object DownloadManager {
         req.addOption("--retries", 10)
         req.addOption("--fragment-retries", 10)
         // full speed: 16 fragments of a DASH / HLS video at the same time, big HTTP chunks for everything else
-        req.addOption("-N", 16)
-        req.addOption("--http-chunk-size", "10M")
+        req.addOption("-N", 8)
+        // Avoid oversized HTTP chunks: some hosts close the connection after a large chunk request.
+        req.addOption("--http-chunk-size", "4M")
         req.addOption("--buffer-size", "256K")
         req.addOption("-f", format)
         for ((hName, hValue) in item.headers) {

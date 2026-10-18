@@ -375,7 +375,7 @@ fun ChannelDetailScreen(
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
-    val backgroundColor = if (isDark) Color(0xFF0B1120) else Color(0xFFF8FAFC)
+    val backgroundColor = if (isDark) Color(0xFF0B1120) else Color(0xFFF1F5F9)
 
     val currentDensity = LocalDensity.current
     val currentAppScale = (uiState?.appScale ?: 75f).coerceIn(1f, 100f)
