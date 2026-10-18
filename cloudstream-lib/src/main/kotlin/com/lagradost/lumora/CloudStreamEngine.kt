@@ -210,7 +210,7 @@ object CloudStreamEngine {
         .put("title", r.name)
         .put("link", encode(l, api, r.url))
         .put("image", r.posterUrl.orEmpty())
-        .put("tag", r.quality?.name ?: JSONObject.NULL)
+        .apply { r.quality?.name?.let { put("tag", it) } }
 
     /** `[{title, link, image, tag}]` of one category and page. */
     suspend fun postsJson(context: Context, pluginId: String, filter: String, page: Int): String {

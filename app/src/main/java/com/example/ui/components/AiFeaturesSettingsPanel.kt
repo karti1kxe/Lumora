@@ -217,7 +217,7 @@ fun AiFeaturesSettingsPanel(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clip(RoundedCornerShape(14.dp))
-                                            .background(if (isDark) Color(0xFF0B1220) else Color.White)
+                                            .background(if (isDark) Color(0xFF1E293B).copy(alpha = 0.40f) else Color(0xFFF1F5F9).copy(alpha = 0.70f))
                                             .border(1.dp, AccentSkyBlue.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
                                             .padding(horizontal = 14.dp, vertical = 12.dp)
                                     ) {
@@ -693,7 +693,7 @@ fun AiFeaturesSettingsPanel(
                                                         modifier = Modifier
                                                             .fillMaxWidth()
                                                             .clip(RoundedCornerShape(12.dp))
-                                                            .background(if (isDark) Color(0xFF0F172A) else Color.White)
+                                                            .background(if (isDark) Color(0xFF1E293B).copy(alpha = 0.40f) else Color(0xFFF1F5F9).copy(alpha = 0.70f))
                                                             .border(1.dp, AccentSkyBlue.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
                                                             .padding(horizontal = 10.dp, vertical = 8.dp)
                                                     ) {
@@ -1084,11 +1084,7 @@ private fun PlayerChoiceRow(
     var expanded by remember(value) { mutableStateOf(false) }
     val selectedLabel = options.firstOrNull { it.first == value }?.second ?: value.ifBlank { "Choose" }
 
-    val dropdownBg = if (isDark) {
-        Color(0xFF0F172A).copy(alpha = 0.96f)
-    } else {
-        Color(0xFFFFFFFF).copy(alpha = 0.98f)
-    }
+    val dropdownBg = glassPanelColor(isDark, LocalPanelTransparency.current)
 
     val dropdownBorder = if (isDark) {
         Color(0xFF38BDF8).copy(alpha = 0.55f)
@@ -1269,7 +1265,7 @@ private fun OutlinedFieldLike(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(if (isDark) Color(0xFF0B1220) else Color.White)
+            .background(if (isDark) Color(0xFF1E293B).copy(alpha = 0.40f) else Color(0xFFF1F5F9).copy(alpha = 0.70f))
             .border(1.dp, borderColor, RoundedCornerShape(14.dp))
             .padding(horizontal = 14.dp, vertical = 12.dp)
     ) {

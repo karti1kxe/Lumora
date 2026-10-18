@@ -290,7 +290,7 @@ object MediaProviderRepository {
             val title = o.optString("title", "").trim()
             val link = o.optString("link", "").trim()
             if (title.isEmpty() || !seen.add(link.ifEmpty { title })) continue
-            val tag = o.optString("tag", "").trim().ifEmpty { null }
+            val tag = if (o.isNull("tag")) null else o.optString("tag", "").trim().takeIf { it.isNotEmpty() && !it.equals("null", true) }
             out.add(MediaPost(title, link, o.optString("image", "").trim(), tag))
         }
         return out

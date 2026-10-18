@@ -31,6 +31,7 @@ fun LinkThumbnail(
     modifier: Modifier = Modifier,
     localVideoUri: Uri? = null,
     localVideoPath: String? = null,
+    contentScale: ContentScale = ContentScale.Crop,
     fallback: @Composable () -> Unit
 ) {
     val context = LocalContext.current.applicationContext
@@ -60,7 +61,7 @@ fun LinkThumbnail(
             Image(
                 bitmap = shown.asImageBitmap(),
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                contentScale = contentScale,
                 modifier = Modifier.matchParentSize()
             )
         } else {

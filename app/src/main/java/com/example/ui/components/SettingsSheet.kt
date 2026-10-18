@@ -5729,11 +5729,7 @@ private fun PlayerChoiceRow(
     // Dynamic glass opacity smoothly interpolates across slider (10% to 100%)
     // Uses high baseline opacity (86% to 99%) so background controls/text do not show through unevenly,
     // while providing genuine frosted glass translucency and seamlessly reacting to the UI Glass Blur & Opacity slider.
-    val dropdownBg = if (isDark) {
-        Color(0xFF0F172A).copy(alpha = (0.86f + 0.13f * effectiveFactor).coerceIn(0.86f, 0.99f))
-    } else {
-        Color(0xFFFFFFFF).copy(alpha = (0.88f + 0.11f * effectiveFactor).coerceIn(0.88f, 0.99f))
-    }
+    val dropdownBg = glassPanelColor(isDark, LocalPanelTransparency.current)
 
     val dropdownBorder = if (isDark) {
         Color(0xFF38BDF8).copy(alpha = (0.35f + 0.35f * effectiveFactor).coerceIn(0.35f, 0.70f))

@@ -130,17 +130,25 @@ fun MediaPluginManager(
     val busy = remember { mutableStateListOf<String>() }
     var bulkLabel by remember { mutableStateOf<String?>(null) }
 
-    // Downloaded plugins are listed first (the one downloaded last on top); the list scrolls up when a download finishes.
+    // Downloaded plugins are listed first (the one downloaded last on top) and stay listed when another repository is loaded;
+    // the not downloaded ones of the loaded repository follow. The scroll position is never moved by a download or a removal.
     val ordered = remember(manifest, installed) {
-        val installedAtById = installed.associate { it.value to it.installedAt }
-        val (done, todo) = manifest.partition { installedAtById.containsKey(it.value) }
-        done.sortedByDescending { installedAtById[it.value] ?: 0L } + todo
+        val manifestById = manifest.associateBy { it.value }
+        val done = installed.sortedByDescending { it.installedAt }.map { inst ->
+            val listed = manifestById[inst.value]
+            // the repository's entry carries the newest version / description; fall back to what was saved at download time
+            listed ?: inst
+        }
+        val installedIds = installed.map { it.value }.toSet()
+        done + manifest.filter { it.value !in installedIds }
     }
     val listState = rememberLazyListState()
-    var lastInstalledCount by remember { mutableStateOf(installed.size) }
-    LaunchedEffect(installed.size) {
-        if (installed.size > lastInstalledCount) listState.animateScrollToItem(0)
-        lastInstalledCount = installed.size
+    var pasteFlash by remember { mutableStateOf(false) }
+    LaunchedEffect(pasteFlash) {
+        if (pasteFlash) {
+            kotlinx.coroutines.delay(1400L)
+            pasteFlash = false
+        }
     }
 
     fun loadRepo() {
@@ -247,6 +255,30 @@ fun MediaPluginManager(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+                if (repoUrl.isNotEmpty()) {
+                    // cancel: removes the whole pasted link in one tap (the downloaded providers below stay)
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                repoUrl = ""
+                                errorText = null
+                                pasteFlash = false
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        StyledIcon(
+                            drawableRes = R.drawable.lumora_close_circle,
+                            contentDescription = "Clear link",
+                            tint = secondaryText.copy(alpha = 0.9f),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .size(44.dp)
@@ -256,15 +288,19 @@ fun MediaPluginManager(
                             indication = null
                         ) {
                             val text = clipboard.getText()?.text?.trim().orEmpty()
-                            if (text.isNotEmpty()) repoUrl = text
-                            else Toast.makeText(context, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+                            if (text.isNotEmpty()) {
+                                repoUrl = text
+                                pasteFlash = true
+                            } else {
+                                Toast.makeText(context, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+                            }
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     StyledIcon(
-                        drawableRes = R.drawable.lumora_paste,
+                        drawableRes = if (pasteFlash) R.drawable.lumora_pasted else R.drawable.lumora_paste,
                         contentDescription = "Paste URL",
-                        tint = primaryText.copy(alpha = 0.85f),
+                        tint = if (pasteFlash) AccentSkyBlue else primaryText.copy(alpha = 0.85f),
                         modifier = Modifier.size(24.dp)
                     )
                 }
@@ -414,7 +450,9 @@ private fun PluginRow(
     ) {
         LinkThumbnail(
             thumbnail = plugin.icon.ifBlank { null },
-            modifier = Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)),
+            // the whole logo is shown (never cropped)
+            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+            modifier = Modifier.size(50.dp).clip(RoundedCornerShape(12.dp)),
             fallback = {
                 StyledIcon(
                     drawableRes = R.drawable.lumora_cloud,
@@ -428,24 +466,44 @@ private fun PluginRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = plugin.name,
-                fontSize = 14.5.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Medium,
                 color = primaryText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            val status = when {
-                hasUpdate -> "Update available · v${plugin.version}"
-                isInstalled -> "Downloaded · v$installedVersion"
-                else -> "v${plugin.version}" + if (plugin.type.isNotBlank()) " · ${plugin.type}" else ""
-            }
+            // language, version and size on one line (like the CloudStream repository page)
+            val meta = buildList {
+                languageLabel(plugin.language)?.let { add(it) }
+                add("v${plugin.version}")
+                sizeLabel(plugin.size)?.let { add(it) }
+                if (plugin.type.isNotBlank() && !plugin.isCloudStream) add(plugin.type)
+            }.joinToString("  ")
             Text(
-                text = status,
-                fontSize = 12.sp,
-                color = if (isInstalled && !hasUpdate) AccentSkyBlue else secondaryText,
+                text = meta,
+                fontSize = 12.5.sp,
+                color = secondaryText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            if (plugin.description.isNotBlank()) {
+                Text(
+                    text = plugin.description.trim(),
+                    fontSize = 12.5.sp,
+                    color = secondaryText.copy(alpha = 0.85f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (isInstalled) {
+                Text(
+                    text = if (hasUpdate) "Update available · downloaded v$installedVersion" else "Downloaded",
+                    fontSize = 12.sp,
+                    color = AccentSkyBlue,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
         if (busy) {
             Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
@@ -460,6 +518,35 @@ private fun PluginRow(
             }
         }
     }
+}
+
+/** "🇬🇧 English" for a repository language code; "🌐 Multi" for several languages; null when unknown. */
+private fun languageLabel(code: String): String? {
+    val c = code.trim().lowercase()
+    if (c.isEmpty()) return null
+    if (c == "multi" || c == "all" || c == "multiple") return "\uD83C\uDF10 Multi"
+    val flagCountry = when (c) {
+        "en" -> "GB"; "hi" -> "IN"; "ta" -> "IN"; "te" -> "IN"; "ml" -> "IN"; "kn" -> "IN"; "mr" -> "IN"; "pa" -> "IN"
+        "bn" -> "BD"; "ur" -> "PK"; "ja" -> "JP"; "ko" -> "KR"; "zh" -> "CN"; "ar" -> "SA"; "he" -> "IL"; "fa" -> "IR"
+        "el" -> "GR"; "uk" -> "UA"; "sv" -> "SE"; "da" -> "DK"; "cs" -> "CZ"; "vi" -> "VN"; "id" -> "ID"; "tl" -> "PH"
+        else -> if (c.length == 2) c.uppercase() else null
+    }
+    val flag = flagCountry?.let { cc ->
+        String(Character.toChars(0x1F1E6 + (cc[0] - 'A'))) + String(Character.toChars(0x1F1E6 + (cc[1] - 'A')))
+    }
+    val name = try {
+        java.util.Locale(c).getDisplayLanguage(java.util.Locale.ENGLISH).takeIf { it.isNotBlank() } ?: c.uppercase()
+    } catch (_: Throwable) {
+        c.uppercase()
+    }
+    return if (flag != null) "$flag $name" else name
+}
+
+private fun sizeLabel(bytes: Long): String? = when {
+    bytes <= 0L -> null
+    bytes < 1000L -> "$bytes B"
+    bytes < 1_000_000L -> "${bytes / 1000} kB"
+    else -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1_000_000.0)
 }
 
 @Composable

@@ -255,13 +255,7 @@ fun AdvancedSettingsPanel(
             }
         ) {
             val alphaRatio = (uiState.glassBlurTransparency / 100f).coerceIn(0.10f, 1.0f)
-            val dialogBg = if (isDark) {
-                if (alphaRatio >= 0.99f) Color(0xFF0F172A)
-                else Color(0xFF0F172A).copy(alpha = (0.15f + 0.80f * alphaRatio).coerceIn(0.12f, 0.98f))
-            } else {
-                if (alphaRatio >= 0.99f) Color(0xFFFFFFFF)
-                else Color(0xFFFFFFFF).copy(alpha = (0.15f + 0.80f * alphaRatio).coerceIn(0.12f, 0.98f))
-            }
+            val dialogBg = glassPanelColor(isDark, LocalPanelTransparency.current)
 
             Box(
                 modifier = Modifier

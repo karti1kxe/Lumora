@@ -194,13 +194,7 @@ fun StoragePermissionDialog(
     }
 
     val alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.10f, 1.0f)
-    val cardBackground = if (isDark) {
-        if (alphaRatio >= 0.99f) Color(0xFF0F172A)
-        else Color(0xFF0F172A).copy(alpha = (0.40f + 0.60f * alphaRatio).coerceIn(0.25f, 1.0f))
-    } else {
-        if (alphaRatio >= 0.99f) Color.White
-        else Color.White.copy(alpha = (0.45f + 0.55f * alphaRatio).coerceIn(0.25f, 1.0f))
-    }
+    val cardBackground = glassPanelColor(isDark, glassBlurTransparency)
     val cardBorder = if (isDark) {
         Color(0xFF38BDF8).copy(alpha = (0.25f + 0.45f * alphaRatio).coerceIn(0.20f, 0.70f))
     } else {

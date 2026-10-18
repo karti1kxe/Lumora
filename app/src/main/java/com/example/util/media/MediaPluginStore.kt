@@ -80,7 +80,10 @@ object MediaPluginStore {
                         installedAt = o.optLong("installedAt", 0L),
                         engine = if (isCs) MediaPluginInfo.ENGINE_CLOUDSTREAM else MediaPluginInfo.ENGINE_VEGA,
                         url = o.optString("url", ""),
-                        fileHash = o.optString("hash", "")
+                        fileHash = o.optString("hash", ""),
+                        language = o.optString("language", ""),
+                        description = o.optString("description", ""),
+                        size = o.optLong("size", 0L)
                     )
                 )
             } catch (_: Throwable) {
@@ -306,6 +309,9 @@ object MediaPluginStore {
                         .put("engine", MediaPluginInfo.ENGINE_CLOUDSTREAM)
                         .put("url", p.optString("url"))
                         .put("hash", p.optString("fileHash", "").takeIf { it != "null" }.orEmpty())
+                        .put("language", p.optString("language", "").takeIf { it != "null" }.orEmpty())
+                        .put("description", p.optString("description", "").takeIf { it != "null" }.orEmpty())
+                        .put("size", p.optLong("fileSize", 0L))
                 )
             }
             val manifestText = normalised.toString()
@@ -368,6 +374,9 @@ object MediaPluginStore {
                 .put("engine", MediaPluginInfo.ENGINE_CLOUDSTREAM)
                 .put("url", plugin.url)
                 .put("hash", plugin.fileHash)
+                .put("language", plugin.language)
+                .put("description", plugin.description)
+                .put("size", plugin.size)
                 .put("installedAt", getInstalled(context).firstOrNull { it.value == plugin.value }?.installedAt
                     ?: System.currentTimeMillis())
             File(tmp, "meta.json").writeText(meta.toString())
@@ -489,7 +498,10 @@ object MediaPluginStore {
                     type = o.optString("type", ""),
                     engine = if (o.optString("engine", "") == MediaPluginInfo.ENGINE_CLOUDSTREAM) MediaPluginInfo.ENGINE_CLOUDSTREAM else MediaPluginInfo.ENGINE_VEGA,
                     url = o.optString("url", ""),
-                    fileHash = o.optString("hash", "")
+                    fileHash = o.optString("hash", ""),
+                    language = o.optString("language", ""),
+                    description = o.optString("description", ""),
+                    size = o.optLong("size", 0L)
                 )
             )
         }

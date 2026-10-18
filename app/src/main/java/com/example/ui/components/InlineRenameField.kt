@@ -82,7 +82,7 @@ fun InlineRenameField(
                 spotColor = AccentSkyBlue.copy(alpha = 0.35f)
             )
             .clip(RoundedCornerShape(10.dp))
-            .background(Color.White)
+            .background(Color(0xFFF1F5F9))
             .border(1.5.dp, AccentSkyBlue, RoundedCornerShape(10.dp))
             .padding(horizontal = 8.dp, vertical = 4.dp),
         contentAlignment = Alignment.CenterStart

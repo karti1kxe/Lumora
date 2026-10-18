@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import android.content.Context
+import com.example.ui.components.LocalPanelTransparency
+import com.example.ui.components.glassPanelColor
 import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -1479,7 +1481,7 @@ private fun TrackOptionsDialog(
             }
         },
         shape = RoundedCornerShape(20.dp),
-        containerColor = surfaceColor
+        containerColor = glassPanelColor(isDark, LocalPanelTransparency.current)
     )
 }
 
@@ -1752,6 +1754,6 @@ private fun SavePlaylistDialog(
             }
         },
         shape = RoundedCornerShape(20.dp),
-        containerColor = if (isDark) DarkGlassSurface else LightGlassSurface
+        containerColor = glassPanelColor(isDark, LocalPanelTransparency.current)
     )
 }

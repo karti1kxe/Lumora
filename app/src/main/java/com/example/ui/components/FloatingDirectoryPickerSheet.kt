@@ -138,13 +138,7 @@ fun FloatingDirectoryPickerSheet(
     var newDirName by remember { mutableStateOf("") }
 
     val alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.10f, 1.0f)
-    val sheetBg = if (isDark) {
-        if (alphaRatio >= 0.99f) Color(0xFF0F172A)
-        else Color(0xFF0F172A).copy(alpha = (0.12f + 0.85f * alphaRatio).coerceIn(0.12f, 1.0f))
-    } else {
-        if (alphaRatio >= 0.99f) Color(0xFFFFFFFF)
-        else Color(0xFFFFFFFF).copy(alpha = (0.12f + 0.85f * alphaRatio).coerceIn(0.12f, 1.0f))
-    }
+    val sheetBg = glassPanelColor(isDark, glassBlurTransparency)
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
@@ -359,7 +353,7 @@ fun FloatingDirectoryPickerSheet(
                             .fillMaxWidth()
                             .padding(vertical = 6.dp)
                             .clip(RoundedCornerShape(14.dp))
-                            .background(if (isDark) Color(0xFF1E293B).copy(alpha = (0.15f + 0.50f * alphaRatio)) else Color(0xFFFFFFFF).copy(alpha = (0.12f + 0.55f * alphaRatio)))
+                            .background(if (isDark) Color(0xFF1E293B).copy(alpha = 0.40f) else Color(0xFFF1F5F9).copy(alpha = 0.70f))
                             .border(1.dp, borderColor, RoundedCornerShape(14.dp))
                             .padding(horizontal = 12.dp, vertical = 8.dp)
                     ) {
@@ -410,7 +404,7 @@ fun FloatingDirectoryPickerSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
-                        .background(if (isDark) Color(0xFF1E293B).copy(alpha = (0.10f + 0.40f * alphaRatio)) else Color(0xFFFFFFFF).copy(alpha = (0.10f + 0.40f * alphaRatio)))
+                        .background(if (isDark) Color(0xFF1E293B).copy(alpha = 0.40f) else Color(0xFFF1F5F9).copy(alpha = 0.70f))
                         .horizontalScroll(breadcrumbScrollState)
                         .padding(horizontal = 10.dp, vertical = 7.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -501,7 +495,7 @@ fun FloatingDirectoryPickerSheet(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(14.dp))
-                                        .background(if (isDark) Color(0xFF1E293B).copy(alpha = (0.12f + 0.45f * alphaRatio)) else Color(0xFFFFFFFF).copy(alpha = (0.10f + 0.45f * alphaRatio)))
+                                        .background(if (isDark) Color(0xFF1E293B).copy(alpha = 0.40f) else Color(0xFFF1F5F9).copy(alpha = 0.70f))
                                         .border(1.dp, borderColor.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
                                         .clickable {
                                             if (item.isDirectory) {
@@ -618,7 +612,7 @@ fun FloatingDirectoryPickerSheet(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
-                            .background(if (isDark) Color(0xFF1E293B).copy(alpha = (0.15f + 0.50f * alphaRatio)) else Color(0xFFFFFFFF).copy(alpha = (0.12f + 0.55f * alphaRatio)))
+                            .background(if (isDark) Color(0xFF1E293B).copy(alpha = 0.40f) else Color(0xFFF1F5F9).copy(alpha = 0.70f))
                             .border(1.dp, borderColor.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -707,7 +701,7 @@ fun FloatingDirectoryPickerSheet(
                     .fillMaxWidth(0.90f)
                     .clip(RoundedCornerShape(24.dp))
                     .background(sheetBg)
-                    .border(1.5.dp, AccentGradient, RoundedCornerShape(24.dp))
+                    .border(1.2.dp, if (isDark) LiquidGlassDefaults.DarkGlassBorderBrush else LiquidGlassDefaults.LightGlassBorderBrush, RoundedCornerShape(24.dp))
                     .padding(22.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {

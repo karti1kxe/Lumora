@@ -190,7 +190,7 @@ fun SubtitleFileTreeDialog(
 
     // Color Palette matching Player Glass aesthetic
     // Light surfaces follow the glass-transparency slider (same value the sheet background uses).
-    val whiteAlpha = if (glassBlurTransparency < 25f) 1f else (glassBlurTransparency / 100f).coerceIn(0.40f, 1f)
+    val whiteAlpha = 0.70f // same tile look as Sort & View; only the panel itself follows the glass slider
     val isDark = com.example.ui.theme.isAppInDarkTheme()
     val accentBlue = if (isDark) Color(0xFF38BDF8) else Color(0xFF0284C7)
     val textPrimary = if (isDark) Color(0xFFF8FAFC) else Color(0xFF0F172A)

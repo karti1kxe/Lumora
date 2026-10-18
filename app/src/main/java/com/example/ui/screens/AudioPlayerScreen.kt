@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import android.Manifest
+import com.example.ui.components.LocalPanelTransparency
+import com.example.ui.components.glassPanelColor
 import com.example.ui.components.LumoraExpressiveLoadingIndicator
 import android.content.ContentUris
 import android.content.Context
@@ -1554,11 +1556,7 @@ fun AudioPlayerScreen(
         }
 
         // ================= BOTTOM SHEETS & DIALOGS (TRANSLUCENT LIQUID GLASS) ================= //
-        val floatingSheetBg = if (isDark) {
-            Color(0xFF0B1120).copy(alpha = (0.75f + 0.20f * alphaFactor).coerceIn(0.55f, 0.95f))
-        } else {
-            Color(0xFFFFFFFF).copy(alpha = (0.75f + 0.20f * alphaFactor).coerceIn(0.60f, 0.96f))
-        }
+        val floatingSheetBg = glassPanelColor(isDark, LocalPanelTransparency.current)
 
         // 0. ADD TO PLAYLIST DIALOG
         if (showAddToPlaylistDialog) {

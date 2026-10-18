@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.Image
+import com.example.ui.components.LocalPanelTransparency
+import com.example.ui.components.glassPanelColor
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -5437,13 +5439,7 @@ fun RenameDialog(
     onConfirm: (String) -> Unit
 ) {
     var textValue by remember { mutableStateOf(initialText) }
-    val dialogBg = if (isDark) {
-        if (alphaRatio >= 0.99f) Color(0xFF0F172A)
-        else Color(0xFF0F172A).copy(alpha = (0.75f + 0.25f * alphaRatio).coerceIn(0.50f, 1.0f))
-    } else {
-        if (alphaRatio >= 0.99f) Color(0xFFFFFFFF)
-        else Color(0xFFFFFFFF).copy(alpha = (0.80f + 0.20f * alphaRatio).coerceIn(0.55f, 1.0f))
-    }
+    val dialogBg = glassPanelColor(isDark, LocalPanelTransparency.current)
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
 
@@ -6042,13 +6038,7 @@ private fun FolderInformationSheet(
                 ),
             contentAlignment = Alignment.BottomCenter
         ) {
-            val sheetBg = if (isDark) {
-                if (alpha >= 0.99f) Color(0xFF0F172A)
-                else Color(0xFF0F172A).copy(alpha = (0.50f + 0.50f * alpha).coerceIn(0.35f, 1.0f))
-            } else {
-                if (alpha >= 0.99f) Color(0xFFFFFFFF)
-                else Color(0xFFFFFFFF).copy(alpha = (0.55f + 0.45f * alpha).coerceIn(0.40f, 1.0f))
-            }
+            val sheetBg = glassPanelColor(isDark, LocalPanelTransparency.current)
             val sheetInteractionSource = remember { MutableInteractionSource() }
             Column(
                 Modifier
@@ -6198,7 +6188,7 @@ private fun AudioFolderInformationSheet(
                         indication = null
                     ) { /* Consume touch events */ }
                     .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-                    .background(if (isDark) Color(0xFF0F172A).copy(alpha = .98f) else Color.White.copy(alpha = .98f))
+                    .background(glassPanelColor(isDark, LocalPanelTransparency.current))
                     .border(1.dp, border, RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
                     .padding(16.dp)
                     .navigationBarsPadding()

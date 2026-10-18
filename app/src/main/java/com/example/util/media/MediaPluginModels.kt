@@ -13,7 +13,13 @@ data class MediaPluginInfo(
     /** CloudStream only: where the .cs3 file is downloaded from. */
     val url: String = "",
     /** CloudStream only: the "sha256-..." the repository lists for the .cs3 file (empty = not checked). */
-    val fileHash: String = ""
+    val fileHash: String = "",
+    /** Language code the repository lists ("en", "hi", "multi" ...), empty when unknown. */
+    val language: String = "",
+    /** One-line description of the provider, empty when the repository has none. */
+    val description: String = "",
+    /** Size of the downloadable file in bytes, 0 when unknown. */
+    val size: Long = 0L
 ) {
     val isCloudStream: Boolean get() = engine == ENGINE_CLOUDSTREAM
 

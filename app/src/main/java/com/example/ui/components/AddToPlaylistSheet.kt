@@ -73,13 +73,7 @@ fun AddToPlaylistDialog(
     val searchFocusRequester = remember { FocusRequester() }
 
     val alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f)
-    val sheetBg = if (isDark) {
-        if (alphaRatio >= 0.99f) Color(0xFF0F172A)
-        else Color(0xFF0F172A).copy(alpha = (0.50f + 0.50f * alphaRatio).coerceIn(0.35f, 1.0f))
-    } else {
-        if (alphaRatio >= 0.99f) Color(0xFFFFFFFF)
-        else Color(0xFFFFFFFF).copy(alpha = (0.55f + 0.45f * alphaRatio).coerceIn(0.40f, 1.0f))
-    }
+    val sheetBg = glassPanelColor(isDark, glassBlurTransparency)
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
