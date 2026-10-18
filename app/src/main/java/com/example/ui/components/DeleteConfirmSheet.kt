@@ -60,7 +60,6 @@ fun DeleteConfirmSheet(
     val accent = if (isDark) Color(0xFF5FD3E6) else Color(0xFF006877)
     val red = Color(0xFFB3261E)
 
-    PanelScaled {
 ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -68,6 +67,7 @@ ModalBottomSheet(
         dragHandle = null,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
     ) {
+        PanelScaled {
         Column(
             modifier = Modifier
                 .fillMaxWidth()

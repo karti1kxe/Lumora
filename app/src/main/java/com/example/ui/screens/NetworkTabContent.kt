@@ -115,6 +115,16 @@ fun NetworkTabContent(
     var optionsEntry by remember { mutableStateOf<RecentStreamEntry?>(null) }
     var url by rememberSaveable { mutableStateOf("") }
     var isResolving by remember { mutableStateOf(false) }
+    // A pasted link is resolved in the background right away, so Play (a moment later) starts almost instantly.
+    var previousUrlLength by remember { mutableStateOf(0) }
+    LaunchedEffect(url) {
+        val grewBy = url.length - previousUrlLength
+        previousUrlLength = url.length
+        if (grewBy >= 8) {
+            kotlinx.coroutines.delay(250)
+            NetworkStreamResolver.prefetch(context, url)
+        }
+    }
     var pasteFlash by remember { mutableStateOf(false) }
     var resolvingLabel by remember { mutableStateOf("Loading link…") }
     val recentTick by RecentStreamStore.changes.collectAsState()

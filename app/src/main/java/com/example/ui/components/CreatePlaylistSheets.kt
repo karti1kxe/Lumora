@@ -71,7 +71,6 @@ private fun PlaylistBottomSheet(
 ) {
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    PanelScaled {
 ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -89,6 +88,7 @@ ModalBottomSheet(
             )
         }
     ) {
+        PanelScaled {
         // imePadding keeps the fields and the buttons above the keyboard; the column scrolls if it does not fit
         Column(
             modifier = Modifier

@@ -4,10 +4,17 @@ import android.content.Context
 import android.util.Log
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
 
 /** A pasted network link, resolved to something the app's players can open. */
 data class NetworkStream(
@@ -57,6 +64,11 @@ object NetworkStreamResolver {
     private const val UPDATE_TIMEOUT_SEC = 25L
     private const val YTDLP_BASE_DIR = "youtubedl-android"
     private const val KEY_BUNDLED_YTDLP = "bundled_ytdlp_version"
+    // Launch update: checked against the official yt-dlp GitHub releases every time the app is opened.
+    private const val LAUNCH_UPDATE_MIN_GAP_MS = 60 * 1000L
+    private const val LAUNCH_UPDATE_TIMEOUT_SEC = 120L
+    // A link must never wait long for a running update; after this the link is resolved with the installed copy.
+    private const val UPDATE_WAIT_SEC = 3L
 
 
     private val cache = ConcurrentHashMap<String, Pair<Long, NetworkStream>>()
@@ -68,6 +80,14 @@ object NetworkStreamResolver {
     @Volatile private var ytdlpReady = false
     private val initLock = Any()
     private val updateLock = Any()
+    /** Held while the yt-dlp files are being replaced, so a link is not resolved with a half-written copy. */
+    private val updateRunLock = ReentrantLock()
+    private val launchUpdateRunning = AtomicBoolean(false)
+    @Volatile private var lastLaunchUpdateAt = 0L
+
+    private val resolveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Links that are being resolved right now (shared by the background prefetch and the Play button). */
+    private val inFlight = ConcurrentHashMap<String, Deferred<NetworkStream?>>()
 
     /** Short, human-readable reason of the last failed [resolve] (shown to the user). */
     @Volatile var lastError: String? = null
@@ -110,33 +130,61 @@ object NetworkStreamResolver {
     fun cached(url: String): NetworkStream? =
         cache[url]?.takeIf { System.currentTimeMillis() - it.first < CACHE_TTL_MS }?.second
 
-    suspend fun resolve(context: Context, url: String, forceRefresh: Boolean = false): NetworkStream? =
-        withContext(Dispatchers.IO) {
-            if (!forceRefresh) cached(url)?.let { return@withContext it }
-            lastError = null
-            val appCtx = context.applicationContext
-
-            val result: NetworkStream? = try {
-                if (isSpotifyUrl(url)) {
-                    resolveSpotify(url)
-                } else if (isDirectMediaUrl(url)) {
-                    directStream(url)
-                } else if (isYoutubeHost(url)) {
-                    // YouTube changes its player constantly; the NewPipe path is what Online Music/Video already use,
-                    // so it goes first and yt-dlp is the second chance.
-                    resolveWithNewPipe(appCtx, url) ?: resolveWithYtDlp(appCtx, url)
-                } else {
-                    resolveWithYtDlp(appCtx, url)
+    suspend fun resolve(context: Context, url: String, forceRefresh: Boolean = false): NetworkStream? {
+        if (!forceRefresh) cached(url)?.let { return it }
+        val appCtx = context.applicationContext
+        // A link that is already being resolved (background prefetch right after it was pasted) is shared with
+        // the caller instead of running yt-dlp a second time.
+        val deferred = inFlight.computeIfAbsent(url) { key ->
+            resolveScope.async {
+                try {
+                    resolveNow(appCtx, key)
+                } finally {
+                    inFlight.remove(key)
                 }
-            } catch (t: Throwable) {
-                Log.w(TAG, "resolve failed for $url", t)
-                if (lastError == null) lastError = shortReason(t)
-                null
             }
-            if (result != null) cache[url] = System.currentTimeMillis() to result
-            else if (lastError == null) lastError = "No playable stream found"
-            result
         }
+        return deferred.await()
+    }
+
+    /**
+     * Resolves a pasted link in the background (nothing is shown) so the result is cached by the time the user
+     * presses Play. Failures are silent: Play simply tries again.
+     */
+    fun prefetch(context: Context, url: String) {
+        val normalized = normalizeUrl(url) ?: return
+        if (isSpotifyUrl(normalized) || isDirectMediaUrl(normalized)) return
+        if (normalized.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)) return
+        if (cached(normalized) != null || inFlight.containsKey(normalized)) return
+        val appCtx = context.applicationContext
+        resolveScope.launch {
+            try { resolve(appCtx, normalized) } catch (_: Throwable) {}
+        }
+    }
+
+    private suspend fun resolveNow(appCtx: Context, url: String): NetworkStream? {
+        lastError = null
+        val result: NetworkStream? = try {
+            if (isSpotifyUrl(url)) {
+                resolveSpotify(url)
+            } else if (isDirectMediaUrl(url)) {
+                directStream(url)
+            } else if (isYoutubeHost(url)) {
+                // YouTube changes its player constantly; the NewPipe path is what Online Music/Video already use,
+                // so it goes first and yt-dlp is the second chance.
+                resolveWithNewPipe(appCtx, url) ?: resolveWithYtDlp(appCtx, url)
+            } else {
+                resolveWithYtDlp(appCtx, url)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "resolve failed for $url", t)
+            if (lastError == null) lastError = shortReason(t)
+            null
+        }
+        if (result != null) cache[url] = System.currentTimeMillis() to result
+        else if (lastError == null) lastError = "No playable stream found"
+        return result
+    }
 
     private fun directStream(url: String): NetworkStream {
         val name = try {
@@ -231,26 +279,80 @@ object NetworkStreamResolver {
             if (!force && (age < UPDATE_INTERVAL_MS || sinceAttempt < UPDATE_ATTEMPT_GAP_MS)) return false
             if (force && (age < RETRY_UPDATE_MIN_GAP_MS || sinceAttempt < RETRY_UPDATE_MIN_GAP_MS)) return false
             prefs.edit().putLong(KEY_LAST_YTDLP_ATTEMPT, now).apply()
+            return runLibraryUpdate(context, UPDATE_TIMEOUT_SEC)
+        }
+    }
+
+    /**
+     * Downloads the newest official yt-dlp release from github.com/yt-dlp/yt-dlp (youtubedl-android's updater;
+     * it does nothing when the installed copy is already the latest). The yt-dlp files are replaced while
+     * [updateRunLock] is held. The wait is capped at [timeoutSec] seconds.
+     */
+    private fun runLibraryUpdate(context: Context, timeoutSec: Long): Boolean {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        updateRunLock.lock()
+        try {
             val task = java.util.concurrent.FutureTask<Boolean>(java.util.concurrent.Callable {
                 YoutubeDL.getInstance().updateYoutubeDL(context, YoutubeDL.UpdateChannel.STABLE)
                 true
             })
             Thread(task, "ytdlp-update").apply { isDaemon = true }.start()
             return try {
-                task.get(UPDATE_TIMEOUT_SEC, java.util.concurrent.TimeUnit.SECONDS)
+                task.get(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)
                 prefs.edit().putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
                 true
             } catch (t: Throwable) {
                 Log.w(TAG, "yt-dlp update failed", t)
+                task.cancel(true)
                 false
             }
+        } finally {
+            updateRunLock.unlock()
+        }
+    }
+
+    /**
+     * Called every time the app is opened: in the background (never blocking the UI or a link) yt-dlp is started
+     * once (so the first link does not pay for Python start-up) and the newest official yt-dlp release is fetched
+     * from GitHub when there is one.
+     */
+    fun startBackgroundUpdate(context: Context) {
+        val app = context.applicationContext
+        val now = System.currentTimeMillis()
+        if (now - lastLaunchUpdateAt < LAUNCH_UPDATE_MIN_GAP_MS) return
+        if (!launchUpdateRunning.compareAndSet(false, true)) return
+        lastLaunchUpdateAt = now
+        Thread({
+            try {
+                if (ensureYtDlp(app)) {
+                    app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                        .edit().putLong(KEY_LAST_YTDLP_ATTEMPT, System.currentTimeMillis()).apply()
+                    runLibraryUpdate(app, LAUNCH_UPDATE_TIMEOUT_SEC)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "background yt-dlp update failed", t)
+            } finally {
+                launchUpdateRunning.set(false)
+            }
+        }, "ytdlp-launch-update").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+        }.start()
+    }
+
+    /** A link only waits (briefly) when the yt-dlp files are being replaced at this very moment. */
+    private fun waitForRunningUpdate() {
+        if (!updateRunLock.isLocked) return
+        try {
+            if (updateRunLock.tryLock(UPDATE_WAIT_SEC, java.util.concurrent.TimeUnit.SECONDS)) updateRunLock.unlock()
+        } catch (_: InterruptedException) {
         }
     }
 
     /** Download page: starts yt-dlp (and refreshes it when it is old) before a download begins. */
     internal fun prepareYtDlpForDownload(context: Context): Boolean {
         if (!ensureYtDlp(context)) return false
-        updateYtDlp(context, force = false)
+        waitForRunningUpdate()
         return true
     }
 
@@ -259,7 +361,7 @@ object NetworkStreamResolver {
 
     private fun resolveWithYtDlp(context: Context, url: String): NetworkStream? {
         if (!ensureYtDlp(context)) return null
-        updateYtDlp(context, force = false)
+        waitForRunningUpdate()
         val audioOnly = isMusicHost(url)
         var result = runYtDlp(url, audioOnly)
         if (result == null) {

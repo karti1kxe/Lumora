@@ -71,7 +71,6 @@ internal fun DownloadGlassSheet(
 ) {
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    PanelScaled {
 ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -89,6 +88,7 @@ ModalBottomSheet(
             )
         }
     ) {
+        PanelScaled {
         Column(
             modifier = Modifier
                 .fillMaxWidth()

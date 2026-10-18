@@ -475,6 +475,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // Every time the app is opened: pre-start yt-dlp and fetch the newest official release in the background.
+        try { com.example.util.NetworkStreamResolver.startBackgroundUpdate(applicationContext) } catch (_: Throwable) {}
+    }
+
     override fun onResume() {
         super.onResume()
         val hasPerm = hasVideoPermission(this)

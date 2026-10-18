@@ -1225,7 +1225,6 @@ fun FoldersSettingsTabContent(
         val sheetAlphaFactor = (glassBlurTransparency / 100f).coerceIn(0.20f, 1.0f)
         val sheetContainerColor = glassPanelColor(isDark, glassBlurTransparency)
 
-        PanelScaled {
 ModalBottomSheet(
             onDismissRequest = { showVaultSetupSheet = false },
             sheetState = sheetState,
@@ -1242,6 +1241,7 @@ ModalBottomSheet(
                 )
             }
         ) {
+            PanelScaled {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1455,7 +1455,6 @@ ModalBottomSheet(
         val sheetAlphaFactor = (glassBlurTransparency / 100f).coerceIn(0.20f, 1.0f)
         val sheetContainerColor = glassPanelColor(isDark, glassBlurTransparency)
 
-        PanelScaled {
 ModalBottomSheet(
             onDismissRequest = { showVaultUnlockSheet = false },
             sheetState = sheetState,
@@ -1472,6 +1471,7 @@ ModalBottomSheet(
                 )
             }
         ) {
+            PanelScaled {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
