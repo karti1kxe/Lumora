@@ -36,11 +36,8 @@ fun LinkThumbnail(
 ) {
     val context = LocalContext.current.applicationContext
     val key = (thumbnail ?: "") + "|" + (localVideoUri?.toString() ?: "") + "|" + (localVideoPath ?: "")
-    val reloadTick = ImageReloadSignal.tick
     var bitmap by remember(key) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(key, reloadTick) {
-        // a picture that is already shown is kept; only the ones still empty try again after a pull-down refresh
-        if (bitmap != null) return@LaunchedEffect
+    LaunchedEffect(key) {
         var bmp: Bitmap? = null
         if (!thumbnail.isNullOrBlank()) {
             bmp = if (thumbnail.startsWith("http")) {

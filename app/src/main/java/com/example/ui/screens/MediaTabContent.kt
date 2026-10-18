@@ -37,7 +37,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -656,29 +655,18 @@ fun MediaPluginPage(
             MediaDetailState.providerRefreshing = false
         }
     }
-    // leaving the page (Back, another tab, a title) must not leave the refresh flag on for the next screen
-    DisposableEffect(plugin.value) {
-        onDispose { MediaDetailState.providerRefreshing = false }
-    }
 
     LaunchedEffect(plugin.value, plugin.version, reloadKey) {
-        // a refresh keeps the rows that are already on screen until the new ones arrive (no blank page + spinner flash)
-        val refreshing = reloadKey > 0 && catalog != null
-        if (!refreshing) catalog = null
+        catalog = null
         catalogError = null
         try {
             catalog = MediaProviderRepository.loadCatalog(context, plugin.value, force = reloadKey > 0)
-            // the rows' pictures that failed to load earlier are tried again
-            com.example.ui.components.ImageReloadSignal.bump()
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            if (catalog == null) catalogError = t.message ?: "Could not load this plugin"
+            catalogError = t.message ?: "Could not load this plugin"
         } finally {
-            // a load that was only cut short by a newer one must not switch the indicator off for that newer load
-            if (kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]?.isCancelled != true) {
-                MediaDetailState.providerRefreshing = false
-            }
+            MediaDetailState.providerRefreshing = false
         }
     }
 

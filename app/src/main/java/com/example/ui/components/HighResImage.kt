@@ -9,11 +9,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -133,17 +131,6 @@ object HighResImageLoader {
     }
 }
 
-/**
- * Bumped by a pull-down refresh: every picture that is on screen without its image (an earlier download failed)
- * tries again, pictures that are already loaded come straight from the memory / disk cache.
- */
-object ImageReloadSignal {
-    var tick by mutableIntStateOf(0)
-        private set
-
-    fun bump() { tick++ }
-}
-
 /** Sharp network image; [placeholder] is shown until it is loaded (or when it cannot be loaded). */
 @Composable
 fun HighResImage(
@@ -155,18 +142,9 @@ fun HighResImage(
     placeholder: @Composable () -> Unit = {}
 ) {
     val context = LocalContext.current.applicationContext
-    val reloadTick = ImageReloadSignal.tick
     var bitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(url, reloadTick) {
-        if (bitmap != null) return@LaunchedEffect
-        if (url.isNullOrBlank()) { bitmap = null; return@LaunchedEffect }
-        var loaded = try { HighResImageLoader.load(context, url, maxSidePx) } catch (_: Throwable) { null }
-        // one quick second try: a picture that failed only because the connection was busy appears by itself
-        if (loaded == null) {
-            delay(1200L)
-            loaded = try { HighResImageLoader.load(context, url, maxSidePx) } catch (_: Throwable) { null }
-        }
-        bitmap = loaded
+    LaunchedEffect(url) {
+        bitmap = if (url.isNullOrBlank()) null else try { HighResImageLoader.load(context, url, maxSidePx) } catch (_: Throwable) { null }
     }
     val shown = bitmap
     Box(modifier = modifier, contentAlignment = Alignment.Center) {

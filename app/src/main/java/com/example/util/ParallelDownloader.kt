@@ -28,7 +28,7 @@ object ParallelDownloader {
     private const val TAG = "ParallelDownloader"
     private const val CHUNK_BYTES = 4L * 1024 * 1024
     private const val MAX_CONNECTIONS = 16
-    private const val CHUNK_RETRIES = 6
+    private const val CHUNK_RETRIES = 9
     const val PART_EXT = "lpart"
     const val STATE_EXT = "lstate"
 
@@ -264,7 +264,7 @@ object ParallelDownloader {
                 if (stop.get() || isCancelled()) throw CancelledException()
                 if (attempt >= CHUNK_RETRIES) throw t
                 Log.w(TAG, "chunk $index retry $attempt: ${t.message}")
-                try { Thread.sleep(400L * attempt) } catch (_: InterruptedException) { throw CancelledException() }
+                try { Thread.sleep(minOf(400L * attempt * attempt, 6_000L)) } catch (_: InterruptedException) { throw CancelledException() }
             }
         }
     }

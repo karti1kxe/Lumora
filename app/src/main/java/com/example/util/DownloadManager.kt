@@ -38,7 +38,7 @@ import java.util.concurrent.atomic.AtomicReference
 object DownloadManager {
     private const val TAG = "DownloadManager"
     private const val MAX_PARALLEL = 3
-    private const val MAX_AUTO_RETRIES = 4
+    private const val MAX_AUTO_RETRIES = 8
     private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "ogg", "opus", "wav", "flac")
 
     private enum class Stop { PAUSE, CANCEL }
@@ -292,7 +292,9 @@ object DownloadManager {
                     // A lost connection / a changed link must never throw the download away: it is retried (the data
                     // that is already on disk is kept and continued) and only fails for good after several tries.
                     var attempt = 0
+                    var resets = 0
                     while (true) {
+                        val bytesAtStart = DownloadStore.get(id)?.downloadedBytes ?: 0L
                         try {
                             if (!stops.containsKey(id)) runDownload(app, id)
                             break
@@ -300,6 +302,10 @@ object DownloadManager {
                             throw e
                         } catch (t: Throwable) {
                             if (stops.containsKey(id)) break
+                            // a try that still brought new data is not a failed try: a slow / flaky line that keeps making
+                            // progress must never use up its retries (that is what ended downloads right before the end)
+                            val progressed = (DownloadStore.get(id)?.downloadedBytes ?: 0L) > bytesAtStart
+                            if (progressed && resets < 40) { attempt = 0; resets++ }
                             attempt++
                             if (attempt >= MAX_AUTO_RETRIES || isPermanentFailure(t)) {
                                 fail(app, id, t)
@@ -309,7 +315,7 @@ object DownloadManager {
                             DownloadStore.update(app, id) {
                                 it.copy(status = DownloadStatus.DOWNLOADING, speedBps = 0L, etaSec = -1L, note = "Connection problem - continuing…")
                             }
-                            delay(3000L * attempt)
+                            delay(minOf(3000L * attempt, 15_000L))
                         }
                     }
                 }
@@ -436,8 +442,18 @@ object DownloadManager {
         val item = DownloadStore.get(id) ?: return
         val dir = linkDir(app, id).apply { mkdirs() }
 
-        val ready = withContext(Dispatchers.IO) { NetworkStreamResolver.prepareYtDlpForDownload(app) }
-        if (!ready) throw IllegalStateException(NetworkStreamResolver.lastError ?: "yt-dlp could not start")
+        // The data may already be complete (an earlier try finished the file(s) and only a later step failed): then nothing
+        // has to be fetched, no yt-dlp / internet is needed and the download goes straight on to saving.
+        val hasMedia = finished(dir, "media") != null
+        val hasPair = finished(dir, "video") != null && finished(dir, "audio") != null
+        val alreadyComplete = hasMedia || hasPair
+        if (!alreadyComplete) {
+            val ready = withContext(Dispatchers.IO) { NetworkStreamResolver.prepareYtDlpForDownload(app) }
+            // a plain file link is fetched by the fast downloader and does not need yt-dlp to be ready
+            if (!ready && directLinkExt(item.source) == null) {
+                throw IllegalStateException(NetworkStreamResolver.lastError ?: "yt-dlp could not start")
+            }
+        }
         if (stops.containsKey(id)) return
         val split = splitSpec(item)
         val format = effectiveFormat(item)
@@ -447,11 +463,12 @@ object DownloadManager {
         val mergeNote = AtomicReference<String?>(null)
         // -1 = the byte counter of the fast downloader is not used (yt-dlp fallback: the folder size is measured)
         val live = AtomicLong(-1L)
-        var merged = split != null
+        var merged = split != null || (alreadyComplete && !hasMedia && hasPair)
         val monitor = scope.launch { monitorLoop(app, id, dir, total, mergeNote, live) }
         var probe: Job? = null
         try {
             withContext(Dispatchers.IO) {
+                if (alreadyComplete) return@withContext
                 // 1) fast path: plain files are fetched with many connections at once and are resumable
                 var done = false
                 for (attempt in 1..3) {
@@ -507,14 +524,28 @@ object DownloadManager {
                         downloadOnce(item, format, dir, pid, mergeNote, "media")
                     }
                 }
+                // yt-dlp renames its .part file only when every byte has arrived: a finished file therefore means the
+                // download itself worked, even if yt-dlp then ended with an error (post-processing, a late request ...)
+                fun downloadFinished(): Boolean =
+                    if (split != null) finished(dir, "video") != null && finished(dir, "audio") != null
+                    else finished(dir, "media") != null
                 try {
-                    runOnce()
+                    try {
+                        runOnce()
+                    } catch (t: Throwable) {
+                        if (stops.containsKey(id)) throw t
+                        if (downloadFinished()) {
+                            Log.w(TAG, "yt-dlp ended with an error after the file was complete; using the file", t)
+                            return@withContext
+                        }
+                        // sites change all the time: one more try with the newest yt-dlp before giving up
+                        if (!NetworkStreamResolver.forceYtDlpUpdate(app)) throw t
+                        runOnce()
+                    }
                 } catch (t: Throwable) {
-                    // Sites change frequently. Try updating yt-dlp, but still retry once with the installed
-                    // extractor when the updater is rate-limited or the network cannot reach GitHub.
-                    if (stops.containsKey(id)) throw t
-                    NetworkStreamResolver.forceYtDlpUpdate(app)
-                    runOnce()
+                    if (!stops.containsKey(id) && downloadFinished()) {
+                        Log.w(TAG, "yt-dlp ended with an error after the file was complete; using the file", t)
+                    } else throw t
                 }
             }
         } finally {
@@ -741,9 +772,8 @@ object DownloadManager {
         req.addOption("--retries", 10)
         req.addOption("--fragment-retries", 10)
         // full speed: 16 fragments of a DASH / HLS video at the same time, big HTTP chunks for everything else
-        req.addOption("-N", 8)
-        // Avoid oversized HTTP chunks: some hosts close the connection after a large chunk request.
-        req.addOption("--http-chunk-size", "4M")
+        req.addOption("-N", 16)
+        req.addOption("--http-chunk-size", "10M")
         req.addOption("--buffer-size", "256K")
         req.addOption("-f", format)
         for ((hName, hValue) in item.headers) {

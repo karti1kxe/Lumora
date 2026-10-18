@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.delay
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -36,17 +37,16 @@ object EpisodeFrames {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     private const val PREFS = "episode_servers"
     private const val MAX_SERVERS_TRIED = 4
-    private const val PER_SERVER_MS = 14_000L
+    private const val PER_SERVER_MS = 12_000L
+    /** The next server is started in parallel when the running one has not delivered a frame after this long. */
+    private const val HEDGE_MS = 3_500L
     private const val PARTIAL_BYTES = 5 * 1024 * 1024
     private const val RETRY_FAILED_AFTER_MS = 6L * 60L * 60L * 1000L
 
-    private val gate = Semaphore(4)
+    private val gate = Semaphore(5)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val inflight = ConcurrentHashMap<String, CompletableDeferred<String?>>()
     private val failedAt = ConcurrentHashMap<String, Long>()
-
-    /** A pull-down refresh: episodes whose picture could not be made earlier are tried again at once. */
-    fun retryFailed() { failedAt.clear() }
 
     private fun key(plugin: MediaPluginInfo, link: String) = plugin.value + "|" + link
 
@@ -116,15 +116,50 @@ object EpisodeFrames {
         // the server that worked last time is tried first
         val ordered = if (preferred == null) streams else streams.sortedBy { if (it.server == preferred.server && it.quality == preferred.quality) 0 else 1 }
         val out = file(context, k)
-        for (s in ordered) {
-            val job = scope.async { try { grab(context, s, out) } catch (_: Throwable) { false } }
-            val ok = withTimeoutOrNull(PER_SERVER_MS) { job.await() } ?: false
-            if (ok) {
-                remember(context, plugin, link, s)
-                return out.absolutePath
-            }
+        if (ordered.isEmpty()) return null
+        // Servers are tried "hedged": the best one starts at once, the next one joins as soon as the running one fails or
+        // is slow (HEDGE_MS), so a dead first server no longer costs its whole timeout before the next is even tried.
+        class Run(val stream: MediaStream, val tmp: File) {
+            @Volatile var done = false
+            @Volatile var ok = false
+            var job: kotlinx.coroutines.Job? = null
         }
-        return null
+        val runs = ArrayList<Run>()
+        var next = 0
+        var lastStart = 0L
+        fun startNext() {
+            val s = ordered[next]
+            val tmp = File(out.parentFile, out.name + "." + next + ".tmp")
+            next++
+            lastStart = System.currentTimeMillis()
+            val r = Run(s, tmp)
+            r.job = scope.launch {
+                r.ok = try { grab(context, s, tmp) } catch (_: Throwable) { false }
+                r.done = true
+            }
+            runs.add(r)
+        }
+        val begin = System.currentTimeMillis()
+        try {
+            startNext()
+            while (true) {
+                val winner = runs.firstOrNull { it.done && it.ok }
+                if (winner != null) {
+                    if (out.exists()) out.delete()
+                    if (!winner.tmp.renameTo(out)) { winner.tmp.copyTo(out, overwrite = true) }
+                    remember(context, plugin, link, winner.stream)
+                    return out.absolutePath
+                }
+                val now = System.currentTimeMillis()
+                val allDone = runs.all { it.done }
+                if (next < ordered.size && (allDone || now - lastStart >= HEDGE_MS)) startNext()
+                else if (allDone) return null
+                if (now - begin > PER_SERVER_MS * 2) return null
+                kotlinx.coroutines.delay(40L)
+            }
+        } finally {
+            for (r in runs) { r.job?.cancel(); if (r.tmp.exists()) r.tmp.delete() }
+        }
     }
 
     // ---------------------------------------------------------------- getting one frame out of one stream
