@@ -93,6 +93,57 @@ object OnlineRecommendationMixer {
         return out
     }
 
+    /**
+     * The "interest block" order used by the personalised feeds. One block of 10 is: [pattern] = 3 more of what the
+     * user just watched / searched ([sameTopic]), 2 they may like next ([related], e.g. other games), 3 from different
+     * categories ([diverse]) and 2 from popular channels ([channels]). Blocks repeat until [total] is reached.
+     * A short pool is topped up from the other pools (same > related > diverse > channels) so the list stays full,
+     * and an item that is in several pools is only used once.
+     */
+    fun <T> blockMix(
+        sameTopic: List<T>,
+        related: List<T>,
+        diverse: List<T>,
+        channels: List<T>,
+        total: Int,
+        pattern: List<Int> = BLOCK_PATTERN
+    ): List<T> {
+        if (total <= 0) return emptyList()
+        val pools = listOf(sameTopic, related, diverse, channels).map { it.iterator() }
+        val used = HashSet<T>()
+        val out = ArrayList<T>(total)
+        fun next(i: Int): T? {
+            val iter = pools[i]
+            while (iter.hasNext()) {
+                val v = iter.next()
+                if (used.add(v)) return v
+            }
+            return null
+        }
+        while (out.size < total) {
+            val before = out.size
+            var missing = 0
+            for ((i, count) in pattern.withIndex()) {
+                repeat(count) {
+                    if (out.size >= total) return@repeat
+                    val v = next(i)
+                    if (v != null) out.add(v) else missing++
+                }
+            }
+            // short pools: fill the gap from whichever pool still has something
+            var i = 0
+            while (missing > 0 && out.size < total && i < pools.size) {
+                val v = next(i)
+                if (v == null) { i++ } else { out.add(v); missing-- }
+            }
+            if (out.size == before) break
+        }
+        return out
+    }
+
+    /** Same-topic, related, different-category, popular-channel counts of one block of 10. */
+    val BLOCK_PATTERN = listOf(3, 2, 3, 2)
+
     /** Interleaves several lists (one item from each in turn) so no single query/artist dominates. */
     fun <T> roundRobin(lists: List<List<T>>): List<T> {
         val out = ArrayList<T>()
@@ -130,12 +181,17 @@ object OnlineRecommendationMixer {
      * Picks a base+modifier query that was not used yet in [used] (and records it). When every
      * combination has been used, [used] is cleared so the feed can keep going forever.
      */
-    fun freshQuery(bases: List<String>, used: MutableSet<String>, random: Random = Random.Default): String? {
+    fun freshQuery(
+        bases: List<String>,
+        used: MutableSet<String>,
+        random: Random = Random.Default,
+        modifiers: List<String> = QUERY_MODIFIERS
+    ): String? {
         if (bases.isEmpty()) return null
         repeat(2) {
             for (base in bases.shuffled(random)) {
-                for (modifier in QUERY_MODIFIERS.shuffled(random)) {
-                    val q = "$base $modifier"
+                for (modifier in modifiers.shuffled(random)) {
+                    val q = "$base $modifier".trim()
                     if (used.add(q)) return q
                 }
             }
@@ -170,6 +226,71 @@ object OnlineRecommendationMixer {
         searchMany(queries).cleaned(exclude)
     }
 
+    /** Tracks of things the listener may like next (other artists / related topics). */
+    suspend fun fetchRelatedTracks(
+        bases: List<String>,
+        exclude: Set<String>,
+        usedQueries: MutableSet<String>,
+        queryCount: Int = 2
+    ): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
+        val queries = List(queryCount) { freshQuery(bases, usedQueries) }.filterNotNull()
+        searchMany(queries).cleaned(exclude)
+    }
+
+    /** Tracks that come from popular channels (only results whose uploader really is one of them). */
+    suspend fun fetchPopularChannelTracks(
+        exclude: Set<String>,
+        usedQueries: MutableSet<String>,
+        queryCount: Int = 2,
+        channels: List<String> = OnlineInterestProfile.POPULAR_AUDIO_CHANNELS
+    ): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
+        val picked = List(queryCount) { freshQuery(channels, usedQueries) }.filterNotNull()
+        val raw = searchMany(picked)
+        raw.mapIndexed { i, list ->
+            val channel = picked[i].substringBefore(' ').lowercase(Locale.ROOT)
+            list.filter { it.artist.lowercase(Locale.ROOT).contains(channel) }
+        }.cleaned(exclude)
+    }
+
+    /**
+     * Block feed for a listener whose recent interests are known ([focus], most recent first): 3 more of the same,
+     * 2 they may like next, 3 from different genres, 2 from popular channels - see [blockMix].
+     */
+    private suspend fun fetchBlockFeedBatch(
+        focus: List<String>,
+        topArtists: List<String>,
+        excludeUrls: Set<String>,
+        usedQueries: MutableSet<String>,
+        batchSize: Int
+    ): List<OnlineTrackResult> = coroutineScope {
+        val sameQueries = List(2) { freshQuery(focus, usedQueries) }.filterNotNull()
+        val relatedBases = (topArtists + focus.flatMap { OnlineInterestProfile.relatedTopics(it) })
+            .filter { b -> focus.none { it.equals(b, true) } }.distinct()
+            .ifEmpty { GENERIC_SIMILAR_BASES }
+        val relatedQueries = List(2) { freshQuery(relatedBases, usedQueries) }.filterNotNull()
+        val diverseQueries = eligibleDiscoveryTopics(focus + topArtists).let { eligible ->
+            List(3) { freshQuery(eligible, usedQueries) }.filterNotNull()
+        }
+        val channelBases = OnlineInterestProfile.POPULAR_AUDIO_CHANNELS
+        val channelPicked = List(2) { freshQuery(channelBases, usedQueries) }.filterNotNull()
+
+        val sameJob = async { searchMany(sameQueries) }
+        val relatedJob = async { searchMany(relatedQueries) }
+        val diverseJob = async { searchMany(diverseQueries) }
+        val channelJob = async { searchMany(channelPicked) }
+
+        val same = sameJob.await().cleaned(excludeUrls)
+        val taken = excludeUrls + same.map { it.videoUrl }
+        val related = relatedJob.await().cleaned(taken)
+        val diverse = diverseJob.await().cleaned(taken + related.map { it.videoUrl })
+        val channelRaw = channelJob.await()
+        val channels = channelRaw.mapIndexed { i, list ->
+            val channel = channelPicked[i].substringBefore(' ').lowercase(Locale.ROOT)
+            list.filter { it.artist.lowercase(Locale.ROOT).contains(channel) }.ifEmpty { list.take(2) }
+        }.cleaned(taken + related.map { it.videoUrl } + diverse.map { it.videoUrl })
+        blockMix(same, related, diverse, channels, batchSize)
+    }
+
     /**
      * One batch of the endless "Recommended for you" feed: [SIMILAR_SHARE] from the listener's favourite
      * artists (or generic trending queries when there is no history yet), the rest from unrelated genres.
@@ -179,8 +300,14 @@ object OnlineRecommendationMixer {
         topArtists: List<String>,
         excludeUrls: Set<String>,
         usedQueries: MutableSet<String>,
-        batchSize: Int = 24
+        batchSize: Int = 24,
+        focus: List<String> = emptyList()
     ): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
+        // the listener played / searched something recently: build the batch around it
+        if (focus.isNotEmpty()) {
+            val block = fetchBlockFeedBatch(focus, topArtists, excludeUrls, usedQueries, batchSize)
+            if (block.isNotEmpty()) return@withContext block
+        }
         val similarBases = if (topArtists.isNotEmpty()) topArtists else GENERIC_SIMILAR_BASES
         val similarQueries = List(2) { freshQuery(similarBases, usedQueries) }.filterNotNull()
         val discoveryBases = eligibleDiscoveryTopics(topArtists)

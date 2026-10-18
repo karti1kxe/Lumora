@@ -60,6 +60,7 @@ import com.example.util.AudioPlaybackHistoryManager
 import com.example.util.LyricsFetcher
 import com.example.util.OnlineChannelResult
 import com.example.util.OnlineMusicService
+import com.example.util.OnlineInterestProfile
 import com.example.util.OnlineRecommendationMixer
 import com.example.util.OnlineTrackResult
 import kotlinx.coroutines.Dispatchers
@@ -194,7 +195,8 @@ fun OnlineMusicPanel(
                 OnlineRecommendationMixer.fetchFeedBatch(
                     topArtists = AudioPlaybackHistoryManager.getTopArtists(context, limit = 5),
                     excludeUrls = emptySet(),
-                    usedQueries = feedUsedQueries
+                    usedQueries = feedUsedQueries,
+                    focus = OnlineInterestProfile.focus(context, OnlineInterestProfile.KIND_AUDIO, 2).map { it.name }
                 )
             } catch (t: kotlinx.coroutines.CancellationException) {
                 throw t
@@ -220,7 +222,8 @@ fun OnlineMusicPanel(
                 OnlineRecommendationMixer.fetchFeedBatch(
                     topArtists = AudioPlaybackHistoryManager.getTopArtists(context, limit = 5),
                     excludeUrls = shownUrls,
-                    usedQueries = feedUsedQueries
+                    usedQueries = feedUsedQueries,
+                    focus = OnlineInterestProfile.focus(context, OnlineInterestProfile.KIND_AUDIO, 2).map { it.name }
                 )
             } catch (t: kotlinx.coroutines.CancellationException) {
                 throw t
@@ -267,6 +270,8 @@ fun OnlineMusicPanel(
         searchJob = scope.launch(Dispatchers.IO) {
             val (extractor, page) = OnlineMusicService.searchMusicPage(trimmed)
             val ranked = page.items
+            // what the listener searches for shapes the next recommendations
+            OnlineInterestProfile.record(context, OnlineInterestProfile.KIND_AUDIO, trimmed, 2.0)
 
             withContext(Dispatchers.Main) {
                 activeExtractor = extractor
@@ -368,6 +373,8 @@ fun OnlineMusicPanel(
         )
 
         scope.launch(Dispatchers.IO) {
+            // the played song (and its artist) become the newest interest of this listener
+            OnlineInterestProfile.record(context, OnlineInterestProfile.KIND_AUDIO, result.title, 3.0, result.artist)
             // Concurrently fetch lyrics
             launch {
                 try {
@@ -437,10 +444,37 @@ fun OnlineMusicPanel(
                 emptyList<OnlineTrackResult>()
             }
 
-            // 65% similar / 35% discovery, discovery spread evenly through the queue
-            val uniqueCandidates = OnlineRecommendationMixer.mix(
-                similar = similarPool,
-                discovery = discoveryPool,
+            // Things the listener may like next (other artists / related topics) and popular channels
+            val taken = similarPool.map { it.videoUrl }.toSet() + discoveryPool.map { it.videoUrl }.toSet() + result.videoUrl
+            val relatedPool = try {
+                OnlineRecommendationMixer.fetchRelatedTracks(
+                    bases = userTopArtists.filter { !it.equals(result.artist, true) }
+                        .ifEmpty { OnlineInterestProfile.relatedTopics(result.artist.ifBlank { result.title }) },
+                    exclude = taken,
+                    usedQueries = mutableSetOf()
+                )
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                throw t
+            } catch (_: Throwable) {
+                emptyList<OnlineTrackResult>()
+            }
+            val channelPool = try {
+                OnlineRecommendationMixer.fetchPopularChannelTracks(
+                    exclude = taken + relatedPool.map { it.videoUrl },
+                    usedQueries = mutableSetOf()
+                )
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                throw t
+            } catch (_: Throwable) {
+                emptyList<OnlineTrackResult>()
+            }
+
+            // per block of 10: 3 like the current song, 2 the listener may like next, 3 from other genres, 2 from popular channels
+            val uniqueCandidates = OnlineRecommendationMixer.blockMix(
+                sameTopic = similarPool,
+                related = relatedPool,
+                diverse = discoveryPool,
+                channels = channelPool,
                 total = 20
             )
 

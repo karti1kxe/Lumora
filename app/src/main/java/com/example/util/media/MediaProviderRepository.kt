@@ -13,6 +13,10 @@ object MediaProviderRepository {
 
     private val catalogs = ConcurrentHashMap<String, Catalog>()
     private val posts = ConcurrentHashMap<String, List<MediaPost>>()
+    // Search answers kept for a few minutes: typing / deleting letters again shows the earlier results instantly.
+    private class CachedSearch(val at: Long, val posts: List<MediaPost>)
+    private val searches = ConcurrentHashMap<String, CachedSearch>()
+    private const val SEARCH_TTL_MS = 5 * 60_000L
     private val infos = ConcurrentHashMap<String, MediaInfo>()
     private val episodeLists = ConcurrentHashMap<String, List<MediaDirectLink>>()
     // A few requests at a time so several rows scrolling into view don't hammer one site.
@@ -33,13 +37,14 @@ object MediaProviderRepository {
     }
 
     fun clearAll() {
-        catalogs.clear(); posts.clear(); infos.clear(); episodeLists.clear(); streamCache.clear()
+        catalogs.clear(); posts.clear(); searches.clear(); infos.clear(); episodeLists.clear(); streamCache.clear()
     }
 
     fun clear(pluginId: String) {
         catalogs.remove(pluginId)
         val prefix = "$pluginId|"
         posts.keys.filter { it.startsWith(prefix) }.forEach { posts.remove(it) }
+        searches.keys.filter { it.startsWith(prefix) }.forEach { searches.remove(it) }
         infos.keys.filter { it.startsWith(prefix) }.forEach { infos.remove(it) }
         episodeLists.keys.filter { it.startsWith(prefix) }.forEach { episodeLists.remove(it) }
         streamCache.keys.filter { it.startsWith(prefix) }.forEach { streamCache.remove(it) }
@@ -283,8 +288,15 @@ object MediaProviderRepository {
         return list
     }
 
-    /** Search inside one plugin (the plugin's own getSearchPosts). Not cached. */
-    suspend fun searchPosts(context: Context, pluginId: String, query: String, page: Int): List<MediaPost> {
+    /** Cached results of an earlier identical search (null when there is none or it is older than a few minutes). */
+    fun cachedSearch(pluginId: String, query: String, page: Int): List<MediaPost>? {
+        val hit = searches["$pluginId|search|${query.lowercase()}|$page"] ?: return null
+        return if (System.currentTimeMillis() - hit.at <= SEARCH_TTL_MS) hit.posts else null
+    }
+
+    /** Search inside one plugin (the plugin's own getSearchPosts). Answers are cached for a few minutes unless [force]. */
+    suspend fun searchPosts(context: Context, pluginId: String, query: String, page: Int, force: Boolean = false): List<MediaPost> {
+        if (!force) cachedSearch(pluginId, query, page)?.let { return it }
         val json = if (isCs(context, pluginId)) {
             gate.withPermit { csCall(context, pluginId) { CloudStreamEngine.searchJson(context, pluginId, query, page) } }
         } else {
@@ -295,7 +307,9 @@ object MediaProviderRepository {
                 .toString()
             gate.withPermit { PluginJsEngine.call(context, pluginId, "posts", "getSearchPosts", args) }
         }
-        return parsePosts(json)
+        val list = parsePosts(json)
+        if (list.isNotEmpty()) searches["$pluginId|search|${query.lowercase()}|$page"] = CachedSearch(System.currentTimeMillis(), list)
+        return list
     }
 
     private fun parseEntries(json: String): List<MediaCatalogEntry> {

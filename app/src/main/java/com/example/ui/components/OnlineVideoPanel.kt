@@ -67,7 +67,9 @@ import com.example.util.OnlineTrackResult
 import com.example.util.OnlineVideoRecommender
 import com.example.util.OnlineVideoService
 import com.example.util.cachedBestLabel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -107,6 +109,10 @@ object OnlineVideoFeedState {
     var gridIndex = 0
     var gridOffset = 0
 }
+
+/** Outlives the panel: the "after watching" recommendations keep loading while the player is on screen. */
+private val feedPrefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+private var afterWatchJob: Job? = null
 
 private fun formatViews(count: Long): String {
     if (count <= 0L) return ""
@@ -284,6 +290,8 @@ fun OnlineVideoPanel(
                         st.lastQuery = trimmed
                         st.initialized = true
                         st.isSearching = false
+                        // what the user looks for shapes the next recommendations
+                        OnlineVideoRecommender.recordSearch(context, trimmed)
                     }
                     st.isRefreshing = false
                 }
@@ -387,8 +395,41 @@ fun OnlineVideoPanel(
     }
     val cardFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false)
 
+    // The user opened a video: a fresh block built around it (3 more of the same, 2 they may like next, 3 from other
+    // categories, 2 from popular channels) is prepared while it plays and waits at the top of the feed on return.
+    fun prepareAfterWatch(watched: OnlineTrackResult) {
+        if (!isFeedMode) return
+        val appContext = context.applicationContext
+        val token = st.token
+        val exclude = st.results.map { it.videoUrl }.toSet() + watched.videoUrl
+        afterWatchJob?.cancel()
+        afterWatchJob = feedPrefetchScope.launch {
+            val batch = try {
+                kotlinx.coroutines.withTimeoutOrNull(25000L) {
+                    OnlineVideoRecommender.fetchFeedBatch(appContext, exclude, st.usedQueries, total = 10)
+                } ?: emptyList()
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                throw t
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            if (batch.isEmpty()) return@launch
+            withContext(Dispatchers.Main) {
+                if (token == st.token && st.lastQuery.isBlank()) {
+                    val fresh = batch.filter { b -> st.results.none { it.videoUrl == b.videoUrl } }
+                    if (fresh.isNotEmpty()) {
+                        st.results = fresh + st.results
+                        st.listIndex = 0; st.listOffset = 0; st.gridIndex = 0; st.gridOffset = 0
+                        OnlineVideoRecommender.recordShown(appContext, fresh.map { it.videoUrl })
+                    }
+                }
+            }
+        }
+    }
+
     fun play(r: OnlineTrackResult) {
-        OnlineVideoRecommender.recordOpened(context, r.videoUrl, r.artist)
+        OnlineVideoRecommender.recordOpened(context, r.videoUrl, r.artist, r.title)
+        prepareAfterWatch(r)
         val tappedPath = "${OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX}${r.videoUrl}"
         var all = shown.map { it.toOnlineVideoItem() }
         val item = all.firstOrNull { it.path == tappedPath } ?: r.toOnlineVideoItem()
@@ -408,7 +449,7 @@ fun OnlineVideoPanel(
         val q = OnlineVideoQueue.items.toList()
         if (q.isEmpty()) return
         OnlineVideoQueue.clear()
-        OnlineVideoRecommender.recordOpened(context, q.first().videoUrl, q.first().artist)
+        OnlineVideoRecommender.recordOpened(context, q.first().videoUrl, q.first().artist, q.first().title)
         val list = q.map { it.toOnlineVideoItem() }
         onPlayVideo(list.first(), list)
     }

@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -38,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -630,6 +633,9 @@ fun MediaPluginPage(
     var catalogError by remember(plugin.value, plugin.version) { mutableStateOf<String?>(null) }
     var reloadKey by remember(plugin.value) { mutableStateOf(0) }
     var seeAll by remember(plugin.value) { mutableStateOf<MediaCatalogEntry?>(null) }
+    // bumped by a pull-down while a result grid (search / "See all") is open: the grid loads again from page 1
+    var gridReloadKey by remember(plugin.value) { mutableStateOf(0) }
+    val typed = searchQuery.trim()
 
     // pull-down on the provider page (Home screen bumps the request): every cached row of this provider is dropped and loaded again
     val refreshTick = MediaDetailState.refreshRequest
@@ -638,7 +644,15 @@ fun MediaPluginPage(
         if (refreshTick != handledRefresh) {
             handledRefresh = refreshTick
             MediaProviderRepository.clear(plugin.value)
-            reloadKey++
+            // search results / "See all" grids reload themselves, otherwise the categories are loaded again
+            if (typed.isNotEmpty() || seeAll != null) gridReloadKey++ else reloadKey++
+        }
+    }
+    // the pull-to-refresh animation can never stay on screen for long, whatever happened
+    LaunchedEffect(MediaDetailState.providerRefreshing) {
+        if (MediaDetailState.providerRefreshing) {
+            delay(20_000L)
+            MediaDetailState.providerRefreshing = false
         }
     }
 
@@ -656,23 +670,45 @@ fun MediaPluginPage(
         }
     }
 
-    // top search bar of the app: results of this provider replace the page while something is typed
-    val typed = searchQuery.trim()
+    // top search bar of the app: results of this provider replace the page while something is typed.
+    // A short pause lets fast typing / pasting send one request instead of one per letter; a search that was
+    // answered before is shown at once.
     var activeQuery by remember(plugin.value) { mutableStateOf("") }
     LaunchedEffect(typed) {
-        if (typed.isNotEmpty()) delay(500L)
+        if (typed.isEmpty()) {
+            activeQuery = ""
+            return@LaunchedEffect
+        }
+        if (MediaProviderRepository.cachedSearch(plugin.value, typed, 1) == null) delay(250L)
         activeQuery = typed
     }
-    if (activeQuery.isNotEmpty() && typed.isNotEmpty()) {
-        MediaPostGrid(
-            identity = plugin.value + "|search|" + activeQuery,
-            title = "Results for \"$activeQuery\"",
-            isDark = isDark,
-            onBack = null,
-            onOpenPost = onOpenPost,
-            loader = { page -> MediaProviderRepository.searchPosts(context, plugin.value, activeQuery, page) },
-            modifier = modifier
-        )
+    if (typed.isNotEmpty()) {
+        if (activeQuery.isEmpty()) {
+            Box(
+                modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.padding(top = 40.dp).size(28.dp),
+                    color = AccentSkyBlue,
+                    strokeWidth = 2.6.dp
+                )
+            }
+        } else {
+            val searchIdentity = plugin.value + "|search|" + activeQuery + "|" + gridReloadKey
+            key(searchIdentity) {
+                MediaPostGrid(
+                    identity = searchIdentity,
+                    title = "Results for \"$activeQuery\"",
+                    isDark = isDark,
+                    onBack = null,
+                    onOpenPost = onOpenPost,
+                    loader = { page -> MediaProviderRepository.searchPosts(context, plugin.value, activeQuery, page) },
+                    onFirstLoad = { MediaDetailState.providerRefreshing = false },
+                    modifier = modifier
+                )
+            }
+        }
         return
     }
 
@@ -680,15 +716,19 @@ fun MediaPluginPage(
 
     val current = seeAll
     if (current != null) {
-        MediaPostGrid(
-            identity = plugin.value + "|" + current.filter,
-            title = current.title,
-            isDark = isDark,
-            onBack = { seeAll = null },
-            onOpenPost = onOpenPost,
-            loader = { page -> MediaProviderRepository.loadPosts(context, plugin.value, current.filter, page) },
-            modifier = modifier
-        )
+        val gridIdentity = plugin.value + "|" + current.filter + "|" + gridReloadKey
+        key(gridIdentity) {
+            MediaPostGrid(
+                identity = gridIdentity,
+                title = current.title,
+                isDark = isDark,
+                onBack = { seeAll = null },
+                onOpenPost = onOpenPost,
+                loader = { page -> MediaProviderRepository.loadPosts(context, plugin.value, current.filter, page) },
+                onFirstLoad = { MediaDetailState.providerRefreshing = false },
+                modifier = modifier
+            )
+        }
         return
     }
 
@@ -696,7 +736,7 @@ fun MediaPluginPage(
     when {
         catalogError != null -> {
             Column(
-                modifier = modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 32.dp),
+                modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(text = catalogError.orEmpty(), fontSize = 13.sp, color = secondaryText)
@@ -705,7 +745,7 @@ fun MediaPluginPage(
             }
         }
         cat == null -> {
-            Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+            Box(modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()), contentAlignment = Alignment.TopCenter) {
                 CircularProgressIndicator(
                     modifier = Modifier.padding(top = 40.dp).size(28.dp),
                     color = AccentSkyBlue,
@@ -714,7 +754,7 @@ fun MediaPluginPage(
             }
         }
         cat.categories.isEmpty() && cat.genres.isEmpty() -> {
-            Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+            Box(modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()), contentAlignment = Alignment.TopCenter) {
                 Text(text = "This plugin has no categories", fontSize = 13.sp, color = secondaryText, modifier = Modifier.padding(top = 32.dp))
             }
         }
@@ -1351,7 +1391,8 @@ private fun MediaPostGrid(
     onBack: (() -> Unit)?,
     onOpenPost: (MediaPost) -> Unit,
     loader: suspend (page: Int) -> List<MediaPost>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onFirstLoad: () -> Unit = {}
 ) {
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
@@ -1373,11 +1414,13 @@ private fun MediaPostGrid(
             val known = items.map { it.link + "|" + it.title }.toHashSet()
             val added = fresh.filter { known.add(it.link + "|" + it.title) }
             if (added.isEmpty()) ended = true else { items.addAll(added); page++ }
+            onFirstLoad()
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             error = t.message ?: "Could not load"
             ended = items.isNotEmpty()
+            onFirstLoad()
         } finally {
             loading = false
         }
@@ -1413,7 +1456,7 @@ private fun MediaPostGrid(
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "footer") {
                 // Composed when the end of the grid is reached -> loads the next page.
-                LaunchedEffect(page, ended, error) {
+                LaunchedEffect(identity, page, ended, error) {
                     if (!ended && error == null) loadNext()
                 }
                 Box(modifier = Modifier.fillMaxWidth().padding(vertical = 18.dp), contentAlignment = Alignment.Center) {

@@ -769,7 +769,7 @@ class MainActivity : ComponentActivity() {
 
     private fun playSharedVideo(result: com.example.util.OnlineTrackResult) {
         try {
-            com.example.util.OnlineVideoRecommender.recordOpened(applicationContext, result.videoUrl, result.artist)
+            com.example.util.OnlineVideoRecommender.recordOpened(applicationContext, result.videoUrl, result.artist, result.title)
         } catch (_: Throwable) {}
         val item = result.toOnlineVideoItem()
         viewModel.startPlaying(item, listOf(item))

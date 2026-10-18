@@ -655,7 +655,7 @@ fun ChannelDetailScreen(
                                                         isDark = isDark,
                                                         visibleFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false),
                                                         onClick = {
-                                                            com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist)
+                                                            com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist, track.title)
                                                             onPlayVideo.invoke(vItem, sortedTracks.map { it.toOnlineVideoItem() })
                                                         }
                                                     )
@@ -706,7 +706,7 @@ fun ChannelDetailScreen(
                                                         isDark = isDark,
                                                         visibleFields = visibleFields.copy(showExtension = false, showSize = false, showSubtitleIndicator = false),
                                                         onClick = {
-                                                            com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist)
+                                                            com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist, track.title)
                                                             onPlayVideo.invoke(vItem, sortedTracks.map { it.toOnlineVideoItem() })
                                                         }
                                                     )

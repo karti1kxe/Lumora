@@ -93,4 +93,29 @@ class OnlineRecommendationMixerTest {
     fun freshQuery_returnsNullOnlyWithoutBases() {
         assertEquals(null, OnlineRecommendationMixer.freshQuery(emptyList(), mutableSetOf()))
     }
+
+    @Test
+    fun blockMix_buildsBlocksOfThreeTwoThreeTwo() {
+        val same = (1..10).toList()
+        val related = (101..110).toList()
+        val diverse = (201..210).toList()
+        val channels = (301..310).toList()
+        val mixed = OnlineRecommendationMixer.blockMix(same, related, diverse, channels, total = 10)
+        assertEquals(listOf(1, 2, 3, 101, 102, 201, 202, 203, 301, 302), mixed)
+        val twoBlocks = OnlineRecommendationMixer.blockMix(same, related, diverse, channels, total = 20)
+        assertEquals(20, twoBlocks.size)
+        assertEquals(listOf(4, 5, 6, 103, 104, 204, 205, 206, 303, 304), twoBlocks.drop(10))
+    }
+
+    @Test
+    fun blockMix_fillsShortPoolsFromOthersAndNeverRepeats() {
+        val mixed = OnlineRecommendationMixer.blockMix((1..30).toList(), emptyList(), listOf(201, 202), emptyList(), total = 10)
+        assertEquals(10, mixed.size)
+        assertEquals(mixed.size, mixed.toSet().size)
+        assertTrue(201 in mixed && 202 in mixed)
+
+        val dup = OnlineRecommendationMixer.blockMix(listOf(1, 2, 3), listOf(3, 4), listOf(1, 5), listOf(6), total = 10)
+        assertEquals(dup.size, dup.toSet().size)
+        assertTrue(OnlineRecommendationMixer.blockMix(emptyList<Int>(), emptyList(), emptyList(), emptyList(), total = 10).isEmpty())
+    }
 }

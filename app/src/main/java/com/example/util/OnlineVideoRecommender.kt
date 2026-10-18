@@ -47,7 +47,9 @@ object OnlineVideoRecommender {
         try { JSONArray(prefs(c).getString(key, "[]") ?: "[]") } catch (_: Throwable) { JSONArray() }
 
     @Synchronized
-    fun recordOpened(c: Context, videoUrl: String, channel: String) {
+    fun recordOpened(c: Context, videoUrl: String, channel: String, title: String = "") {
+        // what the video is about (Minecraft, tech review, ...) steers the next recommendations
+        if (title.isNotBlank()) OnlineInterestProfile.record(c, OnlineInterestProfile.KIND_VIDEO, title, 3.0)
         val opened = readArr(c, KEY_OPENED)
         val list = (0 until opened.length()).map { opened.optString(it) }.toMutableList()
         if (!list.contains(videoUrl)) list.add(videoUrl)
@@ -98,6 +100,12 @@ object OnlineVideoRecommender {
         prefs(c).edit().putString(KEY_SEARCHED, JSONArray(list.take(20)).toString()).apply()
     }
 
+    /** A real video search by the user: what they look for counts as interest too. */
+    fun recordSearch(c: Context, query: String) {
+        if (query.isBlank()) return
+        OnlineInterestProfile.record(c, OnlineInterestProfile.KIND_VIDEO, query, 2.0)
+    }
+
     /** Call with the urls that were actually put on screen in a feed batch. */
     @Synchronized
     fun recordShown(c: Context, urls: Collection<String>) {
@@ -133,6 +141,11 @@ object OnlineVideoRecommender {
         val favs = topChannels(context, 4)
         val shown = readObj(context, KEY_SHOWN)
         val opened = readArr(context, KEY_OPENED).let { a -> (0 until a.length()).map { a.optString(it) }.toSet() }
+
+        val focus = OnlineInterestProfile.focus(context, OnlineInterestProfile.KIND_VIDEO, 2)
+        if (focus.isNotEmpty()) {
+            return@coroutineScope fetchInterestBatch(context, focus, excludeUrls, usedQueries, total, shown, opened)
+        }
 
         val similarQueries = if (favs.isEmpty()) emptyList() else
             List(minOf(3, favs.size + 1)) { OnlineRecommendationMixer.freshQuery(favs, usedQueries) }.filterNotNull()
@@ -176,6 +189,98 @@ object OnlineVideoRecommender {
         else OnlineRecommendationMixer.mix(similar = similar, discovery = discovery, total = rest)
         // New uploads of subscribed channels go first, the personalised / discovery mix follows.
         spreadChannels((subscribed + mixed).distinctBy { it.videoUrl })
+    }
+
+    /**
+     * Feed batch built around what the user watched / searched last. Per block of 10: 3 more videos of the same topic
+     * (watched Minecraft -> 3 Minecraft videos), 2 of something they may like next (other games), 3 from different
+     * categories (tech, popular music, a trending topic) and 2 from popular channels. New uploads of subscribed
+     * channels still go first. All searches run at the same time.
+     */
+    private suspend fun fetchInterestBatch(
+        context: Context,
+        focus: List<OnlineInterestProfile.Topic>,
+        excludeUrls: Set<String>,
+        usedQueries: MutableSet<String>,
+        total: Int,
+        shown: JSONObject,
+        opened: Set<String>
+    ): List<OnlineTrackResult> = coroutineScope {
+        val blocks = ((total + 9) / 10).coerceAtLeast(1)
+        val plain = listOf("", "new", "latest", "best")
+        val focusNames = focus.map { it.name }
+        val sameBases = focusNames.map { OnlineInterestProfile.videoQueryFor(it) }
+        val relatedBases = focusNames.flatMap { OnlineInterestProfile.relatedTopics(it) }
+            .filter { r -> focusNames.none { it.equals(r, true) } }.distinct()
+            .map { OnlineInterestProfile.videoQueryFor(it) }
+        val avoid = focus.map { it.category }.toSet()
+
+        val sameQueries = List(2 * blocks) { OnlineRecommendationMixer.freshQuery(sameBases, usedQueries, modifiers = plain) }.filterNotNull()
+        val relatedQueries = List(2 * blocks) { OnlineRecommendationMixer.freshQuery(relatedBases, usedQueries, modifiers = plain) }.filterNotNull()
+        val diverseQueries = OnlineInterestProfile.diverseQueries(OnlineInterestProfile.KIND_VIDEO, avoid, 3 * blocks) { opts ->
+            OnlineRecommendationMixer.freshQuery(opts, usedQueries, modifiers = listOf("")) ?: opts.random()
+        }
+        val channelPicked = List(2 * blocks) {
+            OnlineRecommendationMixer.freshQuery(OnlineInterestProfile.POPULAR_VIDEO_CHANNELS, usedQueries, modifiers = listOf("latest video", "new video", "best video"))
+        }.filterNotNull()
+
+        suspend fun run(queries: List<String>): List<List<OnlineTrackResult>> = coroutineScope {
+            queries.map { q -> async(Dispatchers.IO) { OnlineMusicService.search(q) } }.awaitAll()
+        }
+        val sameJob = async { run(sameQueries) }
+        val relatedJob = async { run(relatedQueries) }
+        val diverseJob = async { run(diverseQueries) }
+        val channelJob = async { run(channelPicked) }
+        val subscribedJob = async { fetchSubscribedUploads(context, excludeUrls) }
+
+        fun ok(r: OnlineTrackResult): Boolean =
+            r.videoUrl.isNotBlank() && r.title.isNotBlank() &&
+                r.videoUrl !in excludeUrls &&
+                r.durationSec >= 60L && r.durationSec <= 4 * 3600L &&
+                !isCompleted(context, r.videoUrl) &&
+                !(shown.optInt(r.videoUrl, 0) >= IGNORE_AFTER && r.videoUrl !in opened)
+
+        fun clean(lists: List<List<OnlineTrackResult>>): List<OnlineTrackResult> {
+            val perChannel = HashMap<String, Int>()
+            val flat = lists.map { l -> l.filter { ok(it) } }
+            // one result of each query in turn, a channel never fills more than 2 places of a pool
+            return OnlineRecommendationMixer.roundRobin(flat).filter {
+                val key = it.artist.lowercase(Locale.ROOT)
+                val n = perChannel.getOrDefault(key, 0)
+                perChannel[key] = n + 1
+                n < 2
+            }.distinctBy { it.videoUrl }
+        }
+
+        val subscribed = subscribedJob.await()
+        val taken = HashSet<String>(subscribed.map { it.videoUrl })
+        val same = clean(sameJob.await()).filter { taken.add(it.videoUrl) }
+        val related = clean(relatedJob.await()).filter { taken.add(it.videoUrl) }
+        val diverse = clean(diverseJob.await()).filter { taken.add(it.videoUrl) }
+        val channelRaw = channelJob.await()
+        val channels = clean(channelRaw.mapIndexed { i, list ->
+            val name = channelPicked[i].substringBefore(" latest").substringBefore(" new").substringBefore(" best")
+                .lowercase(Locale.ROOT)
+            list.filter { it.artist.lowercase(Locale.ROOT).contains(name) }.ifEmpty { list.take(2) }
+        }).filter { taken.add(it.videoUrl) }
+
+        val rest = (total - subscribed.size).coerceAtLeast(0)
+        val mixed = OnlineRecommendationMixer.blockMix(same, related, diverse, channels, rest)
+        // block order (3 same / 2 related / 3 different / 2 popular) is kept: only neighbours of one channel are pulled apart
+        val ordered = (subscribed + mixed).distinctBy { it.videoUrl }
+        spreadChannelsKeepingBlocks(ordered)
+    }
+
+    /** Like [spreadChannels] but only swaps an item with its direct follower, so the block order stays recognisable. */
+    private fun spreadChannelsKeepingBlocks(items: List<OnlineTrackResult>): List<OnlineTrackResult> {
+        val out = items.toMutableList()
+        for (i in 1 until out.size) {
+            if (out[i].artist.equals(out[i - 1].artist, true) && out[i].artist.isNotBlank()) {
+                val j = (i + 1 until out.size).firstOrNull { !out[it].artist.equals(out[i - 1].artist, true) } ?: continue
+                val tmp = out[i]; out[i] = out[j]; out[j] = tmp
+            }
+        }
+        return out
     }
 
     /**
