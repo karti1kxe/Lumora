@@ -83,5 +83,8 @@ data class MediaStream(
     val headers: Map<String, String>,
     val subtitles: List<MediaSubtitle> = emptyList(),
     /** The other servers the plugin returned for the same movie / episode (the player's Server list and its fallback). */
-    val alternatives: List<MediaStream> = emptyList()
+    val alternatives: List<MediaStream> = emptyList(),
+    /** The plugin link (and its type) this stream was asked for: lets the player ask the same plugin for a download link later. */
+    val sourceLink: String? = null,
+    val sourceType: String? = null
 )

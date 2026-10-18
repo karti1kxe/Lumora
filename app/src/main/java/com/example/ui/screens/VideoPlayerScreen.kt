@@ -677,6 +677,54 @@ fun VideoPlayerScreen(
     }
 
     /**
+     * An HLS master playlist can list several audio languages and subtitle tracks as separate renditions. When the player
+     * shows fewer of them than the playlist lists, the missing ones are added from the playlist itself, so every audio /
+     * subtitle track the provider offers can be chosen (nothing is switched on by itself).
+     */
+    fun addMissingHlsRenditions(stream: com.example.util.media.MediaStream, loadKey: String?) {
+        if (!com.example.util.media.HlsVariants.looksLikeHls(stream.link, stream.type)) return
+        coroutineScope.launch {
+            val headers = if (stream.headers.isNotEmpty()) stream.headers else providerHeaders(stream.link)
+            val renditions = withContext(Dispatchers.IO) {
+                val text = com.example.util.media.HlsVariants.fetchText(stream.link, headers, null, 4000)
+                    ?: com.example.util.NetworkBypass.okHttpProxy(context)?.let { px ->
+                        com.example.util.media.HlsVariants.fetchText(stream.link, headers, px, 5000)
+                    }
+                if (text == null) emptyList() else com.example.util.media.HlsVariants.parseRenditions(text, stream.link)
+            }
+            val audioR = renditions.filter { it.type == "AUDIO" && it.uri.isNotBlank() }.distinctBy { it.uri }
+            val subR = renditions.filter { it.type == "SUBTITLES" && it.uri.isNotBlank() }.distinctBy { it.uri }
+            if (audioR.isEmpty() && subR.isEmpty()) return@launch
+            val opened = withContext(Dispatchers.IO) { controller.awaitFileLoaded(30000L) }
+            if (!opened || lastLoadedVideoKey != loadKey) return@launch
+            // mpv needs a few seconds to list every track of the stream: only what is still missing after that is added
+            delay(5000L)
+            if (lastLoadedVideoKey != loadKey) return@launch
+            fun known(tracks: List<PlayerMediaTrack>, r: com.example.util.media.HlsRendition): Boolean = tracks.any { t ->
+                (t.title.isNotBlank() && t.title.equals(r.name, ignoreCase = true)) ||
+                    (r.language.isNotBlank() && t.language.equals(r.language, ignoreCase = true))
+            }
+            val haveAudio = controller.audioTracks.value
+            val haveSubs = controller.subtitleTracks.value
+            val missingAudio = if (haveAudio.size < audioR.size) audioR.filter { !known(haveAudio, it) } else emptyList()
+            val missingSubs = if (haveSubs.size < subR.size) subR.filter { !known(haveSubs, it) } else emptyList()
+            if (missingAudio.isEmpty() && missingSubs.isEmpty()) return@launch
+            withContext(Dispatchers.IO) {
+                for (r in missingAudio) {
+                    if (lastLoadedVideoKey != loadKey) return@withContext
+                    val name = r.name.ifBlank { r.language }.ifBlank { "Audio" }
+                    try { controller.addExternalAudio(r.uri, name, r.language.ifBlank { null }, false) } catch (_: Throwable) {}
+                }
+                for (r in missingSubs) {
+                    if (lastLoadedVideoKey != loadKey) return@withContext
+                    val name = r.name.ifBlank { r.language }.ifBlank { "Subtitle" }
+                    try { controller.addExternalSubtitle(r.uri, context, originalName = name, select = false) } catch (_: Throwable) {}
+                }
+            }
+        }
+    }
+
+    /**
      * Opens a provider stream. An HLS stream first has its quality list read, so Auto (or the quality chosen earlier)
      * starts at a rate the connection can hold instead of mpv's default of the highest one.
      */
@@ -710,6 +758,7 @@ fun VideoPlayerScreen(
         hlsCurrentBandwidth = chosen?.bandwidth
         controller.setOnlineStream(true)
         controller.setDirectStream(true)
+        controller.setProviderVod(true)
         // quality list not readable (request failed / not a master playlist): mpv would pick the HIGHEST rendition, which a
         // server that only just connects cannot deliver fast enough -> start at a rate the connection can hold
         val blindCap: Long? = if (variants.isEmpty() && com.example.util.media.HlsVariants.looksLikeHls(stream.link, stream.type)) {
@@ -724,6 +773,7 @@ fun VideoPlayerScreen(
         val resumeMs = if (followPosition) maxOf(startMs, controller.currentPositionMs.value) else startMs
         controller.loadVideo(stream.link, resumeMs)
         controller.play()
+        addMissingHlsRenditions(stream, key ?: lastLoadedVideoKey)
     }
 
     /** Opens a direct stream: a provider (media plugin) stream with its quality list, or an imported IPTV channel as before. */
@@ -2443,7 +2493,11 @@ fun VideoPlayerScreen(
         val st = session.servers.getOrNull(index) ?: return
         if (index == session.selectedServer && !automatic) return
         // a server picked by hand stays: nothing switches it by itself afterwards
-        if (!automatic) session.manualChoice = true
+        if (!automatic) {
+            session.manualChoice = true
+            // the new server gets its own chance: if it does not play either, its download link is tried
+            session.fallbackTried = false
+        }
         val pos = controller.currentPositionMs.value
         val loadKey = lastLoadedVideoKey
         coroutineScope.launch {
@@ -2512,6 +2566,101 @@ fun VideoPlayerScreen(
         if (!session.manualChoice && !session.hasPlayed && session.selectedServer + 1 < session.servers.size) {
             switchPluginServer(session.selectedServer + 1, automatic = true)
         }
+    }
+
+    /**
+     * Streaming keeps buffering / does not start: the same movie / episode is opened from the plugin's own DOWNLOAD link (a
+     * plain file the downloader fetches from the same website), from the same second. Used by the watchdog below, and for a
+     * server that was picked by hand but does not play. Without such a link the current stream is simply left as it is.
+     */
+    fun switchToDownloadLink() {
+        val session = pluginSession ?: return
+        val video = currentVideo ?: return
+        val link = session.sourceLink ?: return
+        if (session.fallbackTried) return
+        val current = session.servers.getOrNull(session.selectedServer)
+        if (current?.server?.startsWith(com.example.util.media.MediaPlayback.DIRECT_PREFIX) == true) return
+        session.fallbackTried = true
+        val pos = controller.currentPositionMs.value
+        val loadKey = lastLoadedVideoKey
+        val serverName = current?.server
+        val targetHeight = hlsVariants.firstOrNull { hlsKey(it) == hlsSelectedKey }?.height?.takeIf { it > 0 } ?: 720
+        coroutineScope.launch {
+            val dl = com.example.util.media.MediaPlayback.resolveDownloadFallback(
+                context, session.plugin, link, session.sourceType ?: "movie", serverName, targetHeight
+            )
+            if (dl == null || lastLoadedVideoKey != loadKey) return@launch
+            Toast.makeText(context, "Switching to the download link…", Toast.LENGTH_SHORT).show()
+            // nothing else switches the server after this
+            session.manualChoice = true
+            session.servers = session.servers + dl
+            session.selectedServer = session.servers.lastIndex
+            // registers this file's headers (User-Agent / Referer) like the first load
+            com.example.util.media.MediaPlayback.toVideoItem(context, session.plugin, video.displayName, video.thumbnailUrl.orEmpty(), dl, session)
+            pluginServerIndex = session.selectedServer
+            controller.clearError()
+            openPluginStream(dl, pos, loadKey, followPosition = true)
+            attachPluginSubtitles(session.subtitles, loadKey)
+        }
+    }
+
+    // Watchdog: a provider stream that never starts, fails on its last server, or keeps freezing is replaced by the plugin's
+    // download link of the same video (see switchToDownloadLink). It starts again for every server, also after a manual change.
+    LaunchedEffect(pluginSession, pluginServerIndex, lastLoadedVideoKey) {
+        val session = pluginSession ?: return@LaunchedEffect
+        val sourceLink = session.sourceLink ?: return@LaunchedEffect
+        if (session.fallbackTried) return@LaunchedEffect
+        var sinceLoadMs = 0L
+        var stallMs = 0L
+        var wasBuffering = false
+        var prefetched = false
+        val stallStarts = ArrayList<Long>()
+        while (true) {
+            delay(500L)
+            sinceLoadMs += 500L
+            if (session.fallbackTried) return@LaunchedEffect
+            val buffering = controller.isBuffering.value
+            if (buffering) {
+                stallMs += 500L
+                if (!wasBuffering && session.hasPlayed) stallStarts.add(sinceLoadMs)
+            } else {
+                stallMs = 0L
+            }
+            wasBuffering = buffering
+            stallStarts.removeAll { sinceLoadMs - it > 120_000L }
+            // the download link is looked up in the background while the stream is still trying, so the switch is quick
+            if (buffering && stallMs >= 4000L && !prefetched) {
+                prefetched = true
+                launch(Dispatchers.IO) {
+                    try {
+                        com.example.util.media.MediaProviderRepository.loadStreams(context, session.plugin.value, sourceLink, session.sourceType ?: "movie", true)
+                    } catch (_: Throwable) {}
+                }
+            }
+            val noMoreServers = session.manualChoice || session.selectedServer + 1 >= session.servers.size
+            val failed = controller.errorMessage.value != null && noMoreServers
+            val startLimitMs = if (session.manualChoice) 15_000L else 25_000L
+            val neverStarted = !session.hasPlayed && noMoreServers && sinceLoadMs >= startLimitMs
+            val chronic = session.hasPlayed && (stallMs >= 12_000L || stallStarts.size >= 4)
+            if (failed || neverStarted || chronic) {
+                switchToDownloadLink()
+                return@LaunchedEffect
+            }
+        }
+    }
+
+    // The next episode's stream links are asked for shortly before the current one ends, so Next starts without the wait.
+    LaunchedEffect(currentVideoIndex, pluginSession) {
+        if (pluginSession == null) return@LaunchedEffect
+        val next = currentPlaylist.getOrNull(currentVideoIndex + 1) ?: return@LaunchedEffect
+        if (!com.example.util.media.PluginQueuedEpisodes.isQueued(next.path)) return@LaunchedEffect
+        while (true) {
+            delay(5000L)
+            val dur = controller.durationMs.value
+            val left = dur - controller.currentPositionMs.value
+            if (dur > 0L && left in 1L..150_000L) break
+        }
+        com.example.util.media.PluginQueuedEpisodes.prefetch(context, next.path)
     }
 
     // "Auto" HLS quality is chosen once, when the video opens. The quality never steps up or down by itself while it

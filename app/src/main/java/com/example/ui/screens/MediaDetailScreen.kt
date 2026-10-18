@@ -439,11 +439,32 @@ fun MediaDetailScreen(
             if (streams == null) {
                 showResolveError(result.exceptionOrNull())
             } else {
-                val options = MediaPlayback.downloadOptions(streams)
-                // always show what is available first (even one file); the download starts only after a tap
-                if (options.isNotEmpty()) {
-                    downloadLinks = DownloadLinksState(v, suffix, options)
-                } else {
+                // always show what is available first (even one file); the download starts only after a tap.
+                // The list opens at once and every row fills in its real size as soon as it is measured,
+                // so the sheet never waits for the slowest server.
+                var opened = false
+                val sizeJob = scope.launch {
+                    MediaPlayback.downloadOptionsProgressive(context, streams) { list ->
+                        if (!opened) {
+                            opened = true
+                            downloadLinks = DownloadLinksState(v, suffix, list)
+                        } else if (downloadLinks?.video === v) {
+                            downloadLinks = DownloadLinksState(v, suffix, list)
+                        }
+                    }
+                }
+                try {
+                    var waited = 0L
+                    while (!opened && waited < 3000L && sizeJob.isActive) {
+                        kotlinx.coroutines.delay(30L)
+                        waited += 30L
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    sizeJob.cancel()
+                    throw e
+                }
+                if (!opened) {
+                    sizeJob.cancel()
                     showResolveError(PluginException("no downloadable file was found"))
                 }
             }
@@ -453,7 +474,7 @@ fun MediaDetailScreen(
     // The first episodes get their picture (a frame of the video) and their working server prepared in the background,
     // so by the time one is tapped it already knows which server really plays.
     LaunchedEffect(videos) {
-        for (pv in videos.take(12)) {
+        for (pv in videos.take(6)) {
             launch {
                 com.example.util.media.EpisodeFrames.obtain(
                     context, plugin, pv.link, pv.type, pv.title,

@@ -40,6 +40,23 @@ data class HlsVariant(
     ).filter { it.isNotBlank() }.joinToString(" · ")
 }
 
+/** One alternative rendition (EXT-X-MEDIA) of an HLS master playlist: another audio language, or a subtitle track. */
+data class HlsRendition(
+    /** "AUDIO" or "SUBTITLES". */
+    val type: String,
+    val groupId: String,
+    val name: String,
+    val language: String,
+    val isDefault: Boolean,
+    /** Absolute playlist URL; blank when the audio is part of the video playlist itself. */
+    val uri: String
+)
+
+/** What a media playlist (the list of segments of ONE rendition) says: how long it is and where its segments are. */
+class HlsMediaPlaylist(val durations: List<Double>, val segments: List<String>, val isVod: Boolean) {
+    val totalSeconds: Double get() = durations.sum()
+}
+
 /** Reads the renditions (the quality list) out of an HLS master playlist. */
 object HlsVariants {
     fun looksLikeHls(link: String, type: String?): Boolean {
@@ -126,6 +143,92 @@ object HlsVariants {
         // best first; the same resolution at two bitrates stays as two entries
         return out.distinctBy { Triple(it.height, it.bandwidth, it.width) }
             .sortedWith(compareByDescending<HlsVariant> { it.height }.thenByDescending { it.bandwidth })
+    }
+
+    /** The audio languages / subtitle tracks a master playlist lists next to its video renditions (EXT-X-MEDIA with a URI). */
+    fun parseRenditions(text: String, baseUrl: String): List<HlsRendition> {
+        if (!text.trimStart().startsWith("#EXTM3U")) return emptyList()
+        val out = ArrayList<HlsRendition>()
+        for (raw in text.lines()) {
+            val line = raw.trim()
+            if (!line.startsWith("#EXT-X-MEDIA:")) continue
+            val attrs = parseAttributes(line.substringAfter(':'))
+            val type = attrs["TYPE"].orEmpty().uppercase()
+            if (type != "AUDIO" && type != "SUBTITLES") continue
+            val uriRaw = attrs["URI"].orEmpty()
+            val abs = if (uriRaw.isBlank()) "" else try { URI(baseUrl).resolve(uriRaw).toString() } catch (_: Throwable) { uriRaw }
+            out.add(
+                HlsRendition(
+                    type = type,
+                    groupId = attrs["GROUP-ID"].orEmpty(),
+                    name = attrs["NAME"].orEmpty(),
+                    language = attrs["LANGUAGE"].orEmpty(),
+                    isDefault = attrs["DEFAULT"].equals("YES", true),
+                    uri = abs
+                )
+            )
+        }
+        return out
+    }
+
+    /** Segment list of a media playlist, null when [text] is not one (a master playlist, a web page, an error). */
+    fun parseMediaPlaylist(text: String, baseUrl: String): HlsMediaPlaylist? {
+        if (!text.trimStart().startsWith("#EXTM3U") || text.contains("#EXT-X-STREAM-INF")) return null
+        val durations = ArrayList<Double>()
+        val segments = ArrayList<String>()
+        var pending = -1.0
+        for (raw in text.lines()) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
+            if (line.startsWith("#EXTINF:")) {
+                pending = line.substringAfter(':').substringBefore(',').trim().toDoubleOrNull() ?: 0.0
+            } else if (!line.startsWith("#") && pending >= 0.0) {
+                val abs = try { URI(baseUrl).resolve(line).toString() } catch (_: Throwable) { line }
+                durations.add(pending)
+                segments.add(abs)
+                pending = -1.0
+            }
+        }
+        if (segments.isEmpty()) return null
+        return HlsMediaPlaylist(durations, segments, text.contains("#EXT-X-ENDLIST"))
+    }
+
+    /** Downloads a small text file (a playlist). Null when the request failed, so the caller can try another route. */
+    fun fetchText(url: String, headers: Map<String, String>, proxy: Proxy? = null, timeoutMs: Int = 4000): String? {
+        return try {
+            val conn = (URL(url).openConnection(proxy ?: Proxy.NO_PROXY) as HttpURLConnection).apply {
+                connectTimeout = timeoutMs
+                readTimeout = timeoutMs
+                instanceFollowRedirects = true
+                for ((k, v) in headers) {
+                    if (k.isNotBlank() && v.isNotBlank() && !k.equals("Accept-Encoding", true) && !k.equals("Host", true) &&
+                        !k.equals("Range", true) && !k.equals("Content-Length", true)
+                    ) {
+                        try { setRequestProperty(k, v) } catch (_: Throwable) {}
+                    }
+                }
+                if (headers.keys.none { it.equals("User-Agent", true) }) {
+                    setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+                }
+            }
+            try {
+                if (conn.responseCode !in 200..299) return null
+                conn.inputStream.use { ins ->
+                    val bos = java.io.ByteArrayOutputStream()
+                    val buf = ByteArray(16 * 1024)
+                    while (bos.size() < 2 * 1024 * 1024) {
+                        val n = ins.read(buf)
+                        if (n < 0) break
+                        bos.write(buf, 0, n)
+                    }
+                    bos.toString("UTF-8")
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun parseAttributes(s: String): Map<String, String> {

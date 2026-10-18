@@ -38,4 +38,34 @@ https://cdn.example/1080/index.m3u8
         assertEquals("Accept: a/b", StreamRequestOptions.mpvListItem("Accept: a/b"))
         assertEquals("%24%Accept: text/html,image/png", StreamRequestOptions.mpvListItem("Accept: text/html,image/png"))
     }
+
+    @Test
+    fun masterPlaylistListsItsAudioAndSubtitleRenditions() {
+        val text = """#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Hindi",LANGUAGE="hi",DEFAULT=YES,URI="audio/hi.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",LANGUAGE="en",DEFAULT=NO,URI="https://cdn.example/audio/en.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",URI="subs/en.m3u8"
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="cc",NAME="CC1",INSTREAM-ID="CC1"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="aud",SUBTITLES="subs"
+720/index.m3u8
+"""
+        val r = HlsVariants.parseRenditions(text, "https://a.example/c/master.m3u8")
+        assertEquals(listOf("Hindi", "English", "English"), r.map { it.name })
+        assertEquals(listOf("AUDIO", "AUDIO", "SUBTITLES"), r.map { it.type })
+        assertEquals("https://a.example/c/audio/hi.m3u8", r[0].uri)
+        assertEquals("https://cdn.example/audio/en.m3u8", r[1].uri)
+        assertEquals("https://a.example/c/subs/en.m3u8", r[2].uri)
+        assertTrue(r[0].isDefault)
+    }
+
+    @Test
+    fun mediaPlaylistGivesItsLengthAndSegments() {
+        val text = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nseg0.ts\n#EXTINF:4.5,\nhttps://cdn.example/seg1.ts\n#EXT-X-ENDLIST\n"
+        val p = HlsVariants.parseMediaPlaylist(text, "https://a.example/c/index.m3u8")!!
+        assertEquals(10.5, p.totalSeconds, 0.001)
+        assertEquals("https://a.example/c/seg0.ts", p.segments[0])
+        assertEquals("https://cdn.example/seg1.ts", p.segments[1])
+        assertTrue(p.isVod)
+        assertTrue(HlsVariants.parseMediaPlaylist(master, "https://a.example/m.m3u8") == null)
+    }
 }

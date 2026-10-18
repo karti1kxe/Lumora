@@ -359,6 +359,8 @@ class MpvPlayerController {
     val liveSeekRange: StateFlow<LiveSeekRange?> = _liveSeekRange.asStateFlow()
 
     @Volatile private var directStreamMode = false
+    /** A provider (plugin) movie / episode: opened like a direct stream, but tuned for a long on-demand video, not live TV. */
+    @Volatile private var providerVodMode = false
     @Volatile private var directStreamStarted = false
     @Volatile private var directStreamErrorShown = false
     @Volatile private var directStreamLoadStartedAt = 0L
@@ -464,6 +466,7 @@ class MpvPlayerController {
         chapters: List<PlayerVideoChapter>? = null
     ) {
         directStreamMode = false
+        providerVodMode = false
         networkRequestOptions = null
         hlsBitrate = "max"
         onlineStreamMode = enabled
@@ -484,6 +487,15 @@ class MpvPlayerController {
             _isLiveStream.value = false
             _liveSeekRange.value = null
         }
+    }
+
+    /**
+     * Call right after [setDirectStream] (true) for a provider movie / episode. The IPTV tuning of direct streams (30 s
+     * read-ahead, 64 MiB, small probe) suits live channels; a long on-demand video buffers far less with a big read-ahead,
+     * and its audio / subtitle tracks and chapters are found with a bigger probe.
+     */
+    fun setProviderVod(enabled: Boolean) {
+        providerVodMode = enabled
     }
 
     /**
@@ -688,6 +700,24 @@ class MpvPlayerController {
                     // HLS channels whose segments use odd file extensions (.jpg/.txt/none) are refused by ffmpeg
                     // unless extensions are allowed - a common reason why "some channels never play".
                     try { view.mpv.setPropertyString("demuxer-lavf-o", "allowed_extensions=ALL,extension_picky=0,fflags=+discardcorrupt" + proxyOpt) } catch (_: Throwable) {}
+                    if (providerVodMode) {
+                        // Provider movie / episode (on demand): read far ahead and refill in bigger steps so a slow moment of the
+                        // server does not freeze the picture again and again; keep-alive requests and a bigger read buffer make
+                        // one connection faster; a bigger probe finds every audio / subtitle track and the chapters of the file.
+                        view.mpv.setPropertyString("cache-secs", "180")
+                        view.mpv.setPropertyString("demuxer-readahead-secs", "180")
+                        view.mpv.setPropertyString("demuxer-max-bytes", "200MiB")
+                        view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
+                        view.mpv.setPropertyString("cache-pause-wait", "5")
+                        view.mpv.setPropertyString("network-timeout", "20")
+                        view.mpv.setPropertyString(
+                            "stream-lavf-o",
+                            "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=4,multiple_requests=1,icy=0" + proxyOpt
+                        )
+                        try { view.mpv.setPropertyString("stream-buffer-size", "4MiB") } catch (_: Throwable) {}
+                        try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "6") } catch (_: Throwable) {}
+                        try { view.mpv.setPropertyString("demuxer-lavf-probesize", "15000000") } catch (_: Throwable) {}
+                    }
                 } else {
                     view.mpv.setPropertyString("cache-pause-wait", "3")
                     view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx,5xx,reconnect_at_eof=1,reconnect_delay_max=5,multiple_requests=1")
