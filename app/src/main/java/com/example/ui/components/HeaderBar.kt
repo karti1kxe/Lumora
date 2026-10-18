@@ -71,7 +71,8 @@ fun HeaderBar(
     showBorder: Boolean = true,
     elevation: Dp = 6.dp
 ) {
-    val isDark = themeMode == ThemeMode.DARK
+    val isDark = themeMode == ThemeMode.DARK ||
+        (themeMode == ThemeMode.SYSTEM && androidx.compose.foundation.isSystemInDarkTheme())
     val surfaceColor = backgroundColor ?: (if (isDark) DarkGlassSurface else LightGlassSurface)
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
     val textColor = if (isDark) DarkTextPrimary else LightTextPrimary

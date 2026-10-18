@@ -73,9 +73,9 @@ object MediaPluginStore {
                 out.add(
                     MediaPluginInfo(
                         value = o.getString("value"),
-                        name = o.optString("name", dir.name),
+                        name = o.optString("name", dir.name).let { n -> if (isCs && n == o.getString("value")) cleanName(null, n) else n },
                         version = o.optString("version", ""),
-                        icon = o.optString("icon", ""),
+                        icon = cleanIconUrl(o.optString("icon", "")),
                         type = o.optString("type", ""),
                         installedAt = o.optLong("installedAt", 0L),
                         engine = if (isCs) MediaPluginInfo.ENGINE_CLOUDSTREAM else MediaPluginInfo.ENGINE_VEGA,
@@ -302,9 +302,9 @@ object MediaPluginStore {
                 normalised.put(
                     JSONObject()
                         .put("value", internal)
-                        .put("display_name", p.optString("name", internal).ifBlank { internal })
+                        .put("display_name", cleanName(p.optString("name", ""), internal))
                         .put("version", p.optString("version", "1"))
-                        .put("icon", p.optString("iconUrl", "").takeIf { it != "null" }.orEmpty())
+                        .put("icon", cleanIconUrl(p.optString("iconUrl", "")))
                         .put("type", "CloudStream")
                         .put("engine", MediaPluginInfo.ENGINE_CLOUDSTREAM)
                         .put("url", p.optString("url"))
@@ -327,6 +327,27 @@ object MediaPluginStore {
             return Result.success(list)
         }
         return Result.failure(IllegalStateException(lastError))
+    }
+
+    /**
+     * A repository's icon link made loadable: CloudStream's "%size%" placeholder is filled in, "//host/..." gets a scheme and
+     * http links are upgraded to https (the image loader does not follow an http -> https redirect, so those logos stayed empty).
+     */
+    internal fun cleanIconUrl(raw: String?): String {
+        var u = raw?.trim().orEmpty()
+        if (u.isEmpty() || u.equals("null", true)) return ""
+        u = u.replace("%size%", "128").replace("{size}", "128").replace("\$size", "128")
+        if (u.startsWith("//")) u = "https:$u"
+        if (u.startsWith("http://", true)) u = "https://" + u.substring(7)
+        return u
+    }
+
+    /** The name a repository lists, unchanged. Only when it lists none, the internal class name is shown without its "Provider" suffix. */
+    internal fun cleanName(name: String?, internal: String): String {
+        val n = name?.trim().orEmpty()
+        if (n.isNotEmpty() && !n.equals("null", true)) return n
+        val stripped = internal.removeSuffix("Provider").removeSuffix("provider").trim()
+        return stripped.ifBlank { internal }
     }
 
     private fun sha256(file: File): String {
@@ -492,9 +513,11 @@ object MediaPluginStore {
             out.add(
                 MediaPluginInfo(
                     value = value,
-                    name = o.optString("display_name", value),
+                    name = o.optString("display_name", value).let { dn ->
+                        if (o.optString("engine", "") == MediaPluginInfo.ENGINE_CLOUDSTREAM && dn == value) cleanName(null, value) else dn
+                    },
                     version = o.optString("version", ""),
-                    icon = o.optString("icon", ""),
+                    icon = cleanIconUrl(o.optString("icon", "")),
                     type = o.optString("type", ""),
                     engine = if (o.optString("engine", "") == MediaPluginInfo.ENGINE_CLOUDSTREAM) MediaPluginInfo.ENGINE_CLOUDSTREAM else MediaPluginInfo.ENGINE_VEGA,
                     url = o.optString("url", ""),

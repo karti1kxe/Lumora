@@ -4384,11 +4384,45 @@ class MpvPlayerController {
      * list / returning the previous track's id. If it is still late, a short background watcher
      * refreshes the list as soon as the track appears.
      */
-    private fun awaitAddedExternalTrack(view: VideoPlayerMpvView, path: String): Int {
+    /** Ids of every subtitle track mpv lists right now. */
+    private fun currentSubtitleTrackIds(view: VideoPlayerMpvView): Set<Int> {
+        val out = HashSet<Int>()
+        val count = try { view.mpv.getPropertyInt("track-list/count") ?: 0 } catch (_: Throwable) { 0 }
+        for (i in 0 until count) {
+            if ((try { view.mpv.getPropertyString("track-list/$i/type") } catch (_: Throwable) { "" }) != "sub") continue
+            val id = try { view.mpv.getPropertyInt("track-list/$i/id") ?: 0 } catch (_: Throwable) { 0 }
+            if (id > 0) out.add(id)
+        }
+        return out
+    }
+
+    /** The newest subtitle track that was not listed before `sub-add` (used when mpv reports another file name than we passed). */
+    private fun findNewSubtitleTrackId(view: VideoPlayerMpvView, before: Set<Int>): Int =
+        currentSubtitleTrackIds(view).filter { it !in before }.maxOrNull() ?: 0
+
+    /** Off the main thread: waits (up to [maxMs]) until mpv has opened the media, because `sub-add` fails before that. */
+    private fun waitForMediaLoaded(view: VideoPlayerMpvView, maxMs: Long) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return
+        val end = System.currentTimeMillis() + maxMs
+        while (System.currentTimeMillis() < end) {
+            val loaded = try { !view.mpv.getPropertyString("path").isNullOrBlank() && (view.mpv.getPropertyInt("track-list/count") ?: 0) > 0 } catch (_: Throwable) { false }
+            if (loaded) return
+            try { Thread.sleep(100L) } catch (_: InterruptedException) { return }
+        }
+    }
+
+    /**
+     * Right after `sub-add` mpv can take a while to list the new external track (a stream that is still opening, a big
+     * file). Waiting for it here (up to ~4 s, never on the main thread) means the Uploaded Subtitles list and the
+     * returned track id are the new track's, not the previous track's. The track is found by its file name, or - when
+     * mpv reports another name - as the one new subtitle track that was not there before. If it is still late, a short
+     * background watcher refreshes the list as soon as the track appears.
+     */
+    private fun awaitAddedExternalTrack(view: VideoPlayerMpvView, path: String, before: Set<Int> = emptySet()): Int {
         val onMain = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
-        val attempts = if (onMain) 1 else 30
+        val attempts = if (onMain) 1 else 160
         for (attempt in 0 until attempts) {
-            val id = findExternalTrackIdByPath(view, path)
+            val id = findExternalTrackIdByPath(view, path).takeIf { it > 0 } ?: findNewSubtitleTrackId(view, before)
             if (id > 0) {
                 refreshTracksAndChapters()
                 return id
@@ -4397,10 +4431,12 @@ class MpvPlayerController {
         }
         refreshTracksAndChapters()
         playerScope.launch {
-            repeat(40) {
+            repeat(80) {
                 if (isReleased) return@launch
-                delay(50L)
-                val found = try { findExternalTrackIdByPath(view, path) } catch (_: Throwable) { 0 }
+                delay(100L)
+                val found = try {
+                    findExternalTrackIdByPath(view, path).takeIf { it > 0 } ?: findNewSubtitleTrackId(view, before)
+                } catch (_: Throwable) { 0 }
                 if (found > 0) {
                     refreshTracksAndChapters()
                     return@launch
@@ -4537,8 +4573,17 @@ class MpvPlayerController {
                 view.mpv.setPropertyString("sub-ass-override", "no")
                 view.mpv.setPropertyString("sub-ass-force-style", "")
             }
+            // a subtitle added while the video is still opening (streams) would be refused by mpv: wait for the media first
+            waitForMediaLoaded(view, 6_000L)
+            val tracksBefore = currentSubtitleTrackIds(view)
             view.mpv.command("sub-add", pathToAdd, if (select) "select" else "auto")
-            val addedTrackId = awaitAddedExternalTrack(view, pathToAdd)
+            var addedTrackId = awaitAddedExternalTrack(view, pathToAdd, tracksBefore)
+            if (addedTrackId <= 0 && android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+                // mpv did not list it (e.g. it dropped the command): add it once more
+                waitForMediaLoaded(view, 3_000L)
+                view.mpv.command("sub-add", pathToAdd, if (select) "select" else "auto")
+                addedTrackId = awaitAddedExternalTrack(view, pathToAdd, tracksBefore)
+            }
 
             // The track mpv just created is THE answer; `sid` may still be the previous track's id
             // for a moment, which used to make the new upload look "not loaded".
@@ -4653,6 +4698,19 @@ class MpvPlayerController {
     }
 
     fun clearError() {
+        _errorMessage.value = null
+    }
+
+    /**
+     * Switching to another server / quality of a provider stream: the new link starts with a clean slate (direct
+     * connection first, full retry budget, no "could not be played" state left from the previous server).
+     */
+    fun resetStreamRoute(url: String) {
+        try {
+            android.net.Uri.parse(url).host?.lowercase()?.let { streamHostUsesProxy.remove(it) }
+        } catch (_: Throwable) {}
+        onlineLoadRetries = 0
+        directStreamErrorShown = false
         _errorMessage.value = null
     }
 

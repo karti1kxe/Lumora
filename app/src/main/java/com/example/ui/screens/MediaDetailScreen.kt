@@ -102,6 +102,10 @@ object MediaDetailState {
     var lastSection by mutableIntStateOf(0)
     /** The provider page that is open inside Network > Media (null = the plugin list). Kept so Back from a title / the player returns to it. */
     var provider by androidx.compose.runtime.mutableStateOf<MediaPluginInfo?>(null)
+    /** Pull-down on an open provider page: bumped by the Home screen, handled by the page (reloads categories + rows). */
+    var refreshRequest by mutableIntStateOf(0)
+    /** True from the pull-down until the provider page has loaded its categories again (drives the refresh indicator). */
+    var providerRefreshing by androidx.compose.runtime.mutableStateOf(false)
     /** "plugin|link" -> [season index, audio index, quality index] */
     val selections = HashMap<String, IntArray>()
 

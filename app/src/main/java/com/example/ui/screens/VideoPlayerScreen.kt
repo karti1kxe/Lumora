@@ -135,6 +135,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -609,17 +611,32 @@ fun VideoPlayerScreen(
     fun attachPluginSubtitles(subtitles: List<com.example.util.media.MediaSubtitle>, loadKey: String?) {
         if (subtitles.isEmpty()) return
         coroutineScope.launch {
+            // the subtitle files are fetched while the video is still opening (in parallel), and added as local files:
+            // mpv then never waits on a subtitle website while the video plays, so choosing a subtitle does not buffer
+            val headers = LinkedHashMap<String, String>()
+            com.example.util.StreamEntryStore.get(pluginSession?.let { it.servers.getOrNull(it.selectedServer)?.link } ?: currentVideo?.path.orEmpty())?.let { meta ->
+                meta.userAgent?.takeIf { it.isNotBlank() }?.let { headers["User-Agent"] = it }
+                meta.referrer?.takeIf { it.isNotBlank() }?.let { headers["Referer"] = it }
+                headers.putAll(meta.extraHeaders)
+            }
+            val downloads = subtitles.map { sub ->
+                async(Dispatchers.IO) {
+                    sub to try { com.example.util.media.SubtitleDownloader.download(context, sub.uri, headers) } catch (_: Throwable) { null }
+                }
+            }
             val opened = withContext(Dispatchers.IO) { controller.awaitFileLoaded(30000L) }
             if (!opened || lastLoadedVideoKey != loadKey) return@launch
+            val fetched = downloads.awaitAll()
             val used = HashSet<String>()
             withContext(Dispatchers.IO) {
-                for (sub in subtitles) {
+                for ((sub, local) in fetched) {
                     val base = sub.title.ifBlank { sub.language }.ifBlank { "Subtitle" }
                     var name = base
                     var n = 2
                     while (!used.add(name.lowercase())) name = "$base ${n++}"
                     try {
-                        controller.addExternalSubtitle(sub.uri, context, originalName = name, select = false)
+                        // a file that could not be fetched here is still given to mpv as the link
+                        controller.addExternalSubtitle(local?.absolutePath ?: sub.uri, context, originalName = name, select = false)
                     } catch (_: Throwable) {}
                 }
             }
@@ -663,15 +680,16 @@ fun VideoPlayerScreen(
      * Opens a provider stream. An HLS stream first has its quality list read, so Auto (or the quality chosen earlier)
      * starts at a rate the connection can hold instead of mpv's default of the highest one.
      */
-    suspend fun openPluginStream(stream: com.example.util.media.MediaStream, startMs: Long, key: String?) {
+    suspend fun openPluginStream(stream: com.example.util.media.MediaStream, startMs: Long, key: String?, followPosition: Boolean = false) {
+        controller.resetStreamRoute(stream.link)
         var variants: List<com.example.util.media.HlsVariant> = emptyList()
         if (com.example.util.media.HlsVariants.looksLikeHls(stream.link, stream.type)) {
             variants = withContext(Dispatchers.IO) {
                 val headers = if (stream.headers.isNotEmpty()) stream.headers else providerHeaders(stream.link)
                 // only the quality list: a short wait, direct first, the proxy only when the request itself failed
-                com.example.util.media.HlsVariants.fetchResult(stream.link, headers, null, 4000)
+                com.example.util.media.HlsVariants.fetchResult(stream.link, headers, null, 2500)
                     ?: com.example.util.NetworkBypass.okHttpProxy(context)?.let { px ->
-                        com.example.util.media.HlsVariants.fetchResult(stream.link, headers, px, 4000)
+                        com.example.util.media.HlsVariants.fetchResult(stream.link, headers, px, 2500)
                     }
                     ?: emptyList()
             }
@@ -702,7 +720,9 @@ fun VideoPlayerScreen(
             if (kbps > 0) (kbps * 600L).coerceIn(800_000L, 4_000_000L) else 2_500_000L
         } else null
         controller.setHlsBitrate(chosen?.bandwidth ?: blindCap)
-        controller.loadVideo(stream.link, startMs)
+        // the old video kept playing while the quality list was read: continue from where it is NOW, not from where it was
+        val resumeMs = if (followPosition) maxOf(startMs, controller.currentPositionMs.value) else startMs
+        controller.loadVideo(stream.link, resumeMs)
         controller.play()
     }
 
@@ -2411,7 +2431,7 @@ fun VideoPlayerScreen(
             session.selectedQuality = label
             pluginQuality = label
             pluginServerIndex = session.selectedServer
-            openPluginStream(stream, pos, loadKey)
+            openPluginStream(stream, pos, loadKey, followPosition = true)
             attachPluginSubtitles(stream.subtitles, loadKey)
         }
     }
@@ -2432,7 +2452,7 @@ fun VideoPlayerScreen(
             com.example.util.media.MediaPlayback.toVideoItem(context, session.plugin, video.displayName, video.thumbnailUrl.orEmpty(), st, session)
             pluginServerIndex = session.selectedServer
             controller.clearError()
-            openPluginStream(st, pos, loadKey)
+            openPluginStream(st, pos, loadKey, followPosition = true)
             attachPluginSubtitles(session.subtitles, loadKey)
         }
     }

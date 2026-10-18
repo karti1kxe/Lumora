@@ -33,7 +33,7 @@ object MediaProviderRepository {
     }
 
     fun clearAll() {
-        catalogs.clear(); posts.clear(); infos.clear(); episodeLists.clear()
+        catalogs.clear(); posts.clear(); infos.clear(); episodeLists.clear(); streamCache.clear()
     }
 
     fun clear(pluginId: String) {
@@ -42,6 +42,7 @@ object MediaProviderRepository {
         posts.keys.filter { it.startsWith(prefix) }.forEach { posts.remove(it) }
         infos.keys.filter { it.startsWith(prefix) }.forEach { infos.remove(it) }
         episodeLists.keys.filter { it.startsWith(prefix) }.forEach { episodeLists.remove(it) }
+        streamCache.keys.filter { it.startsWith(prefix) }.forEach { streamCache.remove(it) }
     }
 
     /** Details of one title (getMeta). */
@@ -87,10 +88,38 @@ object MediaProviderRepository {
         return out
     }
 
-    /** Playable sources of a movie / episode link (getStream). Not cached: stream links expire. */
-    suspend fun loadStreams(context: Context, pluginId: String, link: String, type: String, forDownload: Boolean): List<MediaStream> {
+    private class CachedStreams(val at: Long, val list: List<MediaStream>)
+    private val streamCache = ConcurrentHashMap<String, CachedStreams>()
+    // stream links expire, so they are only reused for a short moment (opening the same episode again, the download list
+    // right after the player, a retry): no second "Getting video link" wait
+    private const val STREAM_CACHE_MS = 3 * 60_000L
+
+    /** Playable sources of a movie / episode link (getStream). Kept for 3 minutes only: stream links expire. */
+    suspend fun loadStreams(context: Context, pluginId: String, link: String, type: String, forDownload: Boolean, fresh: Boolean = false): List<MediaStream> {
+        val key = "$pluginId|$link|$type|$forDownload"
+        if (!fresh) {
+            streamCache[key]?.let { c ->
+                if (System.currentTimeMillis() - c.at < STREAM_CACHE_MS) return c.list
+                streamCache.remove(key)
+            }
+        }
+        val list = loadStreamsUncached(context, pluginId, link, type, forDownload)
+        if (list.isNotEmpty()) {
+            if (streamCache.size > 60) streamCache.clear()
+            streamCache[key] = CachedStreams(System.currentTimeMillis(), list)
+        }
+        return list
+    }
+
+    /** The links of [link] did not play: the next request asks the provider again instead of reusing them. */
+    fun forgetStreams(pluginId: String, link: String) {
+        val prefix = "$pluginId|$link|"
+        streamCache.keys.filter { it.startsWith(prefix) }.forEach { streamCache.remove(it) }
+    }
+
+    private suspend fun loadStreamsUncached(context: Context, pluginId: String, link: String, type: String, forDownload: Boolean): List<MediaStream> {
         val json = if (isCs(context, pluginId)) {
-            csCall(context, pluginId) { CloudStreamEngine.streamsJson(context, pluginId, link) }
+            csCall(context, pluginId) { CloudStreamEngine.streamsJson(context, pluginId, link, forDownload) }
         } else {
             val args = org.json.JSONObject()
                 .put("link", link)

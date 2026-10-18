@@ -148,7 +148,8 @@ fun MediaInformationScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val isDark = uiState.themeMode == ThemeMode.DARK
+    val isDark = uiState.themeMode == ThemeMode.DARK ||
+        (uiState.themeMode == ThemeMode.SYSTEM && androidx.compose.foundation.isSystemInDarkTheme())
     val background = if (isDark) Brush.verticalGradient(listOf(DarkBackgroundStart, DarkBackgroundEnd))
     else Brush.verticalGradient(listOf(LightBackgroundStart, LightBackgroundEnd))
     val primary = if (isDark) DarkTextPrimary else LightTextPrimary

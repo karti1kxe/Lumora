@@ -631,6 +631,17 @@ fun MediaPluginPage(
     var reloadKey by remember(plugin.value) { mutableStateOf(0) }
     var seeAll by remember(plugin.value) { mutableStateOf<MediaCatalogEntry?>(null) }
 
+    // pull-down on the provider page (Home screen bumps the request): every cached row of this provider is dropped and loaded again
+    val refreshTick = MediaDetailState.refreshRequest
+    var handledRefresh by remember(plugin.value) { mutableStateOf(refreshTick) }
+    LaunchedEffect(refreshTick) {
+        if (refreshTick != handledRefresh) {
+            handledRefresh = refreshTick
+            MediaProviderRepository.clear(plugin.value)
+            reloadKey++
+        }
+    }
+
     LaunchedEffect(plugin.value, plugin.version, reloadKey) {
         catalog = null
         catalogError = null
@@ -640,6 +651,8 @@ fun MediaPluginPage(
             throw e
         } catch (t: Throwable) {
             catalogError = t.message ?: "Could not load this plugin"
+        } finally {
+            MediaDetailState.providerRefreshing = false
         }
     }
 

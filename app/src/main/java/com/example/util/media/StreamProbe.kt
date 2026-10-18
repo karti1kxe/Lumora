@@ -20,8 +20,8 @@ import java.util.concurrent.atomic.AtomicIntegerArray
  * The rest stay available as the player's other servers.
  */
 object StreamProbe {
-    private const val TOTAL_MS = 12_000L
-    private const val CALL_MS = 5_000
+    private const val TOTAL_MS = 8_000L
+    private const val CALL_MS = 3_500
     private const val MAX_CANDIDATES = 8
     /** Headers the player (mpv) builds itself and never sends from a provider: the check must not send them either. */
     private val PLAYER_OWN_HEADERS = setOf(

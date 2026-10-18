@@ -141,6 +141,7 @@ object MediaPlayback {
                 if (direct.isNotEmpty()) {
                     val outcome = StreamProbe.verify(context, direct)
                     val hasTorrent = ranked.size > direct.size
+                    if (!outcome.anyWorks) MediaProviderRepository.forgetStreams(plugin.value, link)
                     if (requireWorking && !outcome.anyWorks && !hasTorrent) {
                         return Result.failure(PluginException("This video does not play on any server right now. Try again in a moment."))
                     }

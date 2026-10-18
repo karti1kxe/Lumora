@@ -533,11 +533,16 @@ fun HomeScreen(
     val lang = uiState.language
 
     // Visual Palette
-    val backgroundBrush = if (isDark) {
-        Brush.verticalGradient(colors = listOf(DarkBackgroundStart, DarkBackgroundEnd))
+    // Main screen uses the same colour as the "Sort & View Options" panel (opaque), in light / dark / system mode.
+    // AMOLED black keeps its pure black background.
+    val mainScreenColor = if (isDark && uiState.amoledBlackMode) {
+        DarkBackgroundStart
+    } else if (isDark) {
+        Color(0xFF1B2630)
     } else {
-        Brush.verticalGradient(colors = listOf(LightBackgroundStart, LightBackgroundEnd))
+        Color(0xFFDAE3E9)
     }
+    val backgroundBrush = Brush.verticalGradient(colors = listOf(mainScreenColor, mainScreenColor))
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
@@ -2101,12 +2106,20 @@ fun HomeScreen(
                 }
 
                 // 5. Main Content Area with Browser-like Liquid Pull-to-Refresh
+                // an open provider page (Network > Media) refreshes its own categories on pull-down, not the folder list
+                val providerPageOpen = effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads &&
+                    MediaDetailState.provider != null && MediaDetailState.plugin == null
                 LiquidPullToRefresh(
-                    isRefreshing = if (isOnlineVideoOpen) com.example.ui.components.OnlineVideoFeedState.isRefreshing else isManualRefreshing,
+                    isRefreshing = if (isOnlineVideoOpen) com.example.ui.components.OnlineVideoFeedState.isRefreshing
+                    else if (providerPageOpen) MediaDetailState.providerRefreshing
+                    else isManualRefreshing,
                     onRefresh = {
                         if (isOnlineVideoOpen) {
                             com.example.ui.components.OnlineVideoFeedState.isRefreshing = true
                             com.example.ui.components.OnlineVideoFeedState.refreshRequest++
+                        } else if (providerPageOpen) {
+                            MediaDetailState.providerRefreshing = true
+                            MediaDetailState.refreshRequest++
                         } else reloadFolders(true)
                     },
                     isDark = isDark,

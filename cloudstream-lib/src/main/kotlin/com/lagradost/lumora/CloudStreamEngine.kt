@@ -28,7 +28,11 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.extractorApis
 import dalvik.system.PathClassLoader
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -37,6 +41,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Runs CloudStream extensions (.cs3 files, compiled Kotlin / DEX) inside Lumora.
@@ -55,6 +60,8 @@ object CloudStreamEngine {
 
     private val loaded = ConcurrentHashMap<String, Loaded>()
     private val loadLock = Mutex()
+    /** Runs the extension's loadLinks on its own, so a slow server never holds the answer back once links have arrived. */
+    private val fetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var initialised = false
 
     fun isLoaded(pluginId: String): Boolean = loaded.containsKey(pluginId)
@@ -363,7 +370,7 @@ object CloudStreamEngine {
     }
 
     /** `[{server, link, type, quality, headers, subtitles}]` - what the extension's loadLinks found for [link]. */
-    suspend fun streamsJson(context: Context, pluginId: String, link: String): String {
+    suspend fun streamsJson(context: Context, pluginId: String, link: String, forDownload: Boolean = false): String {
         init(context)
         val l = entry(pluginId)
         if (link.startsWith(TORRENT_PREFIX)) {
@@ -376,9 +383,54 @@ object CloudStreamEngine {
         val (api, data) = decode(l, link)
         val links = java.util.Collections.synchronizedList(ArrayList<ExtractorLink>())
         val subs = java.util.Collections.synchronizedList(ArrayList<SubtitleFile>())
-        guarded(api.loadLinksTimeoutMs ?: 90_000L) {
-            api.loadLinks(data, false, { s -> subs.add(s) }, { c -> links.add(c) })
+        // A provider asks many servers one after the other / at once and only answers "done" when the slowest one has
+        // finished. The first links are usable long before that, so the call ends as soon as links have arrived and no
+        // new one came for a short moment (longer for the download list, which wants every server), instead of waiting
+        // for the slowest or hanging server.
+        val firstAt = AtomicLong(0L)
+        val lastAt = AtomicLong(0L)
+        val idleMs = if (forDownload) 3_000L else 1_000L
+        val afterFirstMs = if (forDownload) 10_000L else 3_000L
+        val loadError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val job = fetchScope.launch {
+            try {
+                api.loadLinks(data, false, { s -> subs.add(s) }, { c ->
+                    links.add(c)
+                    val now = System.currentTimeMillis()
+                    firstAt.compareAndSet(0L, now)
+                    lastAt.set(now)
+                })
+            } catch (t: CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                loadError.set(t)
+            }
         }
+        try {
+            guarded(api.loadLinksTimeoutMs ?: 90_000L) {
+                while (job.isActive) {
+                    delay(60L)
+                    val first = firstAt.get()
+                    if (first == 0L) continue
+                    val now = System.currentTimeMillis()
+                    if (now - lastAt.get() >= idleMs || now - first >= afterFirstMs) break
+                }
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) {
+                job.cancel()
+                throw t
+            }
+            // the time limit only matters when nothing was found at all
+            if (firstAt.get() == 0L) {
+                job.cancel()
+                throw t
+            }
+        }
+        val failed = loadError.get()
+        val finished = !job.isActive
+        job.cancel()
+        if (failed != null && finished && links.isEmpty()) throw failure(failed)
         val subJson = JSONArray()
         val seenSubs = HashSet<String>()
         synchronized(subs) {
