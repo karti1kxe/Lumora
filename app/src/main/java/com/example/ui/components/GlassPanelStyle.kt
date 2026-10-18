@@ -22,6 +22,8 @@ val LocalPanelTransparency = compositionLocalOf { 85f }
 fun glassPanelColor(isDark: Boolean, glassBlurTransparency: Float): Color {
     val factor = (glassBlurTransparency / 100f).coerceIn(0.10f, 1.0f)
     val alpha = (0.70f + 0.28f * factor).coerceIn(0.70f, 0.98f)
+    // Theme = System and the phone is in light mode: every panel / popup uses the same white as the folder & video cards
+    if (LumoraSurfaceStyle.systemMode && !isDark) return Color.White.copy(alpha = alpha)
     return (if (isDark) Color(0xFF1B2630) else Color(0xFFDAE3E9)).copy(alpha = alpha)
 }
 
@@ -35,4 +37,9 @@ fun PanelScaled(content: @Composable () -> Unit) {
         Density(density = base.density * factor, fontScale = base.fontScale * factor)
     }
     CompositionLocalProvider(LocalDensity provides scaled, content = content)
+}
+
+/** Set by [com.example.ui.theme.VideoPlayerTheme]: true while Settings > Appearance is on "System". */
+object LumoraSurfaceStyle {
+    @Volatile var systemMode: Boolean = false
 }

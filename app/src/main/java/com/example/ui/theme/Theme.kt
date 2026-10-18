@@ -65,6 +65,14 @@ fun VideoPlayerTheme(
 
     val effectiveAmoled = amoledBlackMode && isDark
 
+    // System: cards and panels stay white (system light) / the dark surface (system dark).
+    // Light or Dark chosen by hand: folder / video cards (and every card surface) use the "ice" tone of the Sort & View panel.
+    val systemMode = themeMode == ThemeMode.SYSTEM
+    com.example.ui.components.LumoraSurfaceStyle.systemMode = systemMode
+    if (!systemMode) {
+        LightGlassSurface = Color(0xFFDAE3E9)
+    }
+
     if (effectiveAmoled) {
         DarkBackgroundStart = AmoledBlackBackground
         DarkBackgroundEnd = AmoledBlackBackground
@@ -76,6 +84,8 @@ fun VideoPlayerTheme(
         DarkGlassSurface = appTheme.darkCardColor
         DarkGlassBorder = appTheme.darkBorderColor
     }
+
+    if (!systemMode && !effectiveAmoled) DarkGlassSurface = Color(0xFF22303B)
 
     val colorScheme = if (isDark) {
         if (effectiveAmoled) {
