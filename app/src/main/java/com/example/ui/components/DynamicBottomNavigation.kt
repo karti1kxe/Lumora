@@ -51,6 +51,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.coerceAtLeast
+import androidx.compose.ui.unit.coerceAtMost
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.state.AppLanguage
@@ -250,21 +252,49 @@ fun DynamicBottomNavigation(
                 androidx.compose.foundation.layout.BoxWithConstraints(
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    val tabWidth = maxWidth / activeTabs.size
+                    // The selected tab grows to show its title to the right of the icon; every other tab is just
+                    // a centred icon in an equal slot, so all the icons sit exactly on the centre of their slot.
+                    val tabCount = activeTabs.size
                     val selectedIndex = activeTabs.indexOf(selectedTab).coerceAtLeast(0)
-                    val indicatorWidth = tabWidth * 0.92f
-                    val indicatorX = tabWidth * selectedIndex + (tabWidth - indicatorWidth) / 2f
-                    val animatedIndicatorX by animateDpAsState(
-                        targetValue = indicatorX,
-                        animationSpec = when (tabNavigationStyle) {
-                            TabNavigationStyle.NONE -> tween(0)
-                            TabNavigationStyle.ELASTIC_SLIDE -> tween(320, easing = FastOutSlowInEasing)
-                            TabNavigationStyle.DEPTH_ZOOM -> tween(300, easing = FastOutSlowInEasing)
-                            TabNavigationStyle.FLIP_FADE -> tween(270, easing = FastOutSlowInEasing)
-                            TabNavigationStyle.MINIMAL_FADE, TabNavigationStyle.DEFAULT -> tween(300, easing = FastOutSlowInEasing)
-                        },
-                        label = "liquidIndicatorX"
+                    val equalWidth = maxWidth / tabCount
+                    val selectedWidth = (maxWidth * 0.34f).coerceAtLeast(equalWidth).coerceAtMost(maxWidth - 32.dp * (tabCount - 1))
+                    val otherWidth = if (tabCount > 1) (maxWidth - selectedWidth) / (tabCount - 1) else maxWidth
+                    val navSpec: androidx.compose.animation.core.TweenSpec<androidx.compose.ui.unit.Dp> = when (tabNavigationStyle) {
+                        TabNavigationStyle.NONE -> tween(0)
+                        TabNavigationStyle.ELASTIC_SLIDE -> tween(320, easing = FastOutSlowInEasing)
+                        TabNavigationStyle.DEPTH_ZOOM -> tween(300, easing = FastOutSlowInEasing)
+                        TabNavigationStyle.FLIP_FADE -> tween(270, easing = FastOutSlowInEasing)
+                        TabNavigationStyle.MINIMAL_FADE, TabNavigationStyle.DEFAULT -> tween(300, easing = FastOutSlowInEasing)
+                    }
+                    // Liquid motion: the edge of the highlight that leads the move is pulled quickly, the trailing edge
+                    // follows a moment later, so the highlight stretches and then settles back into its pill shape.
+                    val dirState = remember { intArrayOf(selectedIndex, 1) }
+                    if (dirState[0] != selectedIndex) {
+                        dirState[1] = if (selectedIndex > dirState[0]) 1 else -1
+                        dirState[0] = selectedIndex
+                    }
+                    val movingRight = dirState[1] > 0
+                    val noMotion = tabNavigationStyle == TabNavigationStyle.NONE
+                    val fastSpec: androidx.compose.animation.core.FiniteAnimationSpec<androidx.compose.ui.unit.Dp> =
+                        if (noMotion) androidx.compose.animation.core.snap()
+                        else spring(dampingRatio = 0.78f, stiffness = 520f)
+                    val slowSpec: androidx.compose.animation.core.FiniteAnimationSpec<androidx.compose.ui.unit.Dp> =
+                        if (noMotion) androidx.compose.animation.core.snap()
+                        else spring(dampingRatio = 0.86f, stiffness = 210f)
+                    val targetLeft = otherWidth * selectedIndex
+                    val targetRight = targetLeft + selectedWidth
+                    val indicatorLeft by animateDpAsState(
+                        targetValue = targetLeft,
+                        animationSpec = if (movingRight) slowSpec else fastSpec,
+                        label = "liquidIndicatorLeft"
                     )
+                    val indicatorRight by animateDpAsState(
+                        targetValue = targetRight,
+                        animationSpec = if (movingRight) fastSpec else slowSpec,
+                        label = "liquidIndicatorRight"
+                    )
+                    val animatedIndicatorX = indicatorLeft
+                    val indicatorWidth = (indicatorRight - indicatorLeft).coerceAtLeast(24.dp)
                     val indicatorScale by animateFloatAsState(
                         targetValue = if (tabNavigationStyle == TabNavigationStyle.ELASTIC_SLIDE) 1.025f else 1f,
                         animationSpec = tween(300, easing = FastOutSlowInEasing),
@@ -285,7 +315,7 @@ fun DynamicBottomNavigation(
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        horizontalArrangement = Arrangement.Start,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         activeTabs.forEach { tab ->
@@ -323,9 +353,14 @@ fun DynamicBottomNavigation(
                             label = "tabTranslation"
                         )
 
+                        val slotWidth by animateDpAsState(
+                            targetValue = if (isSelected) selectedWidth else otherWidth,
+                            animationSpec = navSpec,
+                            label = "tabSlotWidth"
+                        )
                         Box(
                             modifier = Modifier
-                                .weight(1f)
+                                .width(slotWidth)
                                 .height(52.dp)
                                 .scale(scale)
                                 .graphicsLayer {
@@ -341,27 +376,28 @@ fun DynamicBottomNavigation(
                             contentAlignment = Alignment.Center
                         ) {
                             // The shared liquid indicator is rendered behind this row.
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center,
-                                modifier = Modifier.padding(horizontal = 4.dp)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
                             ) {
                                 StyledIcon(
                                     drawableRes = if (isSelected) tab.activeIcon else tab.inactiveIcon,
                                     contentDescription = tab.getTitle(lang),
                                     tint = if (isSelected) Color.White else if (isDark) DarkTextSecondary else LightTextSecondary,
-                                    modifier = Modifier.size(if (isSelected) 22.dp else 20.dp)
+                                    modifier = Modifier.size(if (isSelected) 22.dp else 24.dp)
                                 )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = tab.getTitle(lang),
-                                    fontSize = if (isSelected) 11.sp else 10.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (isSelected) Color.White else if (isDark) DarkTextSecondary else LightTextSecondary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    textAlign = TextAlign.Center
-                                )
+                                if (isSelected) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = tab.getTitle(lang),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Clip
+                                    )
+                                }
                             }
                         }
                     }

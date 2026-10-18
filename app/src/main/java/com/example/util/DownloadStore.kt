@@ -7,6 +7,17 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 
+/** An extra audio language or subtitle that is downloaded next to the video and merged into the finished file. */
+data class ExtraTrack(
+    /** "audio" or "sub". */
+    val kind: String,
+    val title: String,
+    val language: String,
+    val url: String,
+    /** True when [url] is an HLS playlist (audio rendition / segmented subtitles), false for a plain file. */
+    val hls: Boolean
+)
+
 enum class DownloadStatus { QUEUED, DOWNLOADING, PAUSED, PROCESSING, COMPLETED, FAILED }
 
 /** One entry of the Download page: a link (yt-dlp) or one video of a torrent. */
@@ -37,7 +48,9 @@ data class DownloadItem(
     /** Cover / thumbnail link of the media (embedded into audio files, shown on the Download page). */
     val thumbnailUrl: String? = null,
     /** HTTP headers sent with the download (media-plugin streams need a Referer / User-Agent). */
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    /** More audio languages / subtitles to merge into the video (media-plugin streams). */
+    val extraTracks: List<ExtraTrack> = emptyList()
 ) {
     val isActive: Boolean
         get() = status == DownloadStatus.QUEUED || status == DownloadStatus.DOWNLOADING || status == DownloadStatus.PROCESSING
@@ -183,7 +196,15 @@ object DownloadStore {
                         val keys = h.keys()
                         while (keys.hasNext()) { val k = keys.next(); m[k] = h.optString(k) }
                         m
-                    } ?: emptyMap()
+                    } ?: emptyMap(),
+                    extraTracks = o.optJSONArray("xt")?.let { xa ->
+                        (0 until xa.length()).mapNotNull { j ->
+                            val x = xa.optJSONObject(j) ?: return@mapNotNull null
+                            val url = x.optString("u")
+                            if (url.isBlank()) return@mapNotNull null
+                            ExtraTrack(x.optString("k"), x.optString("t"), x.optString("l"), url, x.optBoolean("h", false))
+                        }
+                    } ?: emptyList()
                 )
             }
         } catch (_: Throwable) {
@@ -217,6 +238,11 @@ object DownloadStore {
                             val h = JSONObject()
                             for ((k, v) in e.headers) h.put(k, v)
                             put("hd", h)
+                        }
+                        if (e.extraTracks.isNotEmpty()) {
+                            val xa = JSONArray()
+                            for (x in e.extraTracks) xa.put(JSONObject().put("k", x.kind).put("t", x.title).put("l", x.language).put("u", x.url).put("h", x.hls))
+                            put("xt", xa)
                         }
                     }
             )

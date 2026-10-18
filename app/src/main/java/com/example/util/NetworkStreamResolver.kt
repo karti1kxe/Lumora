@@ -172,6 +172,8 @@ object NetworkStreamResolver {
                     if (attempt == 1) wipeYtDlpFiles(context, everything = true)
                     installBundledYtDlpIfNew(context)
                     YoutubeDL.getInstance().init(context)
+                    // ffmpeg (merging several audio languages / subtitles into one file); optional, never blocks yt-dlp
+                    try { FfmpegMuxer.initLibrary(context) } catch (_: Throwable) {}
                     ytdlpReady = true
                     return true
                 } catch (t: Throwable) {
