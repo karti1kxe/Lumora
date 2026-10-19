@@ -79,6 +79,8 @@ object TorrentStreamEngine {
     private const val PREBUFFER_MAX_HEAD_PIECES = 8
     /** A slow swarm must not keep the screen on "Buffering" forever: playback opens the stream anyway after this. */
     private const val PREBUFFER_SOFT_TIMEOUT_MS = 25_000L
+    /** With NO peer connected at all the stream is not opened (it would only hang): the start fails after this. */
+    private const val PREBUFFER_NO_PEER_TIMEOUT_MS = 90_000L
 
     /** Public trackers: used only when the magnet / torrent brings no tracker at all (mpvRx policy), never for private torrents. */
     private val DEFAULT_TRACKERS = listOf(
@@ -528,8 +530,8 @@ object TorrentStreamEngine {
                 } else {
                     startStream(context, hash, index, gen)
                 } ?: return@withLock null
-                prebuffer(a, gen)
-                if (generation.get() != gen) null else a.url
+                val connected = prebuffer(a, gen)
+                if (generation.get() != gen) null else if (!connected) null else a.url
             }
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
@@ -560,11 +562,12 @@ object TorrentStreamEngine {
     }
 
     /** Waits for the head of the played file so mpv can read its header at once; never longer than [PREBUFFER_SOFT_TIMEOUT_MS]. */
-    private suspend fun prebuffer(a: ActiveStream, gen: Long) {
+    /** Returns false when no peer could be found at all (the caller then reports a failed start instead of hanging). */
+    private suspend fun prebuffer(a: ActiveStream, gen: Long): Boolean {
         a.prebufferPct = 0
         val fs = a.info.files()
         val size = fs.fileSize(a.fileIndex)
-        if (size <= 0L) { a.prebufferPct = 100; return }
+        if (size <= 0L) { a.prebufferPct = 100; return true }
         val pieceLen = a.info.pieceLength().toLong()
         val first = (fs.fileOffset(a.fileIndex) / pieceLen).toInt()
         val last = ((fs.fileOffset(a.fileIndex) + size - 1) / pieceLen).toInt().coerceAtMost(a.info.numPieces() - 1)
@@ -574,17 +577,26 @@ object TorrentStreamEngine {
         val started = System.currentTimeMillis()
         while (true) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
-            if (active !== a || !a.handle.isValid || generation.get() != gen) return
+            if (active !== a || !a.handle.isValid || generation.get() != gen) return true
             var have = 0
             try {
                 for (i in 0 until headPieces) if (a.handle.havePiece(first + i)) have++
             } catch (_: Throwable) {
                 a.prebufferPct = 100
-                return
+                return true
             }
-            if (have >= headPieces) { a.prebufferPct = 100; return }
+            if (have >= headPieces) { a.prebufferPct = 100; return true }
             a.prebufferPct = ((have * 100L) / headPieces).toInt().coerceIn(0, 99)
-            if (System.currentTimeMillis() - started > PREBUFFER_SOFT_TIMEOUT_MS) { a.prebufferPct = 100; return }
+            val elapsed = System.currentTimeMillis() - started
+            if (elapsed > PREBUFFER_SOFT_TIMEOUT_MS) {
+                // A slow swarm that HAS peers: open the stream anyway, the rest keeps loading behind the playhead.
+                // A swarm without any peer: keep looking for a while (trackers / DHT need time), then give up cleanly.
+                val peers = try { a.handle.status().numPeers() } catch (_: Throwable) { 1 }
+                if (peers > 0 || have > 0) { a.prebufferPct = 100; return true }
+                if (elapsed > PREBUFFER_NO_PEER_TIMEOUT_MS) { a.prebufferPct = 0; return false }
+                try { a.handle.forceReannounce() } catch (_: Throwable) {}
+                delay(2000)
+            }
             delay(200)
         }
     }
@@ -595,15 +607,11 @@ object TorrentStreamEngine {
         val a = active?.takeIf { it.infoHash == hash && it.fileIndex == index } ?: return 0
         if (a.prebufferPct in 0..99) return a.prebufferPct
         return try {
-            val fs = a.info.files()
-            val size = fs.fileSize(index)
+            val size = a.info.files().fileSize(index)
             if (size <= 0L) return 100
-            val pieceLen = a.info.pieceLength().toLong()
-            val first = (fs.fileOffset(index) / pieceLen).toInt()
-            val last = ((fs.fileOffset(index) + size - 1) / pieceLen).toInt().coerceAtMost(a.info.numPieces() - 1)
-            var have = 0
-            for (p in first..last) if (a.handle.havePiece(p)) have++
-            ((have * 100L) / (last - first + 1)).toInt().coerceIn(0, 100)
+            // ONE status call (only the played file + its subtitles are wanted, so this is the file's progress). The old
+            // loop asked libtorrent about every single piece - hundreds to thousands of blocking calls per refresh.
+            (a.handle.status().progress() * 100f).toInt().coerceIn(0, 100)
         } catch (_: Throwable) { 0 }
     }
 

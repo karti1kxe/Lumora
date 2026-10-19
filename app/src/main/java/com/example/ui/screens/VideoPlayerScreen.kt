@@ -2481,8 +2481,14 @@ fun VideoPlayerScreen(
         val tp = currentVideo?.path
         if (currentIsTorrent && tp != null && (torrentPreparing || isBuffering)) {
             while (true) {
-                torrentPercent = com.example.util.TorrentStreamEngine.fileProgressPercent(tp)
-                torrentStatus = com.example.util.TorrentStreamEngine.statusLine(tp)
+                // libtorrent calls block until its own thread answers: never on the main thread (that froze the player
+                // and the app was closed as "not responding" while a torrent was loading).
+                val (pct, line) = withContext(Dispatchers.IO) {
+                    com.example.util.TorrentStreamEngine.fileProgressPercent(tp) to
+                        com.example.util.TorrentStreamEngine.statusLine(tp)
+                }
+                torrentPercent = pct
+                torrentStatus = line
                 kotlinx.coroutines.delay(400)
             }
         }

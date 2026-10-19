@@ -104,6 +104,12 @@ class VideoPlayerMpvView @JvmOverloads constructor(
         mpv.setOptionString("sub-auto", "all")
         mpv.setOptionString("embeddedfonts", "yes")
 
+        // https streams: libmpv cannot read Android's system CA folder, so every certificate check failed and the
+        // stream stayed on "Buffering" without downloading anything. The phone's own trust store is handed to mpv.
+        try {
+            com.example.util.TlsCaBundle.path(context)?.let { mpv.setOptionString("tls-ca-file", it) }
+        } catch (_: Throwable) {}
+
         // Custom Fonts Directory & Pre-initialized Fallback Fonts (libass font loader)
         val fontsDir = SubtitleFontManager.initializeFontEnvironment(context)
         mpv.setOptionString("sub-fonts-dir", fontsDir.absolutePath)

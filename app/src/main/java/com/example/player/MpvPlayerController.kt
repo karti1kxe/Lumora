@@ -731,7 +731,18 @@ class MpvPlayerController {
                 view.mpv.setPropertyString("demuxer-readahead-secs", "1")
                 view.mpv.setPropertyString("demuxer-max-bytes", "64MiB")
                 view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
-                try { view.mpv.setPropertyString("tls-verify", "yes") } catch (_: Throwable) {}
+                // Certificates are checked against the phone's trust store (cacert.pem, like mpvRx). Without a CA file
+                // "tls-verify=yes" rejects every https server and the link only buffers; if the bundle cannot be built
+                // the check is skipped instead of blocking playback.
+                try {
+                    val ca = com.example.util.TlsCaBundle.path(view.context)
+                    if (ca != null) {
+                        view.mpv.setPropertyString("tls-ca-file", ca)
+                        view.mpv.setPropertyString("tls-verify", "yes")
+                    } else {
+                        view.mpv.setPropertyString("tls-verify", "no")
+                    }
+                } catch (_: Throwable) {}
                 try { view.mpv.setPropertyString("stream-buffer-size", "128KiB") } catch (_: Throwable) {}
                 try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "0") } catch (_: Throwable) {}
                 try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
