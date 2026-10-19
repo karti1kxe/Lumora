@@ -589,23 +589,52 @@ class MpvPlayerController {
         }
         directStreamErrorShown = true
         _isBuffering.value = false
-        _errorMessage.value = if (torrent) {
-            "This torrent video could not be opened. Check your internet connection and that the torrent has seeders."
+        if (torrent) {
+            val diag = try { com.example.util.TorrentStreamEngine.diagnostics() } catch (_: Throwable) { "" }
+            _errorMessage.value = "This torrent video could not be opened by the player." + if (diag.isNotBlank()) " [$diag]" else ""
         } else {
-            "This link could not be played. The site may have blocked the stream, or the link expired. Try again."
+            val base = "This link could not be played. The site may have blocked the stream, or the link expired. Try again."
+            _errorMessage.value = base
+            // what the SERVER says to a plain request from the app: 403 / 410 = refused or expired, 200 / 206 = mpv is the problem
+            val url = retryPath
+            val ua = networkRequestOptions?.userAgent
+            val ref = networkRequestOptions?.referrer
+            if (!url.isNullOrBlank() && url.startsWith("http")) playerScope.launch(Dispatchers.IO) {
+                val probe = try {
+                    val b = okhttp3.Request.Builder().url(url).header("Range", "bytes=0-0")
+                        .header("User-Agent", ua ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    if (!ref.isNullOrBlank()) b.header("Referer", ref)
+                    okhttp3.OkHttpClient.Builder().connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                        .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS).build()
+                        .newCall(b.build()).execute().use { "server answered HTTP ${it.code}" }
+                } catch (t: Throwable) { "app could not reach the server (${t.javaClass.simpleName})" }
+                if (directStreamErrorShown && _errorMessage.value == base) _errorMessage.value = "$base [$probe]"
+            }
         }
     }
 
-    /** Plain mpv network behaviour for the one retry of [updateOpenWatchdog]. */
+    /** Plain mpv network behaviour for the one retry of [updateOpenWatchdog]: every network property back to mpv's defaults. */
     private fun applySafeNetworkFallback(view: VideoPlayerMpvView, torrent: Boolean) {
-        try { view.mpv.setPropertyString("stream-lavf-o", "") } catch (_: Throwable) {}
-        try { view.mpv.setPropertyString("demuxer-lavf-o", "") } catch (_: Throwable) {}
-        try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "0") } catch (_: Throwable) {}
-        try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
-        if (!torrent) {
+        fun set(name: String, value: String) { try { view.mpv.setPropertyString(name, value) } catch (_: Throwable) {} }
+        set("stream-lavf-o", "")
+        set("demuxer-lavf-o", "")
+        set("demuxer-lavf-analyzeduration", "0")
+        set("demuxer-lavf-probesize", "5000000")
+        set("cache", "yes")
+        set("cache-pause", "yes")
+        set("cache-pause-wait", "1")
+        set("cache-secs", "120")
+        set("demuxer-readahead-secs", "20")
+        set("demuxer-max-bytes", "64MiB")
+        set("hls-bitrate", "max")
+        set("referrer", "")
+        set("http-header-fields", "")
+        if (torrent) {
+            set("network-timeout", "900")
+        } else {
             // a certificate / CA-bundle problem looks exactly like "no data": the retry does not verify certificates
-            try { view.mpv.setPropertyString("tls-verify", "no") } catch (_: Throwable) {}
-            try { view.mpv.setPropertyString("network-timeout", "30") } catch (_: Throwable) {}
+            set("tls-verify", "no")
+            set("network-timeout", "30")
         }
     }
 

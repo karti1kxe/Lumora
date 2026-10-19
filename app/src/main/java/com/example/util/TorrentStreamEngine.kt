@@ -173,6 +173,10 @@ object TorrentStreamEngine {
     @Volatile var lastStartError: String? = null
         private set
 
+    /** What the last proxy self-check saw (HTTP code, first bytes of the video, peers): appended to player errors. */
+    @Volatile private var lastDiagnostic: String = ""
+    fun diagnostics(): String = lastDiagnostic
+
     @Volatile private var dataRoot: File? = null
     @Volatile private var dataRootCleaned = false
 
@@ -583,13 +587,49 @@ object TorrentStreamEngine {
                     // the stream that found nobody is removed: it must not keep a dead session entry around
                     stopActiveBlocking()
                     null
-                } else a.url
+                } else {
+                    lastDiagnostic = selfCheck(a)
+                    a.url
+                }
             }
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
         } catch (t: Throwable) {
             Log.e(TAG, "prepareStream failed", t)
             null
+        }
+    }
+
+    /**
+     * Reads the first bytes of the video through the loopback proxy, exactly like mpv will, and compares them with the
+     * container signature. This tells apart "the proxy / file is wrong" from "mpv cannot open it". Never throws.
+     */
+    private fun selfCheck(a: ActiveStream): String {
+        val peers = try { a.handle.status().numPeers() } catch (_: Throwable) { -1 }
+        return try {
+            val fs = a.info.files()
+            val pieceLen = a.info.pieceLength().toLong()
+            val first = (fs.fileOffset(a.fileIndex) / pieceLen).toInt()
+            if (!a.handle.havePiece(first)) return "peers=$peers, head not downloaded yet"
+            val conn = java.net.URL(a.url).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 5000
+            conn.readTimeout = 20000
+            conn.setRequestProperty("Range", "bytes=0-15")
+            val code = conn.responseCode
+            val buf = ByteArray(16)
+            val n = try { conn.inputStream.use { it.read(buf) } } catch (_: Throwable) { -1 }
+            conn.disconnect()
+            val hex = if (n > 0) buf.take(n).joinToString("") { String.format("%02X", it) } else ""
+            val ext = fs.filePath(a.fileIndex).substringAfterLast('.', "").lowercase()
+            val ok = when (ext) {
+                "mkv", "webm" -> hex.startsWith("1A45DFA3")
+                "mp4", "m4v", "mov" -> hex.length >= 16 && hex.substring(8, 16) == "66747970"
+                "avi" -> hex.startsWith("52494646")
+                else -> n > 0
+            }
+            "peers=$peers, proxy HTTP $code, head=$hex" + if (ok) "" else " (UNEXPECTED DATA)"
+        } catch (t: Throwable) {
+            "peers=$peers, proxy check failed: ${t.javaClass.simpleName}"
         }
     }
 

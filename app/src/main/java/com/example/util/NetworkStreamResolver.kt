@@ -73,7 +73,7 @@ object NetworkStreamResolver {
     private const val LAUNCH_UPDATE_MIN_GAP_MS = 60 * 1000L
     private const val LAUNCH_UPDATE_TIMEOUT_SEC = 120L
     // A link must never wait long for a running update; after this the link is resolved with the installed copy.
-    private const val UPDATE_WAIT_SEC = 3L
+    private const val UPDATE_WAIT_SEC = 8L
 
 
     private val cache = ConcurrentHashMap<String, Pair<Long, NetworkStream>>()
@@ -313,12 +313,19 @@ object NetworkStreamResolver {
         if (!ensureYtDlp(app)) return lastError ?: "yt-dlp could not start"
         updateRunLock.lock()
         try {
+            val what = if (channel == NetworkSettings.CHANNEL_NIGHTLY) "Nightly" else "Stable"
+            val direct = githubUpdate(app)
+            if (direct != null) {
+                app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
+                if (direct.updated) cache.clear()
+                return if (direct.updated) "Updated to $what (${direct.version})" else "$what is already up to date (${direct.version})"
+            }
             val status = YoutubeDL.getInstance().updateYoutubeDL(app, channelOf(app))
             app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
             cache.clear()
             val v = try { YoutubeDL.getInstance().version(app) } catch (_: Throwable) { null }
-            val what = if (channel == NetworkSettings.CHANNEL_NIGHTLY) "Nightly" else "Stable"
             return if (status?.toString() == "ALREADY_UP_TO_DATE") "$what is already up to date" + (v?.let { " ($it)" } ?: "")
             else "Updated to $what" + (v?.let { " ($it)" } ?: "")
         } catch (t: Throwable) {
@@ -329,10 +336,79 @@ object NetworkStreamResolver {
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Direct, ATOMIC yt-dlp update from github.com/yt-dlp/yt-dlp (or its nightly builds)
+    // ---------------------------------------------------------------------------------------------
+
+    private val updateHttp by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .build()
+    }
+
+    private fun ytdlpBinary(context: Context): java.io.File? =
+        java.io.File(context.noBackupFilesDir, "$YTDLP_BASE_DIR/yt-dlp/yt-dlp").takeIf { it.isFile && it.length() > 0L }
+
+    /** Version string inside a yt-dlp zipapp (yt_dlp/version.py), null when the file is not a complete yt-dlp. */
+    private fun zipappVersion(file: java.io.File): String? = try {
+        java.util.zip.ZipFile(file).use { zf ->
+            val entry = zf.getEntry("yt_dlp/version.py") ?: return null
+            val text = zf.getInputStream(entry).bufferedReader().readText()
+            Regex("__version__\\s*=\\s*'([^']+)'").find(text)?.groupValues?.get(1)
+        }
+    } catch (_: Throwable) { null }
+
+    /** Result of [githubUpdate]. */
+    private class GithubUpdate(val updated: Boolean, val version: String)
+
+    /**
+     * Downloads the newest yt-dlp release straight from GitHub into a temporary file, checks that it is a complete yt-dlp,
+     * and only then swaps it in with ONE atomic rename. The library's own updater rewrote the live file in place and was
+     * cancelled (interrupted) after a timeout: an update that was cut off could leave a half-written yt-dlp, after which EVERY
+     * link failed to resolve or play. Returns null when this way is not possible (the library updater is used then).
+     */
+    private fun githubUpdate(context: Context): GithubUpdate? {
+        val bin = ytdlpBinary(context) ?: return null
+        val nightly = NetworkSettings.ytDlpChannel(context) == NetworkSettings.CHANNEL_NIGHTLY
+        val url = if (nightly) "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp"
+        else "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+        val tmp = java.io.File(bin.parentFile, "yt-dlp.new")
+        return try {
+            updateHttp.newCall(okhttp3.Request.Builder().url(url).build()).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val body = resp.body ?: return null
+                tmp.outputStream().use { out -> body.byteStream().use { it.copyTo(out) } }
+            }
+            if (tmp.length() < 1_000_000L) return null
+            val newVersion = zipappVersion(tmp) ?: return null
+            val oldVersion = zipappVersion(bin)
+            if (oldVersion != null && oldVersion == newVersion) return GithubUpdate(false, newVersion)
+            java.nio.file.Files.move(
+                tmp.toPath(), bin.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE
+            )
+            GithubUpdate(true, newVersion)
+        } catch (t: Throwable) {
+            Log.w(TAG, "GitHub yt-dlp update failed", t)
+            null
+        } finally {
+            try { if (tmp.exists()) tmp.delete() } catch (_: Throwable) {}
+        }
+    }
+
     private fun runLibraryUpdate(context: Context, timeoutSec: Long): Boolean {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         updateRunLock.lock()
         try {
+            // first choice: atomic update straight from GitHub (never leaves a half-written yt-dlp)
+            val direct = githubUpdate(context)
+            if (direct != null) {
+                prefs.edit().putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
+                if (direct.updated) cache.clear()
+                return true
+            }
             val task = java.util.concurrent.FutureTask<Boolean>(java.util.concurrent.Callable {
                 YoutubeDL.getInstance().updateYoutubeDL(context, channelOf(context))
                 true
