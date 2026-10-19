@@ -529,6 +529,8 @@ fun VideoPlayerScreen(
     val onlinePrefs = remember { context.getSharedPreferences("lumora_online_video", android.content.Context.MODE_PRIVATE) }
     // HTTP headers of a Network-tab link (yt-dlp result); re-applied on every quality switch (setOnlineStream clears them)
     var networkRequestHeaders by remember(currentVideo) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    // true = the video is a Network-tab link (yt-dlp): mpv uses the mpvRx web-link network settings; re-applied on every quality switch
+    var webLinkPlayback by remember(currentVideo) { mutableStateOf(false) }
     // Media-plugin video: the qualities that plugin offers for this movie / episode (player quality menu) + its subtitles
     val pluginSession = remember(currentVideo) {
         currentVideo?.takeIf { it.isDirectStream }?.let { com.example.util.media.PluginPlaybackSessions.get(it.path) }
@@ -591,9 +593,10 @@ fun VideoPlayerScreen(
         }
 
     /** Picks the quality (saved choice or Auto) of an already resolved video and starts it; shared by Online Video and pasted links. */
-    fun beginResolvedPlayback(pb: OnlineVideoPlayback, startMs: Long, headers: Map<String, String>) {
+    fun beginResolvedPlayback(pb: OnlineVideoPlayback, startMs: Long, headers: Map<String, String>, webLink: Boolean = false) {
         onlinePlayback = pb
         networkRequestHeaders = headers
+        webLinkPlayback = webLink
         val savedQuality = onlinePrefs.getString("quality", null)
         val auto = savedQuality == null || savedQuality == OnlineVideoService.AUTO_QUALITY
         val q = (if (auto) OnlineVideoService.pickAutoQuality(context, pb.qualities) else null)
@@ -602,6 +605,7 @@ fun VideoPlayerScreen(
         selectedOnlineQuality = q.label
         val audios = if (q.isVideoOnly) pb.audios.map { OnlineAudioSource(it.url, it.title, it.language) } else emptyList()
         controller.setOnlineStream(true, audios, 0, onlineChaptersOf(pb))
+        if (webLink) controller.setWebLinkStream(true)
         if (headers.isNotEmpty()) controller.setNetworkRequestHeaders(headers)
         controller.loadVideo(q.url, startMs)
         controller.play()
@@ -839,16 +843,17 @@ fun VideoPlayerScreen(
         if (pbWithQualities != null && !stream.isAudio) {
             // Same quality menu (Auto / 1080p / 720p ...) as Online Videos: switching reloads at the same second.
             controller.setOnlineStream(true)
-            beginResolvedPlayback(pbWithQualities, startMs, stream.headers)
+            beginResolvedPlayback(pbWithQualities, startMs, stream.headers, webLink = true)
             return
         }
         val separateAudio = stream.audioUrl
         if (separateAudio != null) {
             controller.setOnlineStream(true, listOf(OnlineAudioSource(separateAudio, "Audio", "")), 0, null)
+            controller.setWebLinkStream(true)
         } else {
             controller.setOnlineStream(true)
             // plain media links and live streams: same handling as imported IPTV channels
-            if (stream.isDirect) controller.setDirectStream(true)
+            if (stream.isDirect) controller.setDirectStream(true) else controller.setWebLinkStream(true)
         }
         controller.setNetworkRequestHeaders(stream.headers)
         controller.loadVideo(stream.videoUrl, startMs)
@@ -1508,23 +1513,25 @@ fun VideoPlayerScreen(
         val thumbFile = com.example.util.TorrentLibrary.thumbnailFile(context, tv.path) ?: return@LaunchedEffect
         if (thumbFile.exists() && thumbFile.length() > 0L) return@LaunchedEffect
         kotlinx.coroutines.delay(4000)
-        val streamUrl = torrentStreamUrl ?: return@LaunchedEffect
-        withContext(kotlinx.coroutines.Dispatchers.IO) {
-            val retriever = android.media.MediaMetadataRetriever()
+        if (torrentStreamUrl == null) return@LaunchedEffect
+        // The picture mpv is showing right now is used as the list thumbnail. A second reader (MediaMetadataRetriever through
+        // the media server) on the torrent proxy used to seek far ahead of the download, fight mpv for the pieces and stall
+        // the stream, so the player is the ONLY reader of the torrent.
+        val frame = kotlinx.coroutines.suspendCancellableCoroutine<android.graphics.Bitmap?> { cont ->
             try {
-                retriever.setDataSource(streamUrl, HashMap<String, String>())
-                // an early point: that part of the file is already downloaded
-                val atMs = (controllerDur / 50L).coerceIn(1000L, 60_000L)
-                val frame = retriever.getFrameAtTime(atMs * 1000L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                if (frame != null) {
-                    val w = 480
-                    val h = (frame.height * (w.toFloat() / frame.width.coerceAtLeast(1))).toInt().coerceAtLeast(1)
-                    val scaled = android.graphics.Bitmap.createScaledBitmap(frame, w, h, true)
-                    thumbFile.outputStream().use { scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }
-                }
+                controller.captureCurrentFrame { bmp -> if (cont.isActive) cont.resume(bmp) {} }
             } catch (_: Throwable) {
-            } finally {
-                try { retriever.release() } catch (_: Throwable) {}
+                if (cont.isActive) cont.resume(null) {}
+            }
+        }
+        if (frame == null || frame.isRecycled || frame.width <= 0) return@LaunchedEffect
+        withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val w = 480
+                val h = (frame.height * (w.toFloat() / frame.width.coerceAtLeast(1))).toInt().coerceAtLeast(1)
+                val scaled = android.graphics.Bitmap.createScaledBitmap(frame, w, h, true)
+                thumbFile.outputStream().use { scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }
+            } catch (_: Throwable) {
             }
         }
     }
@@ -2093,6 +2100,10 @@ fun VideoPlayerScreen(
             coroutineScope.launch {
                 if (firstLoad) kotlinx.coroutines.delay(entryDelayMs)
                 if (lastLoadedVideoKey != key) return@launch
+                if (!targetVideo.isTorrentStream && torrentStreamUrl != null) {
+                    torrentStreamUrl = null
+                    com.example.util.TorrentStreamEngine.stopStream()
+                }
                 if (targetVideo.isDirectStream) {
                     // Imported M3U / IPTV stream: the real stream URL goes straight into the existing mpv player
                     // (with the stream's own User-Agent / headers); no YouTube resolving.
@@ -2458,6 +2469,8 @@ fun VideoPlayerScreen(
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             persistPlaybackPosition()
             controller.release()
+            // the torrent session (peers, sockets, disk writes) must not keep running behind a closed player
+            com.example.util.TorrentStreamEngine.stopStream()
         }
     }
 
@@ -2694,6 +2707,7 @@ fun VideoPlayerScreen(
         selectedOnlineQuality = q.label
         val audios = if (q.isVideoOnly) pb.audios.map { OnlineAudioSource(it.url, it.title, it.language) } else emptyList()
         controller.setOnlineStream(true, audios, audioIdx, onlineChaptersOf(pb))
+        if (webLinkPlayback) controller.setWebLinkStream(true)
         if (networkRequestHeaders.isNotEmpty()) controller.setNetworkRequestHeaders(networkRequestHeaders)
         controller.loadVideo(q.url, pos)
         controller.play()

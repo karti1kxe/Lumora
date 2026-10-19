@@ -457,6 +457,13 @@ class MpvPlayerController {
     @Volatile private var onlineAudioSelectedIndex: Int = 0
     @Volatile private var externalChapters: List<PlayerVideoChapter>? = null
     @Volatile private var streamingProfileApplied: Boolean = false
+    /**
+     * A link pasted in the Network tab (resolved by yt-dlp). It is played with the same mpv network settings as mpvRx's
+     * web links: mpv's own cache, ONE bounded reconnect policy (5xx only, 5 tries, 20 s in total). The old profile
+     * reconnected on every 4xx / 5xx and at EOF without any limit, so a refused or expired stream looped for minutes on
+     * "Buffering" instead of starting or failing.
+     */
+    @Volatile private var webLinkMode: Boolean = false
 
     /** Call BEFORE [loadVideo] for every file. [enabled] = false for local files (clears leftovers of an online video). */
     fun setOnlineStream(
@@ -467,6 +474,7 @@ class MpvPlayerController {
     ) {
         directStreamMode = false
         providerVodMode = false
+        webLinkMode = false
         networkRequestOptions = null
         hlsBitrate = "max"
         onlineStreamMode = enabled
@@ -475,6 +483,11 @@ class MpvPlayerController {
         externalChapters = if (enabled) chapters else null
         _chapters.value = externalChapters ?: emptyList()
         if (enabled) _isBuffering.value = true
+    }
+
+    /** Call right after [setOnlineStream] (true) and BEFORE [loadVideo] for a link of the Network tab (yt-dlp result). */
+    fun setWebLinkStream(enabled: Boolean) {
+        webLinkMode = enabled
     }
 
     /**
@@ -693,6 +706,43 @@ class MpvPlayerController {
                 view.mpv.setPropertyString(
                     "stream-lavf-o",
                     "http_persistent=0,reconnect=1,reconnect_on_network_error=1,reconnect_on_http_error=5xx," +
+                        "reconnect_streamed=1,reconnect_delay_max=5,reconnect_max_retries=5,reconnect_delay_total_max=20"
+                )
+                view.mpv.setPropertyString("scale", "spline36")
+                view.mpv.setPropertyString("dscale", "mitchell")
+                view.mpv.setPropertyString("cscale", "bilinear")
+                view.mpv.setPropertyString("correct-downscaling", "yes")
+                streamingProfileApplied = true
+            } else if (online && webLinkMode && !directStreamMode) {
+                // Network-tab link: mpvRx's network defaults (PlaybackSession.applyStreamingOptionsLocked). mpv's own cache decides
+                // the read-ahead (demuxer-max-bytes caps it), playback starts after 2 s of data, and a dropped / failed read is
+                // retried a BOUNDED number of times, so a bad stream ends in an error instead of endless buffering.
+                view.mpv.setPropertyString(
+                    "user-agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                try { view.mpv.setPropertyString("network-timeout", "30") } catch (_: Throwable) {}
+                view.mpv.setPropertyString("cache", "auto")
+                view.mpv.setPropertyString("cache-pause", "yes")
+                view.mpv.setPropertyString("cache-pause-initial", "no")
+                view.mpv.setPropertyString("cache-pause-wait", "2")
+                // back to mpv's defaults (an earlier profile of this player may have changed them)
+                view.mpv.setPropertyString("cache-secs", "1000000000")
+                view.mpv.setPropertyString("demuxer-readahead-secs", "1")
+                view.mpv.setPropertyString("demuxer-max-bytes", "64MiB")
+                view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
+                try { view.mpv.setPropertyString("tls-verify", "yes") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("stream-buffer-size", "128KiB") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "0") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
+                view.mpv.setPropertyString(
+                    "demuxer-lavf-o",
+                    "http_persistent=0,reconnect=1,reconnect_on_network_error=1,reconnect_streamed=1," +
+                        "reconnect_delay_max=5,reconnect_max_retries=5,reconnect_delay_total_max=20"
+                )
+                view.mpv.setPropertyString(
+                    "stream-lavf-o",
+                    "reconnect=1,reconnect_on_network_error=1,reconnect_on_http_error=5xx," +
                         "reconnect_streamed=1,reconnect_delay_max=5,reconnect_max_retries=5,reconnect_delay_total_max=20"
                 )
                 view.mpv.setPropertyString("scale", "spline36")
@@ -1479,7 +1529,7 @@ class MpvPlayerController {
             bypassProxyOption = if (proxyCandidate != null && streamHost?.let { streamHostUsesProxy[it] } == true) proxyCandidate else null
             applyStreamingProfile(view, onlineStreamMode)
             applyStreamRequestOptions(view, filePath)
-            try { view.mpv.setPropertyString("hls-bitrate", if (directStreamMode) hlsBitrate else "max") } catch (_: Throwable) {}
+            try { view.mpv.setPropertyString("hls-bitrate", if (directStreamMode) hlsBitrate else if (webLinkMode) "no" else "max") } catch (_: Throwable) {}
             if (directStreamMode || lastLoadWasDirect) {
                 // Channel switch: fully close the previous channel FIRST. This (1) drops its last frame so the new
                 // channel starts from a black screen + buffering spinner, and (2) closes its connection before the

@@ -4,9 +4,14 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.libtorrent4j.AnnounceEntry
 import org.libtorrent4j.Priority
@@ -22,6 +27,7 @@ import java.io.File
 import java.io.InputStream
 import java.net.URLEncoder
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 /** Where a torrent comes from. */
 sealed class TorrentSource {
@@ -51,7 +57,11 @@ sealed class TorrentOpenResult {
  *  - only the chosen file is wanted (the others are IGNORE); it is downloaded in order (SEQUENTIAL_DOWNLOAD +
  *    setSequentialRange), the first 16 pieces and the last 8 pieces are TOP priority, with deadlines;
  *  - the file is handed to mpv through [TorrentProxyServer], a loopback HTTP server with byte ranges: a read waits for
- *    the pieces it needs, moves them to the front and schedules the next 16 MiB behind them.
+ *    the pieces it needs, moves them to the front and schedules the next 16 MiB behind them;
+ *  - the life cycle is serialized like mpvRx's lifecycleMutex + generation counter: ONE stream session exists at any time.
+ *    A new tap stops the previous session first (inside the mutex), a request that a newer one overtook gives up at once,
+ *    and the player stops the stream when it closes. Before, quick repeated taps started several libtorrent sessions at
+ *    the same time and lost track of all but the last one (memory / thread / disk pressure until the phone gave up).
  *
  * Whole-file downloads (Download page) run in a separate long-lived session ([dlSession]).
  */
@@ -101,6 +111,12 @@ object TorrentStreamEngine {
         playableMimeTypes[path.substringAfterLast('.', "").lowercase()] ?: "application/octet-stream"
 
     private val lock = Any()
+
+    /** One stream start / stop at a time (mpvRx: lifecycleMutex). */
+    private val streamMutex = Mutex()
+    /** Bumped by every prepare / stop request: an older request that sees a newer number stops working. */
+    private val generation = AtomicLong(0L)
+    private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Priority for the small side files (subtitles) and the Download page. The constant names of libtorrent4j's Priority
@@ -310,14 +326,20 @@ object TorrentStreamEngine {
     // Streaming (one isolated session per played video, like mpvRx)
     // ---------------------------------------------------------------------------------------------
 
-    /** Folder of the streamed data: external app storage when there is any (big movies), else the internal cache. */
+    /**
+     * Folder of the streamed data: the app's INTERNAL cache, exactly like mpvRx. libtorrent 2.x writes the pieces through
+     * memory-mapped files; on the external app folder (a FUSE mount on Android 11+) that makes every written piece go
+     * through the slow FUSE daemon and piles up dirty pages, which freezes - and on some phones reboots - the device.
+     */
     private fun streamRoot(context: Context): File {
         val app = context.applicationContext
-        val root = dataRoot ?: (app.getExternalFilesDir("torrent-data") ?: File(app.cacheDir, "torrent-data")).also { dataRoot = it }
+        val root = dataRoot ?: File(app.cacheDir, "torrent-data").also { dataRoot = it }
         if (!dataRootCleaned) {
             // data of an earlier run is never reused: remove it so it cannot fill the storage
             dataRootCleaned = true
             try { root.deleteRecursively() } catch (_: Throwable) {}
+            // streams of older versions of this app were kept in the external app folder: free that space too
+            try { app.getExternalFilesDir("torrent-data")?.deleteRecursively() } catch (_: Throwable) {}
         }
         root.mkdirs()
         return root
@@ -418,7 +440,8 @@ object TorrentStreamEngine {
         try { handle.resume() } catch (_: Throwable) {}
     }
 
-    private suspend fun startStream(context: Context, infoHash: String, fileIndex: Int): ActiveStream? {
+    /** Called with [streamMutex] held. [gen] is this request's generation: a newer request makes it return null. */
+    private suspend fun startStream(context: Context, infoHash: String, fileIndex: Int, gen: Long): ActiveStream? {
         val app = context.applicationContext
         val bytes = TorrentLibrary.loadBytes(app, infoHash) ?: return null
         val info = try { TorrentInfo(bytes) } catch (_: Throwable) { return null }
@@ -426,8 +449,9 @@ object TorrentStreamEngine {
         val fs = info.files()
         if (fileIndex < 0 || fileIndex >= fs.numFiles()) return null
 
-        // The previous stream (another video) is stopped first: its session, proxy and data go away in the background.
-        synchronized(lock) { active?.let { dropActive(it) } }
+        // The previous stream (another video) is stopped COMPLETELY first (session, proxy, data) - never two sessions at once.
+        stopActiveBlocking()
+        if (generation.get() != gen) return null
 
         val saveDir = File(streamRoot(app), "${UUID.randomUUID()}").apply { mkdirs() }
         var sm: SessionManager? = null
@@ -440,8 +464,8 @@ object TorrentStreamEngine {
             val none = Array(nFiles) { Priority.IGNORE }
             session.download(info, saveDir, null, none, null, TorrentFlags.SEQUENTIAL_DOWNLOAD)
             val handle = waitForHandle(session, info)
-            if (handle == null) {
-                cleanupStream(session, null, null, saveDir)
+            if (handle == null || generation.get() != gen) {
+                cleanupStream(session, handle, null, saveDir)
                 return null
             }
             // public torrents: a few extra public trackers when the torrent brings none of its own
@@ -471,11 +495,17 @@ object TorrentStreamEngine {
             proxy = server
             val a = ActiveStream(infoHash, fileIndex, session, info, handle, server, saveDir, server.serverUrl, side)
             configureStreaming(a)
+            if (generation.get() != gen) {
+                // overtaken while the session was being set up: this one is not wanted any more
+                cleanupStream(session, handle, server, saveDir)
+                return null
+            }
             synchronized(lock) { active = a }
             return a
         } catch (t: Throwable) {
-            Log.e(TAG, "startStream failed", t)
+            if (t !is kotlinx.coroutines.CancellationException) Log.e(TAG, "startStream failed", t)
             cleanupStream(sm, null, proxy, saveDir)
+            if (t is kotlinx.coroutines.CancellationException) throw t
             return null
         }
     }
@@ -487,15 +517,20 @@ object TorrentStreamEngine {
      */
     suspend fun prepareStream(context: Context, torrentPath: String): String? = withContext(Dispatchers.IO) {
         val (hash, index) = TorrentLibrary.parsePath(torrentPath) ?: return@withContext null
+        // This request is the newest one: an older start / prebuffer that is still running sees the new number and stops.
+        val gen = generation.incrementAndGet()
         try {
-            val current = active
-            val a = if (current != null && current.infoHash == hash && current.fileIndex == index && current.handle.isValid) {
-                current
-            } else {
-                startStream(context, hash, index)
-            } ?: return@withContext null
-            prebuffer(a)
-            a.url
+            streamMutex.withLock {
+                if (generation.get() != gen) return@withLock null
+                val current = active
+                val a = if (current != null && current.infoHash == hash && current.fileIndex == index && current.handle.isValid) {
+                    current
+                } else {
+                    startStream(context, hash, index, gen)
+                } ?: return@withLock null
+                prebuffer(a, gen)
+                if (generation.get() != gen) null else a.url
+            }
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
         } catch (t: Throwable) {
@@ -504,8 +539,28 @@ object TorrentStreamEngine {
         }
     }
 
+    /**
+     * Stops the stream that is playing (called when the player closes or another kind of video opens): non-blocking, the
+     * session, proxy and downloaded data go away in the background. A newer prepareStream() that arrives before the
+     * clean-up runs (the same video opened again at once) keeps the stream instead.
+     */
+    fun stopStream() {
+        val stopGen = generation.incrementAndGet()
+        engineScope.launch {
+            streamMutex.withLock {
+                if (generation.get() == stopGen) stopActiveBlocking()
+            }
+        }
+    }
+
+    /** Stops the active stream and waits until its session is gone (runs on a background thread, under [streamMutex]). */
+    private fun stopActiveBlocking() {
+        val a = synchronized(lock) { active?.also { active = null } } ?: return
+        cleanupStream(a.session, a.handle, a.proxy, a.saveDir)
+    }
+
     /** Waits for the head of the played file so mpv can read its header at once; never longer than [PREBUFFER_SOFT_TIMEOUT_MS]. */
-    private suspend fun prebuffer(a: ActiveStream) {
+    private suspend fun prebuffer(a: ActiveStream, gen: Long) {
         a.prebufferPct = 0
         val fs = a.info.files()
         val size = fs.fileSize(a.fileIndex)
@@ -519,7 +574,7 @@ object TorrentStreamEngine {
         val started = System.currentTimeMillis()
         while (true) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
-            if (active !== a || !a.handle.isValid) return
+            if (active !== a || !a.handle.isValid || generation.get() != gen) return
             var have = 0
             try {
                 for (i in 0 until headPieces) if (a.handle.havePiece(first + i)) have++
@@ -583,14 +638,6 @@ object TorrentStreamEngine {
                 File(a.saveDir, fs.filePath(i)).takeIf { it.exists() && it.length() > 0L }
             }
         } catch (_: Throwable) { emptyList() }
-    }
-
-    /** Stops the stream: proxy first (ends every read), then the session with its data - off the caller's thread. */
-    private fun dropActive(a: ActiveStream) {
-        if (active === a) active = null
-        Thread {
-            cleanupStream(a.session, a.handle, a.proxy, a.saveDir)
-        }.apply { isDaemon = true; name = "torrent-stop" }.start()
     }
 
     private fun cleanupStream(session: SessionManager?, handle: TorrentHandle?, proxy: TorrentProxyServer?, dir: File) {
@@ -795,8 +842,14 @@ object TorrentStreamEngine {
 
     /** Stops the streaming session and deletes its data (called when the app closes). Downloads in progress keep running. */
     fun release() {
+        generation.incrementAndGet()
+        val last = synchronized(lock) { active?.also { active = null } }
+        if (last != null) {
+            // the app is closing: the clean-up must not be tied to a coroutine that dies with the process
+            Thread { cleanupStream(last.session, last.handle, last.proxy, last.saveDir) }
+                .apply { isDaemon = true; name = "torrent-stop" }.start()
+        }
         synchronized(lock) {
-            active?.let { dropActive(it) }
             // Videos of the Download page are still downloading: keep their session (the download service keeps the app alive).
             if (dlTorrents.isNotEmpty()) return
             val sm = dlSession

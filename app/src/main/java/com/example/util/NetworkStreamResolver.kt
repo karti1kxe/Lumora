@@ -404,23 +404,32 @@ object NetworkStreamResolver {
         if (!ensureYtDlp(context)) return null
         waitForRunningUpdate()
         val audioOnly = isMusicHost(url)
-        var result = runYtDlp(url, audioOnly)
+        var result = runYtDlp(context, url, audioOnly)
         if (result == null) {
             // One more chance with the newest yt-dlp.
-            if (updateYtDlp(context, force = true)) result = runYtDlp(url, audioOnly)
+            if (updateYtDlp(context, force = true)) result = runYtDlp(context, url, audioOnly)
         }
         return result
     }
 
-    private fun runYtDlp(url: String, audioOnly: Boolean): NetworkStream? {
+    /** QuickJS runtime for yt-dlp's YouTube n / signature challenges (same as mpvRx), when the app ships one next to its native libraries. */
+    private fun quickJsPath(context: Context): String? = try {
+        java.io.File(context.applicationInfo.nativeLibraryDir, "libqjs.so").takeIf { it.isFile }?.absolutePath
+    } catch (_: Throwable) { null }
+
+    private fun runYtDlp(context: Context, url: String, audioOnly: Boolean): NetworkStream? {
         return try {
             val request = YoutubeDLRequest(url)
             request.addOption("--dump-single-json")
             request.addOption("--no-playlist")
             request.addOption("--no-warnings")
-            request.addOption("--socket-timeout", 20)
-            request.addOption("--extractor-retries", 2)
+            // Same network limits as mpvRx's yt-dlp options (retries 3, extractor-retries 3, socket-timeout 15): a slow or
+            // dead host fails fast instead of holding the link for a minute.
+            request.addOption("--retries", 3)
+            request.addOption("--extractor-retries", 3)
+            request.addOption("--socket-timeout", 15)
             request.addOption("--no-check-certificates")
+            quickJsPath(context)?.let { request.addOption("--js-runtimes", "quickjs:$it") }
             // Prefer H.264 up to 1080p (plays on every phone); fall back to anything yt-dlp can offer.
             request.addOption(
                 "-f",
