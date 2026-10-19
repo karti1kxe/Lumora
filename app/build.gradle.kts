@@ -1,6 +1,3 @@
-import java.net.HttpURLConnection
-import java.net.URI
-import java.util.zip.ZipFile
 
 plugins {
   alias(libs.plugins.android.application)
@@ -14,8 +11,15 @@ plugins {
   // were all unused dead weight left over from the AI Studio default template.
 }
 
+// yt-dlp (link play / link download / Settings > Network update). Bundled by default; -PenableYtdlp=false or
+// ENABLE_YTDLP=false builds without it (no native helpers, no python assets).
+val enableYtdlp: Boolean =
+  (providers.gradleProperty("enableYtdlp").orNull ?: System.getenv("ENABLE_YTDLP") ?: "true").toBoolean()
+
 android {
   namespace = "com.example"
+  // needed by the yt-dlp helper executables (libytdl.so / libqjs.so, src/main/cpp)
+  ndkVersion = "27.3.13750724"
   // Use the stable API 36 platform that GitHub runners and AI Studio both provide.
   // Avoid requiring the 36.1 preview/minor platform just to compile the app.
   compileSdk = 36
@@ -31,6 +35,19 @@ android {
     ndk {
       abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
     }
+    buildConfigField("boolean", "ENABLE_YTDLP", enableYtdlp.toString())
+    externalNativeBuild {
+      cmake {
+        arguments += "-DLUMORA_ENABLE_YTDLP=${if (enableYtdlp) "ON" else "OFF"}"
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
   }
 
   splits {
@@ -44,7 +61,9 @@ android {
 
   sourceSets {
     getByName("main") {
-      jniLibs.setSrcDirs(listOf("src/main/jniLibs"))
+      jniLibs.setSrcDirs(listOf("src/main/jniLibs") + if (enableYtdlp) listOf("src/ytdlp/jniLibs") else emptyList())
+      // ytdl/{setup.py,python313.zip,wrapper} + cacert.pem (see .github/workflows/build-apk.yml)
+      if (enableYtdlp) assets.srcDir("src/ytdlp/assets")
     }
   }
 
@@ -103,75 +122,11 @@ android {
     }
     jniLibs {
       pickFirsts += "**/libc++_shared.so"
-      // youtubedl-android runs its bundled python/yt-dlp binaries from the native-lib directory,
-      // so the .so files must be extracted at install time.
+      // native libraries are extracted at install time (kept as it was before yt-dlp was removed)
       useLegacyPackaging = true
     }
   }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Latest official yt-dlp (github.com/yt-dlp/yt-dlp) is downloaded at BUILD time (GitHub Actions),
-// so the ~3 MB binary never has to live in the repository. It is added as the raw resource
-// "ytdlp", which overrides the older copy that youtubedl-android ships, plus a string resource
-// "bundled_ytdlp_version" the app uses to refresh an already-installed older copy.
-// ---------------------------------------------------------------------------------------------
-val ytdlpGenDir = layout.buildDirectory.dir("generated/ytdlp/res")
-val downloadYtDlp by tasks.registering {
-  val outDir = ytdlpGenDir
-  outputs.dir(outDir)
-  // always re-check so every CI build gets the newest release
-  outputs.upToDateWhen { false }
-  doLast {
-    val res = outDir.get().asFile
-    val rawFile = File(res, "raw/ytdlp")
-    val valuesFile = File(res, "values/ytdlp_version.xml")
-    rawFile.parentFile.mkdirs()
-    valuesFile.parentFile.mkdirs()
-    val tmp = File(res, "raw/ytdlp.part")
-    var ok = false
-    var lastError: Throwable? = null
-    for (attempt in 1..4) {
-      if (attempt > 1) Thread.sleep(3000L * attempt)
-      try {
-        val conn = URI("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp").toURL().openConnection() as HttpURLConnection
-        conn.instanceFollowRedirects = true
-        conn.connectTimeout = 30000
-        conn.readTimeout = 60000
-        conn.inputStream.use { input -> tmp.outputStream().use { input.copyTo(it) } }
-        if (tmp.length() > 1_000_000L) { ok = true; break }
-      } catch (t: Throwable) {
-        lastError = t
-      }
-    }
-    if (ok) {
-      tmp.copyTo(rawFile, overwrite = true)
-      tmp.delete()
-    } else if (!rawFile.exists()) {
-      // GitHub was unreachable: build anyway with the yt-dlp that ships inside youtubedl-android; the app updates
-      // itself to the newest yt-dlp on first use (NetworkStreamResolver.updateYtDlp).
-      logger.warn("yt-dlp download failed (${lastError?.message}), using the library's built-in copy")
-    } else {
-      logger.warn("yt-dlp download failed, reusing the previously downloaded copy")
-    }
-    var version = "unknown"
-    try {
-      ZipFile(rawFile).use { zf ->
-        val entry = zf.getEntry("yt_dlp/version.py")
-        if (entry != null) {
-          val text = zf.getInputStream(entry).bufferedReader().readText()
-          Regex("__version__\\s*=\\s*'([^']+)'").find(text)?.let { version = it.groupValues[1] }
-        }
-      }
-    } catch (_: Throwable) {}
-    valuesFile.writeText(
-      "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n    <string name=\"bundled_ytdlp_version\" translatable=\"false\">$version</string>\n</resources>\n"
-    )
-    logger.lifecycle("yt-dlp bundled: $version")
-  }
-}
-android.sourceSets.getByName("main").res.srcDir(ytdlpGenDir.get().asFile)
-tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(downloadYtDlp) }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
 // to match the convention used in Web projects.
@@ -227,19 +182,16 @@ dependencies {
   // implementation(libs.retrofit)
   implementation(libs.androidx.media)
   implementation(libs.mpv.android.lib)
-  // CloudStream extension runtime (.cs3 providers, Network > Media > CloudStream repositories)
-  implementation(project(":cloudstream-lib"))
-  // yt-dlp for Android (Network tab): resolves YouTube and the other sites yt-dlp supports to playable stream URLs.
-  implementation(libs.youtubedl.android.library)
-  // libtorrent4j (github.com/aldenml/libtorrent4j): Torrent / magnet video streaming (util/TorrentStreamEngine.kt).
-  // The Java API plus one native library per ABI (the APK splits above pick the matching one).
+  // Torrent streaming / download (ported from mpvRx): libtorrent4j session + one native lib per ABI, and the
+  // loopback byte-range server that feeds the selected file to mpv.
   implementation(libs.libtorrent4j)
-  implementation(libs.libtorrent4j.android.arm)
   implementation(libs.libtorrent4j.android.arm64)
+  implementation(libs.libtorrent4j.android.arm)
   implementation(libs.libtorrent4j.android.x86)
   implementation(libs.libtorrent4j.android.x8664)
-  // NanoHTTPD: loopback byte-range server that hands the torrent file to mpv (util/TorrentProxyServer.kt, same as mpvRx).
   implementation(libs.nanohttpd)
+  // CloudStream extension runtime (.cs3 providers, Network > Media > CloudStream repositories)
+  implementation(project(":cloudstream-lib"))
   // media3-exoplayer / media3-ui removed: not used anywhere in the code — the app
   // plays everything through mpv-android-lib. Keeping them only added unused APK
   // weight and a second, unused player stack.

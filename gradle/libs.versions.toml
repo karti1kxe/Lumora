@@ -31,6 +31,8 @@ cameraView = "1.5.0"
 cameraCore = "1.5.0"
 loggingInterceptor = "4.10.0"
 okhttp = "4.10.0"
+nanohttpd = "2.3.1"
+libtorrent4j = "2.1.0-39"
 newpipeExtractor = "v0.26.4"
 moshiKotlin = "1.15.2"
 moshiKotlinCodegen = "1.15.2"
@@ -43,9 +45,6 @@ googleServices = "4.5.0"
 credentials = "1.5.0"
 googleid = "1.1.1"
 mpvAndroidLib = "0.1.12"
-youtubedlAndroid = "0.18.1"
-libtorrent4j = "2.1.0-39"
-nanohttpd = "2.3.1"
 media3 = "1.5.1"
 media = "1.7.0"
 
@@ -106,13 +105,12 @@ firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
 androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
-youtubedl-android-library = { group = "io.github.junkfood02.youtubedl-android", name = "library", version.ref = "youtubedlAndroid" }
-libtorrent4j = { group = "org.libtorrent4j", name = "libtorrent4j", version.ref = "libtorrent4j" }
-nanohttpd = { group = "org.nanohttpd", name = "nanohttpd", version.ref = "nanohttpd" }
-libtorrent4j-android-arm = { group = "org.libtorrent4j", name = "libtorrent4j-android-arm", version.ref = "libtorrent4j" }
-libtorrent4j-android-arm64 = { group = "org.libtorrent4j", name = "libtorrent4j-android-arm64", version.ref = "libtorrent4j" }
-libtorrent4j-android-x86 = { group = "org.libtorrent4j", name = "libtorrent4j-android-x86", version.ref = "libtorrent4j" }
-libtorrent4j-android-x8664 = { group = "org.libtorrent4j", name = "libtorrent4j-android-x86_64", version.ref = "libtorrent4j" }
+nanohttpd = { module = "org.nanohttpd:nanohttpd", version.ref = "nanohttpd" }
+libtorrent4j = { module = "org.libtorrent4j:libtorrent4j", version.ref = "libtorrent4j" }
+libtorrent4j-android-arm64 = { module = "org.libtorrent4j:libtorrent4j-android-arm64", version.ref = "libtorrent4j" }
+libtorrent4j-android-arm = { module = "org.libtorrent4j:libtorrent4j-android-arm", version.ref = "libtorrent4j" }
+libtorrent4j-android-x86 = { module = "org.libtorrent4j:libtorrent4j-android-x86", version.ref = "libtorrent4j" }
+libtorrent4j-android-x8664 = { module = "org.libtorrent4j:libtorrent4j-android-x86_64", version.ref = "libtorrent4j" }
 mpv-android-lib = { group = "io.github.abdallahmehiz", name = "mpv-android-lib", version.ref = "mpvAndroidLib" }
 androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }

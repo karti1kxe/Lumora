@@ -31,6 +31,24 @@ jobs:
             "https://github.com/satbyy/go-noto-universal/releases/download/v7.0/GoNotoCurrent-Regular.ttf"
           ls -lh app/src/main/assets/fonts/GoNotoCurrent-Regular.ttf
 
+      # yt-dlp runtime (ported from mpvRx). cacert.pem (CA bundle for yt-dlp's TLS) is fetched here;
+      # libpython.so per ABI is NOT in the repo's sources and must be committed under
+      # app/src/ytdlp/jniLibs/<abi>/libpython.so (arm64-v8a, armeabi-v7a, x86, x86_64).
+      - name: Fetch yt-dlp CA bundle and check libpython
+        run: |
+          set -e
+          mkdir -p app/src/ytdlp/assets
+          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+            -o app/src/ytdlp/assets/cacert.pem "https://curl.se/ca/cacert.pem"
+          ls -lh app/src/ytdlp/assets/cacert.pem
+          for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
+            if [ -f "app/src/ytdlp/jniLibs/$ABI/libpython.so" ]; then
+              echo "libpython.so found for $ABI"
+            else
+              echo "::warning::app/src/ytdlp/jniLibs/$ABI/libpython.so is missing - yt-dlp will not run on $ABI"
+            fi
+          done
+
       # ---------- 2. TOOLCHAIN SETUP ----------
       - name: Set up JDK 17 (Temurin)
         uses: actions/setup-java@v6
@@ -71,7 +89,7 @@ jobs:
             find . -type d \( -iname "*icon-res*" -o -iname "res2" \) -not -path "*/build/*"
             exit 1
           fi
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.3.13750724" "cmake;3.22.1"
 
       - name: Setup Gradle (with caching)
         uses: gradle/actions/setup-gradle@v6

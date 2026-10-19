@@ -34,12 +34,7 @@
 -keep class com.example.player.Track** { *; }
 
 
-# yt-dlp for Android (Network tab)
-# R8 (release build) used to rename / strip parts of the library, so yt-dlp "could not start" with an obfuscated
-# exception name. Everything the library touches (its own packages, the zip / io helpers it uses to unpack Python and
-# yt-dlp, and Jackson for the JSON it parses) is therefore kept completely.
--keep class com.yausername.** { *; }
--dontwarn com.yausername.**
+# commons / Jackson / readable exception names (kept as before)
 -keep class org.apache.commons.** { *; }
 -dontwarn org.apache.commons.**
 -keep class com.fasterxml.jackson.** { *; }
@@ -52,16 +47,6 @@
 -dontwarn org.brotli.dec.**
 -dontwarn java.lang.management.**
 -dontwarn javax.naming.**
-
-# libtorrent4j (Torrent / magnet streaming): the SWIG layer is called from native code, so it must keep its names.
--keep class org.libtorrent4j.swig.libtorrent_jni { *; }
--keep class org.libtorrent4j.** { *; }
--dontwarn org.libtorrent4j.**
-
-# NanoHTTPD: loopback server of util/TorrentProxyServer.kt (torrent file -> mpv).
--keep class fi.iki.elonen.** { *; }
--dontwarn fi.iki.elonen.**
-
 
 # Media plugins (Network > Media): WebView JavaScript bridge methods are called by name from plugin_runtime.js
 -keepattributes JavascriptInterface
@@ -88,3 +73,14 @@
 -dontwarn org.slf4j.**
 -dontwarn javax.**
 -dontwarn java.lang.invoke.**
+
+# Torrent streaming / download (ported from mpvRx): libtorrent4j is a SWIG/JNI binding (native code calls back by
+# name) and NanoHTTPD serves the loopback stream to mpv.
+-keep class org.libtorrent4j.** { *; }
+-dontwarn org.libtorrent4j.**
+-keep class fi.iki.elonen.** { *; }
+-dontwarn fi.iki.elonen.**
+-keep class com.example.torrent.** { *; }
+
+# yt-dlp bridge (ported from mpvRx): driven by name from mpv options / child processes, never reflectively renamed.
+-keep class com.example.ytdlp.** { *; }

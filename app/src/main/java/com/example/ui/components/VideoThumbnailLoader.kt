@@ -584,7 +584,7 @@ fun VideoThumbnailCard(
     LaunchedEffect(cacheKey) {
         if (thumbnailBitmap == null) {
             if (!remoteThumbnailUrl.isNullOrBlank() && remoteThumbnailUrl.startsWith("/")) {
-                // saved frame of a torrent video (local file)
+                // saved frame of a stream (local file)
                 val bmp = withContext(Dispatchers.IO) {
                     try { android.graphics.BitmapFactory.decodeFile(remoteThumbnailUrl) } catch (_: Throwable) { null }
                 }

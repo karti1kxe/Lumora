@@ -109,7 +109,6 @@ object EpisodeFrames {
 
     private suspend fun work(context: Context, plugin: MediaPluginInfo, link: String, type: String, k: String): String? {
         val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, false)
-            .filter { !MediaPlayback.needsTorrentEngine(it) && !it.link.startsWith("torrent://", true) }
             .distinctBy { it.link }
             .take(MAX_SERVERS_TRIED)
         val preferred = preferred(context, plugin, link)

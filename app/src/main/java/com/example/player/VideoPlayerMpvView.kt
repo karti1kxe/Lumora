@@ -37,6 +37,11 @@ class VideoPlayerMpvView @JvmOverloads constructor(
     }
 
     override fun initOptions() {
+        // yt-dlp bridge (ported from mpvRx): ytdl_hook paths must exist before init, but the hook stays OFF until
+        // Lumora routes a link to yt-dlp (so NewPipe / HLS / direct streams are never hijacked by it).
+        val self = java.lang.ref.WeakReference(this)
+        com.example.ytdlp.YtdlpManager.mpvOptionSink = { name, value -> self.get()?.mpv?.setOptionString(name, value) }
+        com.example.ytdlp.YtdlpManager.configureMpvHookBeforeInit(context)
         mpv.setOptionString("profile", "fast")
         // "fast" renders with bilinear scaling, which makes every 720p / 1080p video look soft on a phone screen.
         // Sharper upscaling (and a normal chroma scaler) costs very little and makes the real quality visible.

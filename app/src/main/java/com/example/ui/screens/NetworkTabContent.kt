@@ -73,15 +73,13 @@ import com.example.ui.theme.LightGlassBorder
 import com.example.ui.theme.LightGlassSurface
 import com.example.ui.theme.LightTextPrimary
 import com.example.ui.theme.LightTextSecondary
+import com.example.torrent.TorrentPickerMode
+import com.example.torrent.TorrentPickerState
 import com.example.util.DownloadManager
 import com.example.util.NetworkStreamResolver
 import com.example.util.RecentStreamEntry
 import com.example.util.RecentStreamStore
 import com.example.util.RecentThumbnails
-import com.example.util.TorrentLibrary
-import com.example.util.TorrentOpenResult
-import com.example.util.TorrentSource
-import com.example.util.TorrentStreamEngine
 import com.example.util.media.MediaPluginStore
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -89,7 +87,7 @@ import kotlinx.coroutines.launch
 /**
  * "Network" bottom tab. Sections: Local Network (paste a link and play it), Media (plugin repositories + downloads) and one
  * extra section per downloaded media plugin (category rows with thumbnails).
- * Playback itself is NOT done here: the link is resolved (yt-dlp) and handed to [onPlayVideo], so it opens in the
+ * Playback itself is NOT done here: the link is resolved and handed to [onPlayVideo], so it opens in the
  * app's normal video player with its normal controls.
  */
 @Composable
@@ -145,68 +143,19 @@ fun NetworkTabContent(
 
     val canPlay = url.isNotBlank() && !isResolving
 
-    /** Magnet link or .torrent file: only the torrent info is loaded; a single video plays, several videos become a playlist. */
-    fun openTorrent(source: TorrentSource, recentKey: String?) {
-        focusManager.clearFocus()
-        resolvingLabel = "Fetching torrent info… (can take up to a minute)"
-        isResolving = true
-        scope.launch {
-            val result = try {
-                TorrentStreamEngine.open(context, source)
-            } catch (t: Throwable) {
-                TorrentOpenResult.Failure(t.message ?: "Could not open the torrent")
-            }
-            isResolving = false
-            when (result) {
-                is TorrentOpenResult.Failure ->
-                    Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-                is TorrentOpenResult.Single -> {
-                    val item = TorrentLibrary.videoItem(context, TorrentLibrary.pathFor(result.summary.infoHash, result.file.index))
-                    if (item != null) onPlayVideo(item, listOf(item))
-                }
-                is TorrentOpenResult.Multiple -> {
-                    if (recentKey != null) {
-                        RecentStreamStore.record(context, recentKey, result.summary.name, "Torrent playlist · ${result.videoCount} videos")
-                    }
-                    Toast.makeText(
-                        context,
-                        "Playlist \"${result.playlistName}\" created with ${result.videoCount} videos. Open it from the Playlists tab.",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            }
-        }
-    }
-
     fun playLink(raw: String) {
         if (isResolving) return
-        val trimmed = raw.trim()
-        // one video of an already opened torrent (Recent Streams)
-        if (trimmed.startsWith(TorrentLibrary.PATH_PREFIX)) {
-            val item = TorrentLibrary.videoItem(context, trimmed)
-            if (item == null) {
-                RecentStreamStore.remove(context, trimmed)
-                Toast.makeText(context, "This torrent is no longer saved. Open its magnet / .torrent again.", Toast.LENGTH_LONG).show()
-            } else {
-                onPlayVideo(item, listOf(item))
-            }
-            return
-        }
-        val magnet = Regex("magnet:\\?\\S+", RegexOption.IGNORE_CASE).find(trimmed)?.value
-        if (magnet != null) {
-            openTorrent(TorrentSource.Magnet(magnet), magnet)
-            return
-        }
         val normalized = NetworkStreamResolver.normalizeUrl(raw)
         if (normalized == null) {
             Toast.makeText(context, "Enter a valid link", Toast.LENGTH_SHORT).show()
             return
         }
-        if (normalized.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)) {
-            openTorrent(TorrentSource.RemoteFile(normalized), normalized)
+        focusManager.clearFocus()
+        // magnet / info hash / .torrent link: the torrent file picker (metadata first, then the chosen file plays)
+        if (com.example.torrent.isTorrentSource(normalized)) {
+            TorrentPickerState.open(normalized, TorrentPickerMode.PLAY)
             return
         }
-        focusManager.clearFocus()
         resolvingLabel = "Loading link…"
         isResolving = true
         scope.launch {
@@ -285,22 +234,17 @@ fun NetworkTabContent(
     fun play() = playLink(url)
 
     /**
-     * Download button of a recent link. Torrents start right away; other links open the options sheet first (name,
-     * container, video / audio quality). Either way the Download page is opened so the progress can be followed there.
+     * Download button of a recent link: the options sheet opens first (name, container, video / audio quality).
      */
     fun downloadEntry(entry: RecentStreamEntry) {
-        if (TorrentLibrary.parsePath(entry.url) != null || DownloadManager.isTorrentLink(entry.url)) {
-            val message = try {
-                DownloadManager.enqueueFromRecent(context, entry)
-            } catch (t: Throwable) {
-                "Could not start the download"
-            }
-            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        focusManager.clearFocus()
+        // a torrent has no quality list: the picker chooses the file, which is then downloaded
+        if (com.example.torrent.isTorrentSource(entry.url)) {
+            TorrentPickerState.open(entry.url, TorrentPickerMode.DOWNLOAD)
             onOpenDownloads()
-        } else {
-            focusManager.clearFocus()
-            optionsEntry = entry
+            return
         }
+        optionsEntry = entry
     }
 
     // A media title is open: its detail page replaces the whole Network tab until Back.
@@ -490,7 +434,7 @@ fun NetworkTabContent(
                         )
                     }
 
-                    // ---- Recent Streams: everything played from here (links, torrent videos) so it can be reopened ----
+                    // ---- Recent Streams: everything played from here (links) so it can be reopened ----
                     if (recents.isNotEmpty()) {
                         Row(
                             modifier = Modifier
@@ -584,7 +528,7 @@ private fun RecentStreamRow(
     onRemove: () -> Unit
 ) {
     val subtitle = entry.subtitle
-        ?: if (entry.isTorrent) "Torrent" else entry.url.substringAfter("://").substringBefore('/')
+        ?: entry.url.substringAfter("://").substringBefore('/')
     Row(
         modifier = Modifier
             .fillMaxWidth()

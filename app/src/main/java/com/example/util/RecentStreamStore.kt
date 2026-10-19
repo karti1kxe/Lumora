@@ -8,19 +8,17 @@ import org.json.JSONObject
 
 /** One entry of the Network tab's "Recent Streams" list. */
 data class RecentStreamEntry(
-    /** What gets opened again: the pasted link / magnet, or a "torrent://<hash>/<fileIndex>" path of one torrent video. */
+    /** What gets opened again: the pasted link. */
     val url: String,
     val title: String,
     val subtitle: String?,
     val playedAt: Long,
     /** Thumbnail of the link: an image URL, or the path of a frame saved from the video (no thumbnail attached). */
     val thumbnail: String? = null
-) {
-    val isTorrent: Boolean get() = url.startsWith(TorrentLibrary.PATH_PREFIX) || url.startsWith("magnet:", true)
-}
+)
 
 /**
- * Remembers every network link / torrent video the user played (newest first, max [MAX_ENTRIES]) so a stream that was
+ * Remembers every network link the user played (newest first, max [MAX_ENTRIES]) so a stream that was
  * closed by mistake can be opened again with one tap. Stored as one small JSON string in SharedPreferences.
  */
 object RecentStreamStore {

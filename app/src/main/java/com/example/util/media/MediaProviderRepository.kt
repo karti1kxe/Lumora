@@ -251,26 +251,10 @@ object MediaProviderRepository {
         val out = ArrayList<MediaStream>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            var url = o.optString("link", "").trim()
-            if (url.isEmpty()) {
-                // torrent providers: a "magnet" field, or only the info hash (Stremio style)
-                val magnetField = o.optString("magnet", "").trim()
-                val infoHash = o.optString("infoHash", "").trim()
-                url = when {
-                    magnetField.startsWith("magnet:", ignoreCase = true) -> magnetField
-                    infoHash.length == 40 || infoHash.length == 32 ->
-                        "magnet:?xt=urn:btih:" + infoHash + o.optString("title", "").trim().takeIf { it.isNotEmpty() }
-                            ?.let { "&dn=" + java.net.URLEncoder.encode(it, "UTF-8") }.orEmpty()
-                    else -> ""
-                }
-            }
+            val url = o.optString("link", "").trim()
+            // only http(s) streams are used (magnet / torrent links are not supported any more)
             val isHttp = url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)
-            // Vega-compatible torrent providers may return an app-native torrent path rather than an HTTP URL.
-            // It must be passed to the existing torrent engine, not silently discarded as an unplayable stream.
-            val isTorrentPath = url.startsWith("torrent://", ignoreCase = true)
-            // a magnet link is turned into a playable / downloadable torrent by MediaPlayback
-            val isMagnet = url.startsWith("magnet:", ignoreCase = true)
-            if (!isHttp && !isTorrentPath && !isMagnet) continue
+            if (!isHttp) continue
             val headers = LinkedHashMap<String, String>()
             o.optJSONObject("headers")?.let { h ->
                 val keys = h.keys()

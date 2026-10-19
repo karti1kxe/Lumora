@@ -458,14 +458,7 @@ fun MediaDetailScreen(
     suspend fun beginDownload(v: DetailVideo, suffix: String, opt: MediaPlayback.DownloadOption) {
         val tag = opt.quality?.takeIf { it.isNotBlank() && !suffix.contains(it, ignoreCase = true) }?.let { " [$it]" }.orEmpty()
         val name = playerTitle(v) + suffix + tag
-        val message = if (MediaPlayback.needsTorrentEngine(opt.stream)) {
-            MediaPlayback.startTorrentDownload(
-                context, plugin, name, v.poster, opt.stream,
-                v.title, if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1
-            )
-        } else {
-            MediaPlayback.startDownload(context, plugin, name, v.poster, opt.stream)
-        }
+        val message = MediaPlayback.startDownload(context, plugin, name, v.poster, opt.stream)
         Toast.makeText(context, "$message (see Network › Download)", Toast.LENGTH_SHORT).show()
     }
 

@@ -112,22 +112,17 @@
                 <data android:host="spotify.link" />
             </intent-filter>
 
-            <intent-filter>
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="video/*" />
-                <data android:mimeType="audio/*" />
-            </intent-filter>
-
-            <!-- Torrent: magnet links and .torrent files (open / share from a browser or file manager) -->
+            <!-- Torrents (ported from mpvRx's TorrentSelectionActivity filters): magnet links, .torrent files and links.
+                 They open the torrent file picker in this activity (see TorrentPickerHost). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="magnet" />
+                <data android:scheme="torrent" />
             </intent-filter>
 
-            <intent-filter tools:ignore="AppLinkUrlError">
+            <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
@@ -136,27 +131,33 @@
                 <data android:scheme="http" />
                 <data android:scheme="https" />
                 <data android:mimeType="application/x-bittorrent" />
+                <data android:mimeType="application/x-torrent" />
+                <data android:mimeType="application/torrent" />
             </intent-filter>
 
-            <!-- file managers that open a .torrent with a generic MIME type -->
             <intent-filter tools:ignore="AppLinkUrlError">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="content" />
-                <data android:scheme="file" />
-                <data android:host="*" />
-                <data android:mimeType="*/*" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
                 <data android:pathPattern=".*\\.torrent" />
                 <data android:pathPattern=".*\\..*\\.torrent" />
-                <data android:pathPattern=".*\\..*\\..*\\.torrent" />
             </intent-filter>
 
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/x-bittorrent" />
-                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="application/x-torrent" />
+                <data android:mimeType="application/torrent" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
             </intent-filter>
         </activity>
 

@@ -1453,12 +1453,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var lastPlaylistId: String? = null
 
     fun startPlaying(video: com.example.ui.screens.VideoItem, playlist: List<com.example.ui.screens.VideoItem>) {
-        // Network-tab links and torrent videos go into "Recent Streams", so a stream closed by mistake can be reopened.
-        if (video.isNetworkStream || video.isTorrentStream) {
+        // Network-tab links go into "Recent Streams", so a stream closed by mistake can be reopened.
+        if (video.isNetworkStream) {
             try {
                 com.example.util.RecentStreamStore.record(
                     getApplication<android.app.Application>(), video.path, video.displayName,
-                    if (video.isTorrentStream) "Torrent" else video.channelName,
+                    video.channelName,
                     video.thumbnailUrl
                 )
             } catch (_: Throwable) {}

@@ -146,7 +146,6 @@ object StreamProbe {
 
     private fun check(s: MediaStream, proxy: Proxy?): Boolean {
         val link = s.link
-        if (link.startsWith("torrent://", true) || link.startsWith("magnet:", true)) return true
         val h = s.headers
         return try {
             when {

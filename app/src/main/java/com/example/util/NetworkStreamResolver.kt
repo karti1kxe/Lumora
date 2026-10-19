@@ -2,8 +2,6 @@ package com.example.util
 
 import android.content.Context
 import android.util.Log
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -13,8 +11,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.locks.ReentrantLock
 
 /** A subtitle track that the site offers for a pasted link ([auto] = machine generated, e.g. YouTube speech-to-text). */
 data class NetworkSubtitle(val language: String, val name: String, val url: String, val auto: Boolean)
@@ -44,36 +40,22 @@ data class NetworkStream(
      */
     val playback: OnlineVideoPlayback? = null,
     /** Subtitle tracks the site offers (manual and auto-generated); Settings > Network decides which ones are loaded. */
-    val subtitles: List<NetworkSubtitle> = emptyList()
+    val subtitles: List<NetworkSubtitle> = emptyList(),
+    /** true = [videoUrl] is the web page itself: mpv's ytdl_hook (bundled yt-dlp) resolves and plays it. */
+    val viaYtdlp: Boolean = false
 )
 
 /**
  * Network tab: turns a pasted link into a playable stream.
  *  - plain media links (.mp4 / .mkv / .m3u8 / .mp3 ...) are used directly,
- *  - YouTube / YouTube Music links go to NewPipe first (same engine as the app's Online tabs, no Python needed)
- *    and fall back to yt-dlp,
- *  - everything else (the many other sites yt-dlp supports) is resolved with yt-dlp (youtubedl-android).
- * The bundled yt-dlp is updated first when it is old (sites change constantly, an old yt-dlp simply fails),
- * and a failed attempt triggers one update + retry. The resolved stream is cached for a short time so the
- * player can resolve the same link again instantly.
+ *  - YouTube / YouTube Music links go to NewPipe (same engine as the app's Online tabs),
+ *  - Spotify links are identified and played from YouTube Music.
+ * The resolved stream is cached for a short time so the player can resolve the same link again instantly.
  */
 object NetworkStreamResolver {
     private const val TAG = "NetworkStreamResolver"
     private const val CACHE_TTL_MS = 15 * 60 * 1000L
     private const val PREFS = "lumora_network_tab"
-    private const val KEY_LAST_YTDLP_UPDATE = "last_ytdlp_update"
-    private const val UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000L
-    private const val RETRY_UPDATE_MIN_GAP_MS = 10 * 60 * 1000L
-    private const val KEY_LAST_YTDLP_ATTEMPT = "last_ytdlp_update_attempt"
-    private const val UPDATE_ATTEMPT_GAP_MS = 30 * 60 * 1000L
-    private const val UPDATE_TIMEOUT_SEC = 25L
-    private const val YTDLP_BASE_DIR = "youtubedl-android"
-    private const val KEY_BUNDLED_YTDLP = "bundled_ytdlp_version"
-    // Launch update: checked against the official yt-dlp GitHub releases every time the app is opened.
-    private const val LAUNCH_UPDATE_MIN_GAP_MS = 60 * 1000L
-    private const val LAUNCH_UPDATE_TIMEOUT_SEC = 120L
-    // A link must never wait long for a running update; after this the link is resolved with the installed copy.
-    private const val UPDATE_WAIT_SEC = 8L
 
 
     private val cache = ConcurrentHashMap<String, Pair<Long, NetworkStream>>()
@@ -82,13 +64,6 @@ object NetworkStreamResolver {
         "mp4", "m4v", "mkv", "webm", "mov", "avi", "flv", "wmv", "mpg", "mpeg", "3gp", "ts", "m2ts", "m3u8", "mpd"
     )
 
-    @Volatile private var ytdlpReady = false
-    private val initLock = Any()
-    private val updateLock = Any()
-    /** Held while the yt-dlp files are being replaced, so a link is not resolved with a half-written copy. */
-    private val updateRunLock = ReentrantLock()
-    private val launchUpdateRunning = AtomicBoolean(false)
-    @Volatile private var lastLaunchUpdateAt = 0L
 
     private val resolveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     /** Links that are being resolved right now (shared by the background prefetch and the Play button). */
@@ -100,6 +75,10 @@ object NetworkStreamResolver {
 
     /** Adds https:// when needed and returns null when the text is not a usable web link. */
     fun normalizeUrl(raw: String): String? {
+        // magnet links, info hashes and .torrent links are handled by the torrent engine (picker), not by a web resolver
+        com.example.torrent.normalizeTorrentSource(raw)?.let { return it }
+        // magnet links, info hashes and .torrent links are handled by the torrent engine (picker), not by a web resolver
+        com.example.torrent.normalizeTorrentSource(raw)?.let { return it }
         val t = raw.trim().replace("\\s".toRegex(), "")
         if (t.isEmpty()) return null
         val withScheme = when {
@@ -139,7 +118,7 @@ object NetworkStreamResolver {
         if (!forceRefresh) cached(url)?.let { return it }
         val appCtx = context.applicationContext
         // A link that is already being resolved (background prefetch right after it was pasted) is shared with
-        // the caller instead of running yt-dlp a second time.
+        // the caller instead of resolving it a second time.
         val deferred = inFlight.computeIfAbsent(url) { key ->
             resolveScope.async {
                 try {
@@ -158,8 +137,8 @@ object NetworkStreamResolver {
      */
     fun prefetch(context: Context, url: String) {
         val normalized = normalizeUrl(url) ?: return
+        if (com.example.torrent.isTorrentSource(normalized)) return
         if (isSpotifyUrl(normalized) || isDirectMediaUrl(normalized)) return
-        if (normalized.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)) return
         if (cached(normalized) != null || inFlight.containsKey(normalized)) return
         val appCtx = context.applicationContext
         resolveScope.launch {
@@ -175,11 +154,16 @@ object NetworkStreamResolver {
             } else if (isDirectMediaUrl(url)) {
                 directStream(url)
             } else if (isYoutubeHost(url)) {
-                // YouTube changes its player constantly; the NewPipe path is what Online Music/Video already use,
-                // so it goes first and yt-dlp is the second chance.
-                resolveWithNewPipe(appCtx, url) ?: resolveWithYtDlp(appCtx, url)
+                // the NewPipe path is what Online Music/Video already use
+                resolveWithNewPipe(appCtx, url)
             } else {
-                resolveWithYtDlp(appCtx, url)
+                // other sites: the bundled yt-dlp (through mpv's ytdl_hook) resolves the page when it plays
+                if (com.example.BuildConfig.ENABLE_YTDLP && com.example.ytdlp.YtdlpManager.requiresYtdlp(url)) {
+                    ytdlpStream(url)
+                } else {
+                    lastError = "This link is not supported right now"
+                    null
+                }
             }
         } catch (t: Throwable) {
             Log.w(TAG, "resolve failed for $url", t)
@@ -189,6 +173,25 @@ object NetworkStreamResolver {
         if (result != null) cache[url] = System.currentTimeMillis() to result
         else if (lastError == null) lastError = "No playable stream found"
         return result
+    }
+
+    private fun ytdlpStream(url: String): NetworkStream {
+        val host = hostOf(url).removePrefix("www.")
+        val last = try {
+            java.net.URLDecoder.decode(url.substringBefore('?').substringBefore('#').trimEnd('/').substringAfterLast('/'), "UTF-8")
+        } catch (_: Throwable) { "" }
+        return NetworkStream(
+            pageUrl = url,
+            title = last.takeIf { it.isNotBlank() && it != host }?.let { "$it · $host" } ?: host.ifBlank { url },
+            uploader = host.ifBlank { null },
+            thumbnailUrl = null,
+            durationSec = 0L,
+            videoUrl = url,
+            audioUrl = null,
+            headers = emptyMap(),
+            isDirect = false,
+            viaYtdlp = true
+        )
     }
 
     private fun directStream(url: String): NetworkStream {
@@ -206,509 +209,6 @@ object NetworkStreamResolver {
             headers = emptyMap(),
             isDirect = true,
             isAudio = extensionOf(url) in audioExtensions
-        )
-    }
-
-    // ---------------------------------------------------------------------------------------------
-    // yt-dlp
-    // ---------------------------------------------------------------------------------------------
-
-    private fun ensureYtDlp(context: Context): Boolean {
-        if (ytdlpReady) return true
-        synchronized(initLock) {
-            if (ytdlpReady) return true
-            var failure: Throwable? = null
-            // Attempt 2 starts from a clean slate: a half-extracted Python / yt-dlp folder (killed app, update, full
-            // storage) is the classic reason init keeps failing forever.
-            for (attempt in 0..1) {
-                try {
-                    if (attempt == 1) wipeYtDlpFiles(context, everything = true)
-                    installBundledYtDlpIfNew(context)
-                    YoutubeDL.getInstance().init(context)
-                    ytdlpReady = true
-                    return true
-                } catch (t: Throwable) {
-                    failure = t
-                    Log.w(TAG, "yt-dlp init failed (attempt ${attempt + 1})", t)
-                }
-            }
-            lastError = "yt-dlp could not start (${describeFailure(failure)})"
-            return false
-        }
-    }
-
-    /** Removes the extracted yt-dlp copy (or, with [everything], the whole extracted yt-dlp + Python runtime). */
-    private fun wipeYtDlpFiles(context: Context, everything: Boolean) {
-        try {
-            val base = java.io.File(context.noBackupFilesDir, YTDLP_BASE_DIR)
-            if (everything) {
-                base.deleteRecursively()
-            } else {
-                java.io.File(base, "yt-dlp").deleteRecursively()
-                java.io.File(base, "packages/yt-dlp").deleteRecursively()
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "could not remove old yt-dlp files", t)
-        }
-    }
-
-    /**
-     * The library copies its yt-dlp out of the APK only once, so after an app update the OLD copy would stay in use.
-     * When the yt-dlp bundled with this app build changes, the extracted copy is removed and re-extracted.
-     */
-    private fun installBundledYtDlpIfNew(context: Context) {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        // Version of the official yt-dlp downloaded from GitHub when this APK was built (see app/build.gradle.kts).
-        val bundledVersion = try { context.getString(com.example.R.string.bundled_ytdlp_version) } catch (_: Throwable) { return }
-        if (prefs.getString(KEY_BUNDLED_YTDLP, null) == bundledVersion) return
-        wipeYtDlpFiles(context, everything = false)
-        prefs.edit()
-            .putString(KEY_BUNDLED_YTDLP, bundledVersion)
-            // the freshly extracted copy is already the newest release
-            .putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis())
-            .apply()
-    }
-
-    /**
-     * The yt-dlp that ships inside the app is only as new as the app build, and YouTube & co. break old versions
-     * every few weeks. So it is refreshed before use when older than 12 hours ([force] = right now, after a failure).
-     * The download is capped at [UPDATE_TIMEOUT_SEC] seconds so a slow network can never block playback, and a failed
-     * attempt is not repeated on every tap.
-     */
-    private fun updateYtDlp(context: Context, force: Boolean): Boolean {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        synchronized(updateLock) {
-            val now = System.currentTimeMillis()
-            val age = now - prefs.getLong(KEY_LAST_YTDLP_UPDATE, 0L)
-            val sinceAttempt = now - prefs.getLong(KEY_LAST_YTDLP_ATTEMPT, 0L)
-            if (!force && (age < UPDATE_INTERVAL_MS || sinceAttempt < UPDATE_ATTEMPT_GAP_MS)) return false
-            if (force && (age < RETRY_UPDATE_MIN_GAP_MS || sinceAttempt < RETRY_UPDATE_MIN_GAP_MS)) return false
-            prefs.edit().putLong(KEY_LAST_YTDLP_ATTEMPT, now).apply()
-            return runLibraryUpdate(context, UPDATE_TIMEOUT_SEC)
-        }
-    }
-
-    /**
-     * Downloads the newest official yt-dlp release from github.com/yt-dlp/yt-dlp (youtubedl-android's updater;
-     * it does nothing when the installed copy is already the latest). The yt-dlp files are replaced while
-     * [updateRunLock] is held. The wait is capped at [timeoutSec] seconds.
-     */
-    /** The yt-dlp release channel chosen in Settings > Network (official stable releases or the nightly builds on GitHub). */
-    private fun channelOf(context: Context): YoutubeDL.UpdateChannel =
-        if (NetworkSettings.ytDlpChannel(context) == NetworkSettings.CHANNEL_NIGHTLY) YoutubeDL.UpdateChannel.NIGHTLY
-        else YoutubeDL.UpdateChannel.STABLE
-
-    /** Installed yt-dlp version for the settings page (null while yt-dlp cannot start). */
-    fun ytDlpVersion(context: Context): String? = try {
-        if (ensureYtDlp(context)) YoutubeDL.getInstance().version(context) else null
-    } catch (_: Throwable) { null }
-
-    /**
-     * Settings > Network: installs the newest yt-dlp of [channel] from GitHub right now (no age / gap limits).
-     * Blocking: call from a background thread. Returns a short message for the user.
-     */
-    fun updateYtDlpNow(context: Context, channel: String): String {
-        val app = context.applicationContext
-        NetworkSettings.setYtDlpChannel(app, channel)
-        if (!ensureYtDlp(app)) return lastError ?: "yt-dlp could not start"
-        updateRunLock.lock()
-        try {
-            val what = if (channel == NetworkSettings.CHANNEL_NIGHTLY) "Nightly" else "Stable"
-            val direct = githubUpdate(app)
-            if (direct != null) {
-                app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                    .putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
-                if (direct.updated) cache.clear()
-                return if (direct.updated) "Updated to $what (${direct.version})" else "$what is already up to date (${direct.version})"
-            }
-            val status = YoutubeDL.getInstance().updateYoutubeDL(app, channelOf(app))
-            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
-            cache.clear()
-            val v = try { YoutubeDL.getInstance().version(app) } catch (_: Throwable) { null }
-            return if (status?.toString() == "ALREADY_UP_TO_DATE") "$what is already up to date" + (v?.let { " ($it)" } ?: "")
-            else "Updated to $what" + (v?.let { " ($it)" } ?: "")
-        } catch (t: Throwable) {
-            Log.w(TAG, "manual yt-dlp update failed", t)
-            return "Update failed: " + shortReason(t)
-        } finally {
-            updateRunLock.unlock()
-        }
-    }
-
-    // ---------------------------------------------------------------------------------------------
-    // Direct, ATOMIC yt-dlp update from github.com/yt-dlp/yt-dlp (or its nightly builds)
-    // ---------------------------------------------------------------------------------------------
-
-    private val updateHttp by lazy {
-        okhttp3.OkHttpClient.Builder()
-            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-            .followRedirects(true)
-            .build()
-    }
-
-    private fun ytdlpBinary(context: Context): java.io.File? =
-        java.io.File(context.noBackupFilesDir, "$YTDLP_BASE_DIR/yt-dlp/yt-dlp").takeIf { it.isFile && it.length() > 0L }
-
-    /** Version string inside a yt-dlp zipapp (yt_dlp/version.py), null when the file is not a complete yt-dlp. */
-    private fun zipappVersion(file: java.io.File): String? = try {
-        java.util.zip.ZipFile(file).use { zf ->
-            val entry = zf.getEntry("yt_dlp/version.py") ?: return null
-            val text = zf.getInputStream(entry).bufferedReader().readText()
-            Regex("__version__\\s*=\\s*'([^']+)'").find(text)?.groupValues?.get(1)
-        }
-    } catch (_: Throwable) { null }
-
-    /** Result of [githubUpdate]. */
-    private class GithubUpdate(val updated: Boolean, val version: String)
-
-    /**
-     * Downloads the newest yt-dlp release straight from GitHub into a temporary file, checks that it is a complete yt-dlp,
-     * and only then swaps it in with ONE atomic rename. The library's own updater rewrote the live file in place and was
-     * cancelled (interrupted) after a timeout: an update that was cut off could leave a half-written yt-dlp, after which EVERY
-     * link failed to resolve or play. Returns null when this way is not possible (the library updater is used then).
-     */
-    private fun githubUpdate(context: Context): GithubUpdate? {
-        val bin = ytdlpBinary(context) ?: return null
-        val nightly = NetworkSettings.ytDlpChannel(context) == NetworkSettings.CHANNEL_NIGHTLY
-        val url = if (nightly) "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp"
-        else "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
-        val tmp = java.io.File(bin.parentFile, "yt-dlp.new")
-        return try {
-            updateHttp.newCall(okhttp3.Request.Builder().url(url).build()).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                val body = resp.body ?: return null
-                tmp.outputStream().use { out -> body.byteStream().use { it.copyTo(out) } }
-            }
-            if (tmp.length() < 1_000_000L) return null
-            val newVersion = zipappVersion(tmp) ?: return null
-            val oldVersion = zipappVersion(bin)
-            if (oldVersion != null && oldVersion == newVersion) return GithubUpdate(false, newVersion)
-            java.nio.file.Files.move(
-                tmp.toPath(), bin.toPath(),
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE
-            )
-            GithubUpdate(true, newVersion)
-        } catch (t: Throwable) {
-            Log.w(TAG, "GitHub yt-dlp update failed", t)
-            null
-        } finally {
-            try { if (tmp.exists()) tmp.delete() } catch (_: Throwable) {}
-        }
-    }
-
-    private fun runLibraryUpdate(context: Context, timeoutSec: Long): Boolean {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        updateRunLock.lock()
-        try {
-            // first choice: atomic update straight from GitHub (never leaves a half-written yt-dlp)
-            val direct = githubUpdate(context)
-            if (direct != null) {
-                prefs.edit().putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
-                if (direct.updated) cache.clear()
-                return true
-            }
-            val task = java.util.concurrent.FutureTask<Boolean>(java.util.concurrent.Callable {
-                YoutubeDL.getInstance().updateYoutubeDL(context, channelOf(context))
-                true
-            })
-            Thread(task, "ytdlp-update").apply { isDaemon = true }.start()
-            return try {
-                task.get(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)
-                prefs.edit().putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
-                true
-            } catch (t: Throwable) {
-                Log.w(TAG, "yt-dlp update failed", t)
-                task.cancel(true)
-                false
-            }
-        } finally {
-            updateRunLock.unlock()
-        }
-    }
-
-    /**
-     * Called every time the app is opened: in the background (never blocking the UI or a link) yt-dlp is started
-     * once (so the first link does not pay for Python start-up) and the newest official yt-dlp release is fetched
-     * from GitHub when there is one.
-     */
-    fun startBackgroundUpdate(context: Context) {
-        val app = context.applicationContext
-        val now = System.currentTimeMillis()
-        if (now - lastLaunchUpdateAt < LAUNCH_UPDATE_MIN_GAP_MS) return
-        if (!launchUpdateRunning.compareAndSet(false, true)) return
-        lastLaunchUpdateAt = now
-        Thread({
-            try {
-                if (ensureYtDlp(app)) {
-                    app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                        .edit().putLong(KEY_LAST_YTDLP_ATTEMPT, System.currentTimeMillis()).apply()
-                    runLibraryUpdate(app, LAUNCH_UPDATE_TIMEOUT_SEC)
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "background yt-dlp update failed", t)
-            } finally {
-                launchUpdateRunning.set(false)
-            }
-        }, "ytdlp-launch-update").apply {
-            isDaemon = true
-            priority = Thread.MIN_PRIORITY
-        }.start()
-    }
-
-    /** A link only waits (briefly) when the yt-dlp files are being replaced at this very moment. */
-    private fun waitForRunningUpdate() {
-        if (!updateRunLock.isLocked) return
-        try {
-            if (updateRunLock.tryLock(UPDATE_WAIT_SEC, java.util.concurrent.TimeUnit.SECONDS)) updateRunLock.unlock()
-        } catch (_: InterruptedException) {
-        }
-    }
-
-    /** Download page: starts yt-dlp (and refreshes it when it is old) before a download begins. */
-    internal fun prepareYtDlpForDownload(context: Context): Boolean {
-        if (!ensureYtDlp(context)) return false
-        waitForRunningUpdate()
-        return true
-    }
-
-    /** Download page: one forced yt-dlp update after a failed attempt (sites change, old yt-dlp versions break). */
-    internal fun forceYtDlpUpdate(context: Context): Boolean = updateYtDlp(context, force = true)
-
-    private fun resolveWithYtDlp(context: Context, url: String): NetworkStream? {
-        if (!ensureYtDlp(context)) return null
-        waitForRunningUpdate()
-        val audioOnly = isMusicHost(url)
-        var result = runYtDlp(context, url, audioOnly)
-        if (result == null) {
-            // One more chance with the newest yt-dlp.
-            if (updateYtDlp(context, force = true)) result = runYtDlp(context, url, audioOnly)
-        }
-        return result
-    }
-
-    /** QuickJS runtime for yt-dlp's YouTube n / signature challenges (same as mpvRx), when the app ships one next to its native libraries. */
-    private fun quickJsPath(context: Context): String? = try {
-        java.io.File(context.applicationInfo.nativeLibraryDir, "libqjs.so").takeIf { it.isFile }?.absolutePath
-    } catch (_: Throwable) { null }
-
-    private fun runYtDlp(context: Context, url: String, audioOnly: Boolean): NetworkStream? {
-        return try {
-            val request = YoutubeDLRequest(url)
-            request.addOption("--dump-single-json")
-            request.addOption("--no-playlist")
-            request.addOption("--no-warnings")
-            // Same network limits as mpvRx's yt-dlp options (retries 3, extractor-retries 3, socket-timeout 15): a slow or
-            // dead host fails fast instead of holding the link for a minute.
-            request.addOption("--retries", 3)
-            request.addOption("--extractor-retries", 3)
-            request.addOption("--socket-timeout", 15)
-            request.addOption("--no-check-certificates")
-            quickJsPath(context)?.let { request.addOption("--js-runtimes", "quickjs:$it") }
-            // Prefer H.264 up to 1080p (plays on every phone); fall back to anything yt-dlp can offer.
-            request.addOption(
-                "-f",
-                if (audioOnly) "ba[ext=m4a]/ba/b"
-                else "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
-            )
-            val response = YoutubeDL.getInstance().execute(request, null, null)
-            val parsed = parseYtDlpJson(url, response.out)
-            if (parsed == null) lastError = "yt-dlp returned no stream"
-            if (parsed != null && audioOnly) parsed.copy(isAudio = true) else parsed
-        } catch (t: Throwable) {
-            Log.w(TAG, "yt-dlp could not resolve $url", t)
-            lastError = shortReason(t)
-            null
-        }
-    }
-
-    internal fun parseYtDlpJson(pageUrl: String, out: String): NetworkStream? {
-        val text = out.trim()
-        if (text.isEmpty()) return null
-        // yt-dlp prints one JSON document; take the last JSON line defensively.
-        val jsonText = text.lineSequence().map { it.trim() }.lastOrNull { it.startsWith("{") } ?: return null
-        var root = JSONObject(jsonText)
-        if (root.optString("_type") == "playlist") {
-            root = root.optJSONArray("entries")?.optJSONObject(0) ?: return null
-        }
-        val title = root.optString("title").ifBlank { root.optString("fulltitle") }.ifBlank { pageUrl }
-        val uploader = root.optString("uploader").ifBlank { root.optString("channel") }.ifBlank { null }
-        val thumb = root.optString("thumbnail").ifBlank { null }
-        val duration = root.optDouble("duration", 0.0).let { if (it.isNaN()) 0.0 else it }.toLong()
-        val isLive = root.optBoolean("is_live", false)
-
-        fun headersOf(o: JSONObject?): Map<String, String> {
-            val h = o?.optJSONObject("http_headers") ?: return emptyMap()
-            val map = LinkedHashMap<String, String>()
-            val keys = h.keys()
-            while (keys.hasNext()) {
-                val k = keys.next()
-                val v = h.optString(k)
-                if (v.isNotBlank()) map[k] = v
-            }
-            return map
-        }
-
-        val requested = root.optJSONArray("requested_formats")
-        var videoUrl: String? = null
-        var audioUrl: String? = null
-        var headers: Map<String, String> = headersOf(root)
-        var sawVideo = false
-        if (requested != null && requested.length() > 0) {
-            for (i in 0 until requested.length()) {
-                val f = requested.optJSONObject(i) ?: continue
-                val u = f.optString("url").ifBlank { null } ?: continue
-                val hasVideo = f.optString("vcodec", "none") != "none"
-                val hasAudio = f.optString("acodec", "none") != "none"
-                if (hasVideo && videoUrl == null) {
-                    sawVideo = true
-                    videoUrl = u
-                    headersOf(f).takeIf { it.isNotEmpty() }?.let { headers = it }
-                    // a muxed single format already carries the sound
-                    if (hasAudio) audioUrl = null
-                } else if (hasAudio && !hasVideo && audioUrl == null) {
-                    audioUrl = u
-                    if (videoUrl == null) headersOf(f).takeIf { it.isNotEmpty() }?.let { headers = it }
-                }
-            }
-            if (videoUrl == null) {
-                // audio-only link (music site): the audio stream itself is what gets played
-                videoUrl = audioUrl
-                audioUrl = null
-            }
-        }
-        if (videoUrl == null) {
-            videoUrl = root.optString("url").ifBlank { null }
-            sawVideo = root.optString("vcodec", "none") != "none"
-            if (!sawVideo && root.optString("vcodec").isBlank()) {
-                // some extractors give no codec info: judge by the file extension
-                sawVideo = extensionOf(videoUrl.orEmpty()) !in audioExtensions
-            }
-        }
-        val finalUrl = videoUrl ?: return null
-        val playback = if (sawVideo && !isLive && duration > 0L) {
-            buildYtDlpPlayback(pageUrl, title, uploader.orEmpty(), duration, root)
-        } else null
-        return NetworkStream(
-            pageUrl = pageUrl,
-            title = title,
-            uploader = uploader,
-            thumbnailUrl = thumb,
-            durationSec = duration,
-            videoUrl = finalUrl,
-            audioUrl = audioUrl,
-            headers = headers,
-            // live streams have no duration: let the player handle them like IPTV channels
-            isDirect = isLive || duration <= 0L,
-            isAudio = !sawVideo,
-            playback = playback,
-            subtitles = subtitlesOf(root)
-        )
-    }
-
-    /** Manual subtitles first, then the auto-generated captions; one file (best format for mpv) per language. */
-    private fun subtitlesOf(root: JSONObject): List<NetworkSubtitle> {
-        val out = ArrayList<NetworkSubtitle>()
-        fun collect(key: String, auto: Boolean, limit: Int) {
-            val all = root.optJSONObject(key) ?: return
-            val langs = ArrayList<String>()
-            val it = all.keys()
-            while (it.hasNext()) langs.add(it.next())
-            // auto-caption lists hold ~150 languages: only the usual ones are offered (English / Hindi first)
-            val ordered = if (auto) langs.filter { l -> l == "en" || l == "hi" || l.startsWith("en-") || l.startsWith("hi-") }
-                .sortedBy { if (it.startsWith("hi")) 0 else 1 } else langs
-            var n = 0
-            for (lang in ordered) {
-                if (n >= limit) break
-                if (lang == "live_chat") continue
-                val formats = all.optJSONArray(lang) ?: continue
-                var best: JSONObject? = null
-                var bestRank = Int.MAX_VALUE
-                for (i in 0 until formats.length()) {
-                    val f = formats.optJSONObject(i) ?: continue
-                    val u = f.optString("url").ifBlank { null } ?: continue
-                    val rank = when (f.optString("ext").lowercase()) { "vtt" -> 0; "srt" -> 1; "ass" -> 2; else -> 9 }
-                    if (rank < bestRank && rank < 9) { best = f; bestRank = rank }
-                }
-                val b = best ?: continue
-                val url = b.optString("url").ifBlank { null } ?: continue
-                val label = b.optString("name").ifBlank { lang }
-                out.add(NetworkSubtitle(lang, if (auto) "$label (auto)" else label, url, auto))
-                n++
-            }
-        }
-        collect("subtitles", auto = false, limit = 16)
-        collect("automatic_captions", auto = true, limit = 4)
-        return out
-    }
-
-    /**
-     * Every playable video quality of the yt-dlp result ("formats"), best stream per label, plus the best audio stream
-     * (used with video-only formats) and the chapters. Returns null when fewer than 2 qualities exist (nothing to choose).
-     */
-    private fun buildYtDlpPlayback(pageUrl: String, title: String, uploader: String, durationSec: Long, root: JSONObject): OnlineVideoPlayback? {
-        val formats = root.optJSONArray("formats") ?: return null
-        fun playable(f: JSONObject): Boolean {
-            val u = f.optString("url")
-            if (u.isBlank()) return false
-            val proto = f.optString("protocol")
-            // DASH-fragment lists and image storyboards cannot be opened by a plain URL
-            return proto.isBlank() || proto == "https" || proto == "http" || proto == "m3u8" || proto == "m3u8_native"
-        }
-        var bestAudio: JSONObject? = null
-        val byLabel = LinkedHashMap<String, JSONObject>()
-        val labelMeta = HashMap<String, Triple<Int, Int, Boolean>>() // label -> (height, fps, videoOnly)
-        for (i in 0 until formats.length()) {
-            val f = formats.optJSONObject(i) ?: continue
-            if (!playable(f)) continue
-            val hasVideo = f.optString("vcodec", "none").let { it.isNotBlank() && it != "none" }
-            val hasAudio = f.optString("acodec", "none").let { it.isNotBlank() && it != "none" }
-            if (!hasVideo && hasAudio) {
-                val cur = bestAudio
-                val isM4a = f.optString("ext") == "m4a"
-                val curIsM4a = cur?.optString("ext") == "m4a"
-                if (cur == null || (isM4a && !curIsM4a) || (isM4a == curIsM4a && f.optDouble("abr", 0.0) > cur.optDouble("abr", 0.0))) bestAudio = f
-                continue
-            }
-            if (!hasVideo) continue
-            val h = f.optInt("height", 0)
-            if (h <= 0) continue
-            val fps = f.optDouble("fps", 30.0).let { if (it.isNaN() || it <= 0.0) 30 else it.toInt() }
-            val label = if (fps > 30) "${h}p$fps" else "${h}p"
-            val prev = byLabel[label]
-            val isAvc = f.optString("vcodec").startsWith("avc1") || f.optString("vcodec").startsWith("h264")
-            val prevAvc = prev?.optString("vcodec")?.let { it.startsWith("avc1") || it.startsWith("h264") } ?: false
-            val better = prev == null || (isAvc && !prevAvc) || (isAvc == prevAvc && f.optDouble("tbr", 0.0) > prev.optDouble("tbr", 0.0))
-            if (better) {
-                byLabel[label] = f
-                labelMeta[label] = Triple(h, fps, !hasAudio)
-            }
-        }
-        val audioUrl = bestAudio?.optString("url")?.ifBlank { null }
-        val qualities = byLabel.entries.mapNotNull { (label, f) ->
-            val (h, fps, videoOnly) = labelMeta[label] ?: return@mapNotNull null
-            if (videoOnly && audioUrl == null) return@mapNotNull null // video-only without any audio stream cannot be played
-            OnlineVideoQuality(label = label, height = h, fps = fps, url = f.optString("url"), isVideoOnly = videoOnly)
-        }.sortedWith(compareByDescending<OnlineVideoQuality> { it.height }.thenByDescending { it.fps })
-        if (qualities.size < 2) return null
-
-        val chapters = ArrayList<OnlineChapterInfo>()
-        root.optJSONArray("chapters")?.let { arr ->
-            for (i in 0 until arr.length()) {
-                val c = arr.optJSONObject(i) ?: continue
-                val startMs = (c.optDouble("start_time", 0.0) * 1000.0).toLong()
-                chapters += OnlineChapterInfo(c.optString("title"), startMs)
-            }
-        }
-        return OnlineVideoPlayback(
-            pageUrl = pageUrl,
-            title = title,
-            uploader = uploader,
-            durationSec = durationSec,
-            qualities = qualities,
-            audios = if (audioUrl != null) listOf(OnlineAudioStreamInfo(audioUrl, "Audio", "", 0, true)) else emptyList(),
-            chapters = chapters
         )
     }
 
@@ -805,7 +305,7 @@ object NetworkStreamResolver {
     }
 
     // ---------------------------------------------------------------------------------------------
-    // NewPipe (YouTube only) as a second chance
+    // NewPipe (YouTube only)
     // ---------------------------------------------------------------------------------------------
 
     private suspend fun resolveWithNewPipe(context: Context, url: String): NetworkStream? {
@@ -869,7 +369,7 @@ object NetworkStreamResolver {
         return parts.joinToString(" < ").take(220)
     }
 
-    /** First meaningful line of an error (yt-dlp prints "ERROR: ..."), capped so it fits a toast. */
+    /** First meaningful line of an error, capped so it fits a toast. */
     private fun shortReason(t: Throwable): String {
         val raw = (t.message ?: t.javaClass.simpleName).trim()
         val line = raw.lineSequence().map { it.trim() }.firstOrNull { it.startsWith("ERROR", true) }

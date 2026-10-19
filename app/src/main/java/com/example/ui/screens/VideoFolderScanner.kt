@@ -49,10 +49,10 @@ data class VideoItem(
     val viewCountText: String? = null,
     /** An imported M3U/IPTV stream: [path] is the real stream URL that mpv opens directly (no YouTube resolving). */
     val isDirectStream: Boolean = false,
-    /** A link pasted in the Network tab: [path] is the page/media URL, resolved with yt-dlp right before playback. */
+    /** A link pasted in the Network tab: [path] is the page/media URL, resolved right before playback. */
     val isNetworkStream: Boolean = false,
-    /** One video of a torrent / magnet: [path] is "torrent://<infoHash>/<fileIndex>", streamed through the torrent engine. */
-    val isTorrentStream: Boolean = false
+    /** A torrent file: [path] is the magnet / .torrent source and this is the chosen file of the torrent (-1 = not chosen yet). */
+    val torrentFileIndex: Int = -1
 ) {
     val formattedSize: String
         get() = formatFileSize(sizeBytes)

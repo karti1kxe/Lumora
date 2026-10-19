@@ -423,6 +423,16 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                // Torrent file picker (magnet / .torrent from the Network tab or from another app)
+                com.example.ui.components.TorrentPickerHost(
+                    isDark = uiState.themeMode == ThemeMode.DARK ||
+                        (uiState.themeMode == ThemeMode.SYSTEM && androidx.compose.foundation.isSystemInDarkTheme()),
+                    glassBlurTransparency = uiState.glassBlurTransparency,
+                    onPlay = { video, playlist ->
+                        com.example.util.MediaSeenManager.markSeen(this@MainActivity, video.path, video.id)
+                        viewModel.startPlaying(video, playlist)
+                    }
+                )
             }
         }
     }
@@ -473,12 +483,6 @@ class MainActivity : ComponentActivity() {
             }
             if (!isFinishing) finishAndRemoveTask()
         }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        // Every time the app is opened: pre-start yt-dlp and fetch the newest official release in the background.
-        try { com.example.util.NetworkStreamResolver.startBackgroundUpdate(applicationContext) } catch (_: Throwable) {}
     }
 
     override fun onResume() {
@@ -569,8 +573,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // closing the app ends the torrent session and removes the data it downloaded for streaming
-        if (isFinishing) com.example.util.TorrentStreamEngine.release()
         PipModeState.requestPipUpdate = null
         try {
             unregisterReceiver(pipBroadcastReceiver)
@@ -593,13 +595,12 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // Torrent: a magnet link (VIEW / shared text) or a .torrent file (VIEW / share from a file manager)
-        val torrentSource = detectTorrentSource(intent, action)
-        if (torrentSource != null) {
-            // The same Intent object is handed to a re-created Activity (rotation / theme change): open it only once.
-            if (intent.getBooleanExtra("lumora_share_handled", false)) return
-            intent.putExtra("lumora_share_handled", true)
-            handleTorrentSource(torrentSource)
+        // magnet link / .torrent file or link: the torrent file picker (the same Intent object is handed to a re-created
+        // Activity after rotation, so it is handled only once)
+        com.example.torrent.torrentSourceFromIntent(intent)?.let { torrentSource ->
+            if (intent.getBooleanExtra("lumora_torrent_handled", false)) return
+            intent.putExtra("lumora_torrent_handled", true)
+            com.example.torrent.TorrentPickerState.open(torrentSource, com.example.torrent.TorrentPickerMode.PLAY)
             return
         }
 
@@ -672,72 +673,6 @@ class MainActivity : ComponentActivity() {
                     }
                 } catch (e: Throwable) {
                     android.util.Log.e("MainActivity", "Failed to resolve incoming media URI: $targetUri", e)
-                }
-            }
-        }
-    }
-
-    private fun detectTorrentSource(intent: Intent, action: String): com.example.util.TorrentSource? {
-        val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-            ?: intent.clipData?.getItemAt(0)?.text?.toString()
-            ?: intent.dataString
-        val magnet = text?.let { Regex("magnet:\\?\\S+", RegexOption.IGNORE_CASE).find(it)?.value }
-        if (magnet != null) return com.example.util.TorrentSource.Magnet(magnet)
-
-        val uri: Uri? = when (action) {
-            Intent.ACTION_SEND -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
-                } ?: intent.clipData?.getItemAt(0)?.uri ?: intent.data
-            }
-            Intent.ACTION_SEND_MULTIPLE -> null
-            else -> intent.data ?: intent.clipData?.getItemAt(0)?.uri
-        }
-        if (uri == null) return null
-        val scheme = uri.scheme?.lowercase()
-        if (scheme == "http" || scheme == "https") {
-            val path = uri.encodedPath.orEmpty()
-            return if (path.endsWith(".torrent", ignoreCase = true)) {
-                com.example.util.TorrentSource.RemoteFile(uri.toString())
-            } else null
-        }
-        if (scheme != "content" && scheme != "file") return null
-        return if (com.example.util.TorrentStreamEngine.looksLikeTorrent(this, uri, intent.type)) {
-            try {
-                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (_: Throwable) {}
-            com.example.util.TorrentSource.LocalFile(uri)
-        } else null
-    }
-
-    /** Opens a torrent: a single video plays at once, several videos are turned into a playlist. */
-    private fun handleTorrentSource(source: com.example.util.TorrentSource) {
-        lifecycleScope.launch {
-            android.widget.Toast.makeText(applicationContext, "Loading torrent...", android.widget.Toast.LENGTH_SHORT).show()
-            when (val result = com.example.util.TorrentStreamEngine.open(applicationContext, source)) {
-                is com.example.util.TorrentOpenResult.Failure ->
-                    android.widget.Toast.makeText(applicationContext, result.message, android.widget.Toast.LENGTH_LONG).show()
-                is com.example.util.TorrentOpenResult.Single -> {
-                    val item = com.example.util.TorrentLibrary.videoItem(
-                        applicationContext,
-                        com.example.util.TorrentLibrary.pathFor(result.summary.infoHash, result.file.index)
-                    )
-                    if (item != null) viewModel.startPlaying(item, listOf(item))
-                }
-                is com.example.util.TorrentOpenResult.Multiple -> {
-                    (source as? com.example.util.TorrentSource.Magnet)?.let {
-                        com.example.util.RecentStreamStore.record(
-                            applicationContext, it.uri, result.summary.name, "Torrent playlist · ${result.videoCount} videos"
-                        )
-                    }
-                    android.widget.Toast.makeText(
-                        applicationContext,
-                        "Playlist \"${result.playlistName}\" created with ${result.videoCount} videos. Open it from the Playlists tab.",
-                        android.widget.Toast.LENGTH_LONG
-                    ).show()
                 }
             }
         }

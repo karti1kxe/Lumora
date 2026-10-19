@@ -140,6 +140,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -6178,8 +6179,7 @@ private fun PlayerActionRow(
 }
 
 /**
- * Settings > Network: P2P torrent streaming, HLS stream handling, the yt-dlp manager (Stable / Nightly releases from
- * GitHub + update button) and the subtitle options for pasted links. Built from the same rows as the other tabs.
+ * Settings > Network: HLS stream handling and the subtitle options for pasted links. Built from the same rows as the other tabs.
  */
 @Composable
 private fun NetworkSettingsPanel(
@@ -6193,53 +6193,102 @@ private fun NetworkSettingsPanel(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var p2p by remember { mutableStateOf(com.example.util.NetworkSettings.p2pEnabled(context)) }
     var hls by remember { mutableStateOf(com.example.util.NetworkSettings.hlsHandlingEnabled(context)) }
     var subs by remember { mutableStateOf(com.example.util.NetworkSettings.downloadSubtitles(context)) }
     var autoSubs by remember { mutableStateOf(com.example.util.NetworkSettings.autoSubtitles(context)) }
-    var channel by remember { mutableStateOf(com.example.util.NetworkSettings.ytDlpChannel(context)) }
-    var version by remember { mutableStateOf<String?>(null) }
-    var updating by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf<String?>(null) }
 
+    // yt-dlp (ported from mpvRx YtdlpManagerSections): installation status, release channel, update + live log
+    val ytdlPrefs = remember { com.example.ytdlp.YtdlPreferences.get(context) }
+    val ytdlInfo by com.example.ytdlp.YtdlpManager.installationInfo.collectAsState()
+    var ytdlChannel by remember { mutableStateOf(ytdlPrefs.updateChannel.get()) }
+    var ytdlBusy by remember { mutableStateOf(false) }
+    var ytdlLog by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
-        version = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            com.example.util.NetworkStreamResolver.ytDlpVersion(context)
-        }
-    }
-
-    fun update(target: String) {
-        if (updating) return
-        updating = true
-        status = null
-        scope.launch {
-            val message = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                com.example.util.NetworkStreamResolver.updateYtDlpNow(context, target)
-            }
-            version = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                com.example.util.NetworkStreamResolver.ytDlpVersion(context)
-            }
-            status = message
-            updating = false
-            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-        }
+        if (com.example.BuildConfig.ENABLE_YTDLP) com.example.ytdlp.YtdlpManager.refreshInstallationInfo(context)
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
-        PlayerSettingsCategory("P2P streaming", cardBg, borderColor, secondaryText) {
-            PlayerSwitchRow(
-                title = "Enable P2P torrent streaming",
-                description = "Stream playable media from magnet links and torrent files",
-                checked = p2p,
-                primaryText = primaryText,
-                secondaryText = secondaryText
-            ) {
-                p2p = it
-                com.example.util.NetworkSettings.setP2pEnabled(context, it)
+        if (com.example.BuildConfig.ENABLE_YTDLP) {
+            PlayerSettingsCategory("yt-dlp", cardBg, borderColor, secondaryText) {
+                val info = ytdlInfo
+                val status = when {
+                    info == null -> "Checking…"
+                    !info.isInstalled -> "Not installed"
+                    else -> listOfNotNull(
+                        info.version?.let { "Version $it" },
+                        info.channel.name.lowercase().replaceFirstChar { c -> c.uppercase() },
+                        info.shortCommitHash
+                    ).joinToString(" · ")
+                }
+                PlayerActionRow(
+                    title = "Installation",
+                    subtitle = status,
+                    actionLabel = if (ytdlBusy) "Working…" else if (info?.isInstalled == true) "Update" else "Install",
+                    icon = Icons.Outlined.Refresh,
+                    enabled = !ytdlBusy,
+                    primaryText = primaryText,
+                    secondaryText = secondaryText,
+                    borderColor = borderColor
+                ) {
+                    ytdlBusy = true
+                    ytdlLog = ""
+                    scope.launch {
+                        val onLog: (String) -> Unit = { line ->
+                            ytdlLog = (ytdlLog + line).takeLast(1500)
+                        }
+                        try {
+                            val installed = info?.isInstalled == true
+                            val ok = when {
+                                !installed -> com.example.ytdlp.YtdlpManager.runInstall(context, onLog)
+                                ytdlChannel == "nightly" -> com.example.ytdlp.YtdlpManager.runUpdateToNightly(context, onLog)
+                                else -> com.example.ytdlp.YtdlpManager.runUpdate(context, onLog)
+                            }
+                            if (!ok) onLog("Failed. Check your connection and try again.\n")
+                            com.example.ytdlp.YtdlpManager.refreshInstallationInfo(context)
+                        } finally {
+                            ytdlBusy = false
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = borderColor)
+
+                PlayerChoiceRow(
+                    title = "Release channel",
+                    description = "Stable is the tested release; Nightly gets site fixes first. Applies to the next update.",
+                    value = ytdlChannel,
+                    options = listOf("stable" to "Stable", "nightly" to "Nightly"),
+                    isDark = isDark,
+                    primaryText = primaryText,
+                    secondaryText = secondaryText,
+                    borderColor = borderColor,
+                    alphaFactor = alphaFactor
+                ) {
+                    ytdlChannel = it
+                    ytdlPrefs.updateChannel.set(it)
+                }
+
+                if (ytdlBusy || ytdlLog.isNotBlank()) {
+                    HorizontalDivider(color = borderColor)
+                    if (ytdlBusy) {
+                        androidx.compose.material3.LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = AccentSkyBlue
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    Text(
+                        text = ytdlLog.trim(),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = secondaryText
+                    )
+                }
             }
+        }
 
-            HorizontalDivider(color = borderColor)
-
+        PlayerSettingsCategory("Streaming", cardBg, borderColor, secondaryText) {
             PlayerSwitchRow(
                 title = "Enable HLS streaming proxy",
                 description = "Normalize adaptive HLS manifests and handle split audio/video streams",
@@ -6250,42 +6299,6 @@ private fun NetworkSettingsPanel(
                 hls = it
                 com.example.util.NetworkSettings.setHlsHandlingEnabled(context, it)
             }
-        }
-
-        PlayerSettingsCategory("yt-dlp Manager", cardBg, borderColor, secondaryText) {
-            PlayerChoiceRow(
-                title = "Release channel",
-                description = "Stable = official releases, Nightly = newest builds (both from GitHub)",
-                value = channel,
-                options = listOf(
-                    com.example.util.NetworkSettings.CHANNEL_STABLE to "Stable",
-                    com.example.util.NetworkSettings.CHANNEL_NIGHTLY to "Nightly"
-                ),
-                isDark = isDark,
-                primaryText = primaryText,
-                secondaryText = secondaryText,
-                borderColor = borderColor,
-                alphaFactor = alphaFactor
-            ) { v ->
-                channel = v
-                com.example.util.NetworkSettings.setYtDlpChannel(context, v)
-                // switching the channel installs that channel's build straight away
-                update(v)
-            }
-
-            HorizontalDivider(color = borderColor)
-
-            PlayerActionRow(
-                title = if (channel == com.example.util.NetworkSettings.CHANNEL_NIGHTLY) "Update Nightly" else "Update Stable",
-                subtitle = status
-                    ?: ("Installed: " + (version ?: "checking...") + " - install and update yt-dlp for streaming and downloads"),
-                actionLabel = if (updating) "Updating..." else "Update",
-                icon = R.drawable.lumora_download_minimalistic,
-                enabled = !updating,
-                primaryText = primaryText,
-                secondaryText = secondaryText,
-                borderColor = borderColor
-            ) { update(channel) }
         }
 
         PlayerSettingsCategory("Subtitles & Language", cardBg, borderColor, secondaryText) {

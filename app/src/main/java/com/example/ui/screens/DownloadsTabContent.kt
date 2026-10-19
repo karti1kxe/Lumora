@@ -346,7 +346,7 @@ private fun DownloadCard(
             .border(1.dp, borderColor, shape)
             .then(
                 // an unfinished download can be played too: it plays as far as it has been downloaded
-                if (done || (d.downloadedBytes > 0L && !d.isTorrent)) Modifier.clickable(
+                if (done || d.downloadedBytes > 0L) Modifier.clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                     onClick = onPlay

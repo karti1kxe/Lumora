@@ -8,10 +8,6 @@ import com.example.util.DownloadRequest
 import com.example.util.PlaylistManager
 import com.example.util.StreamEntryMeta
 import com.example.util.StreamEntryStore
-import com.example.util.TorrentFileInfo
-import com.example.util.TorrentLibrary
-import com.example.util.TorrentSource
-import com.example.util.TorrentStreamEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -50,65 +46,6 @@ object MediaPlayback {
         }
     }
 
-    private val MAGNET_RE = Regex("magnet:\\?\\S+", RegexOption.IGNORE_CASE)
-
-    /** A magnet link or a .torrent file link: it has to be opened with the torrent engine first. */
-    fun needsTorrentEngine(s: MediaStream): Boolean {
-        if (s.link.startsWith("torrent://", ignoreCase = true)) return false
-        return s.link.startsWith("magnet:", ignoreCase = true) ||
-            s.link.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)
-    }
-
-    private val EPISODE_RE = Regex("(?i)s0*(\\d{1,2})\\s*[._ -]?e0*(\\d{1,3})")
-    private val EPISODE_ONLY_RE = Regex("(?i)(?:episode|ep|e)\\s*[._ -]?0*(\\d{1,3})(?![0-9])")
-
-    private fun episodeOf(text: String): Pair<Int?, Int>? {
-        EPISODE_RE.find(text)?.let { m ->
-            val e = m.groupValues[2].toIntOrNull() ?: return null
-            return m.groupValues[1].toIntOrNull() to e
-        }
-        EPISODE_ONLY_RE.find(text)?.let { m ->
-            val e = m.groupValues[1].toIntOrNull() ?: return null
-            return null to e
-        }
-        return null
-    }
-
-    /** The video of a torrent to play: the wanted episode of a season pack, else the biggest video (the movie itself). */
-    private fun pickTorrentFile(videos: List<TorrentFileInfo>, episodeTitle: String, episodeIndex: Int): TorrentFileInfo? {
-        if (videos.size <= 1) return videos.firstOrNull()
-        if (episodeIndex >= 0) {
-            val want = episodeOf(episodeTitle)
-            if (want != null) {
-                val match = videos.firstOrNull { f ->
-                    val got = episodeOf(f.displayName)
-                    got != null && got.second == want.second && (want.first == null || got.first == null || got.first == want.first)
-                }
-                if (match != null) return match
-            }
-            videos.getOrNull(episodeIndex)?.let { return it }
-        }
-        return videos.maxByOrNull { it.size }
-    }
-
-    /** Opens the torrent behind a magnet / .torrent link and returns the stream of its video as a "torrent://" path. */
-    private suspend fun resolveTorrentStream(context: Context, s: MediaStream, episodeTitle: String, episodeIndex: Int): Result<MediaStream> {
-        val magnet = MAGNET_RE.find(s.link)?.value
-        val source = if (magnet != null) TorrentSource.Magnet(magnet) else TorrentSource.RemoteFile(s.link)
-        val (summary, error) = TorrentStreamEngine.fetchSummary(context, source)
-        if (summary == null) return Result.failure(PluginException(error ?: "could not open the torrent"))
-        val file = pickTorrentFile(summary.videoFiles, episodeTitle, episodeIndex)
-            ?: return Result.failure(PluginException("no video file was found in this torrent"))
-        return Result.success(
-            s.copy(
-                link = TorrentLibrary.pathFor(summary.infoHash, file.index),
-                type = "torrent",
-                headers = emptyMap(),
-                alternatives = emptyList()
-            )
-        )
-    }
-
     /** Prefer adaptive streaming when a provider offers it; fall back to direct media files. */
     fun pickBest(streams: List<MediaStream>): MediaStream? = streams.minByOrNull { rank(it) }
 
@@ -135,40 +72,29 @@ object MediaPlayback {
             // checked like every other one: a frame proves the website's file opens, not that the player can stream it
             val proven = if (!forDownload) EpisodeFrames.preferred(context, plugin, link) else null
             if (proven != null) {
-                val i = ranked.indexOfFirst { it.server == proven.server && it.quality == proven.quality && !needsTorrentEngine(it) }
-                    .takeIf { it >= 0 } ?: ranked.indexOfFirst { it.server == proven.server && !needsTorrentEngine(it) }
+                val i = ranked.indexOfFirst { it.server == proven.server && it.quality == proven.quality }
+                    .takeIf { it >= 0 } ?: ranked.indexOfFirst { it.server == proven.server }
                 if (i > 0) ranked = listOf(ranked[i]) + ranked.filterIndexed { idx, _ -> idx != i }
             }
             if (verify) {
-                val direct = ranked.filter { !needsTorrentEngine(it) && !it.link.startsWith("torrent://", true) }
+                val direct = ranked
                 if (direct.isNotEmpty()) {
                     val outcome = StreamProbe.verify(context, direct)
-                    val hasTorrent = ranked.size > direct.size
                     if (!outcome.anyWorks) MediaProviderRepository.forgetStreams(plugin.value, link)
-                    if (requireWorking && !outcome.anyWorks && !hasTorrent) {
+                    if (requireWorking && !outcome.anyWorks) {
                         return Result.failure(PluginException("This video does not play on any server right now. Try again in a moment."))
                     }
                     ranked = outcome.ordered + ranked.filter { it !in direct }
                 }
             }
-            // direct links first; magnet / .torrent links (torrent providers) are opened with the torrent engine
-            var best: MediaStream? = null
-            var torrentError: Throwable? = null
-            for (candidate in ranked) {
-                if (!needsTorrentEngine(candidate)) { best = candidate; break }
-                val converted = resolveTorrentStream(context, candidate, episodeTitle, episodeIndex)
-                val ok = converted.getOrNull()
-                if (ok != null) { best = ok; break }
-                torrentError = converted.exceptionOrNull()
-            }
-            val chosen = best
+            val chosen = ranked.firstOrNull()
             if (chosen == null) {
-                Result.failure(torrentError ?: PluginException("no playable link was found"))
+                Result.failure(PluginException("no playable link was found"))
             } else {
                 // every subtitle the plugin listed (on any server) is offered in the player, without duplicates
                 val allSubs = streams.flatMap { it.subtitles }.distinctBy { it.uri }
                 // the other servers stay available: the player's Server list, and the fallback when this one cannot be played
-                val others = ranked.filter { it !== chosen && it.link != chosen.link && !needsTorrentEngine(it) }.distinctBy { it.link }
+                val others = ranked.filter { it !== chosen && it.link != chosen.link }.distinctBy { it.link }
                     .map { it.copy(sourceLink = link, sourceType = type) }
                 Result.success(
                     chosen.copy(
@@ -215,7 +141,6 @@ object MediaPlayback {
             }
             PluginPlaybackSessions.put(stream.link, session)
         }
-        val isTorrent = stream.link.startsWith("torrent://", ignoreCase = true)
         val ua = stream.headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value?.takeIf { it.isNotBlank() } ?: STREAM_UA
         val ref = stream.headers.entries.firstOrNull { it.key.equals("Referer", true) || it.key.equals("Referrer", true) }?.value
         val extra = LinkedHashMap<String, String>()
@@ -227,11 +152,10 @@ object MediaPlayback {
             if (k.lowercase() in PLAYER_OWN_HEADERS) continue
             extra[k] = v
         }
-        if (!isTorrent) {
-            StreamEntryStore.attach(context)
-            StreamEntryStore.putAll(
-                listOf(
-                    StreamEntryMeta(
+        StreamEntryStore.attach(context)
+        StreamEntryStore.putAll(
+            listOf(
+                StreamEntryMeta(
                     url = stream.link,
                     name = title,
                     logo = poster.ifBlank { null },
@@ -240,9 +164,8 @@ object MediaPlayback {
                     referrer = ref,
                     extraHeaders = extra
                 )
-                )
             )
-        }
+        )
         return VideoItem(
             id = -(kotlin.math.abs(("mediaplugin:" + stream.link).hashCode().toLong())) - 1L,
             uri = Uri.parse(stream.link),
@@ -254,8 +177,7 @@ object MediaPlayback {
             isOnline = true,
             thumbnailUrl = poster.ifBlank { null },
             channelName = plugin.name,
-            isDirectStream = !isTorrent,
-            isTorrentStream = isTorrent
+            isDirectStream = true
         )
     }
 
@@ -342,7 +264,6 @@ object MediaPlayback {
         val path = s.link.substringBefore('?').substringBefore('#').lowercase()
         val type = s.type.lowercase()
         return when {
-            s.link.startsWith("torrent://", ignoreCase = true) || needsTorrentEngine(s) -> "Torrent"
             HlsVariants.looksLikeHls(s.link, s.type) -> "HLS"
             type == "mpd" || type == "dash" || path.endsWith(".mpd") -> "DASH"
             type == "mp4" || path.endsWith(".mp4") -> "MP4"
@@ -474,7 +395,7 @@ object MediaPlayback {
         val estimated: Boolean
         when (format) {
             "HLS" -> { size = estimateHlsSize(context, s.link, headers, 0L); estimated = true }
-            "Torrent", "DASH" -> { size = -1L; estimated = false }
+            "DASH" -> { size = -1L; estimated = false }
             else -> { size = probeSizeAnyRoute(context, s.link, headers); estimated = false }
         }
         val detail = listOf(quality, format, sizeText(size, estimated) ?: "size unavailable")
@@ -553,8 +474,7 @@ object MediaPlayback {
         return try {
             val all = MediaProviderRepository.loadStreams(context, plugin.value, sourceLink, sourceType, true)
             val files = all.distinctBy { it.link }.filter { s ->
-                !needsTorrentEngine(s) && !s.link.startsWith("torrent://", ignoreCase = true) &&
-                    !HlsVariants.looksLikeHls(s.link, s.type) && rank(s) in 1..3
+                !HlsVariants.looksLikeHls(s.link, s.type) && rank(s) in 1..3
             }
             if (files.isEmpty()) return null
             val clean = preferServer?.removePrefix(DIRECT_PREFIX)
@@ -590,37 +510,6 @@ object MediaPlayback {
         val playlist = existing ?: PlaylistManager.createPlaylist(context, plugin.name, "VIDEO", true)
         PlaylistManager.updatePlaylistVideosOrder(context, playlist.id, listOf(item.path) + playlist.videoPaths.filter { it != item.path })
         return existing == null
-    }
-
-    /**
-     * Torrent download (magnet / .torrent link of a torrent provider): the torrent's file list is read, the wanted video
-     * (the episode of a season pack, else the movie) is picked and downloaded with the app's torrent downloader.
-     */
-    suspend fun startTorrentDownload(
-        context: Context,
-        plugin: MediaPluginInfo,
-        title: String,
-        poster: String,
-        stream: MediaStream,
-        episodeTitle: String,
-        episodeIndex: Int
-    ): String {
-        val result = resolveTorrentStream(context, stream, episodeTitle, episodeIndex)
-        val resolved = result.getOrNull() ?: return "Could not start the torrent: " + (result.exceptionOrNull()?.message ?: "unknown error")
-        return try {
-            com.example.util.DownloadManager.enqueueFromRecent(
-                context,
-                com.example.util.RecentStreamEntry(
-                    url = resolved.link,
-                    title = title,
-                    subtitle = plugin.name,
-                    playedAt = System.currentTimeMillis(),
-                    thumbnail = poster.ifBlank { null }
-                )
-            )
-        } catch (_: Throwable) {
-            "Could not start the download"
-        }
     }
 
     /** Starts the download right away (no sheet); the plugin's headers are sent with it. Returns the status message. */
@@ -727,8 +616,7 @@ object PluginQueuedEpisodes {
             isOnline = true,
             thumbnailUrl = ep.poster.ifBlank { null },
             channelName = ep.plugin.name,
-            isDirectStream = true,
-            isTorrentStream = false
+            isDirectStream = true
         )
     }
 

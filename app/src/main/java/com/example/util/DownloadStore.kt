@@ -9,12 +9,14 @@ import java.util.Locale
 
 enum class DownloadStatus { QUEUED, DOWNLOADING, PAUSED, PROCESSING, COMPLETED, FAILED }
 
-/** One entry of the Download page: a link (yt-dlp) or one video of a torrent. */
+/** Which engine downloads an item: a normal link (ParallelDownloader / yt-dlp) or one file of a torrent (libtorrent4j). */
+enum class DownloadSourceType { LINK, TORRENT }
+
+/** One entry of the Download page: a link. */
 data class DownloadItem(
     val id: String,
-    /** The pasted link / magnet / .torrent URL, or "torrent://<hash>/<fileIndex>" once a torrent file is chosen. */
+    /** The pasted / provider link. */
     val source: String,
-    val isTorrent: Boolean,
     val title: String,
     val subtitle: String? = null,
     val isAudio: Boolean = false,
@@ -30,14 +32,17 @@ data class DownloadItem(
     val filePath: String? = null,
     val fileUri: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-    /** yt-dlp "-f" expression chosen in the options sheet (null = default quality). */
+    /** Format id chosen in the options sheet (null = default quality). */
     val formatSpec: String? = null,
     /** Chosen output container (mp4 / mkv / webm / mp3 / m4a / opus / wav), null = default. */
     val container: String? = null,
     /** Cover / thumbnail link of the media (embedded into audio files, shown on the Download page). */
     val thumbnailUrl: String? = null,
     /** HTTP headers sent with the download (media-plugin streams need a Referer / User-Agent). */
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    /** [DownloadSourceType.TORRENT]: [source] is the magnet / .torrent source and only file [torrentFileIndex] is downloaded. */
+    val sourceType: DownloadSourceType = DownloadSourceType.LINK,
+    val torrentFileIndex: Int = -1
 ) {
     val isActive: Boolean
         get() = status == DownloadStatus.QUEUED || status == DownloadStatus.DOWNLOADING || status == DownloadStatus.PROCESSING
@@ -164,7 +169,6 @@ object DownloadStore {
                 DownloadItem(
                     id = id,
                     source = source,
-                    isTorrent = o.optBoolean("tor", false),
                     title = o.optString("t").ifBlank { source },
                     subtitle = o.optString("s").ifBlank { null },
                     isAudio = o.optBoolean("au", false),
@@ -183,7 +187,9 @@ object DownloadStore {
                         val keys = h.keys()
                         while (keys.hasNext()) { val k = keys.next(); m[k] = h.optString(k) }
                         m
-                    } ?: emptyMap()
+                    } ?: emptyMap(),
+                    sourceType = try { DownloadSourceType.valueOf(o.optString("stype", "LINK")) } catch (_: Throwable) { DownloadSourceType.LINK },
+                    torrentFileIndex = o.optInt("tfi", -1)
                 )
             }
         } catch (_: Throwable) {
@@ -198,7 +204,6 @@ object DownloadStore {
                 JSONObject()
                     .put("id", e.id)
                     .put("src", e.source)
-                    .put("tor", e.isTorrent)
                     .put("t", e.title)
                     .put("s", e.subtitle ?: "")
                     .put("au", e.isAudio)
@@ -213,6 +218,10 @@ object DownloadStore {
                     .put("cont", e.container ?: "")
                     .put("th", e.thumbnailUrl ?: "")
                     .apply {
+                        if (e.sourceType != DownloadSourceType.LINK) {
+                            put("stype", e.sourceType.name)
+                            put("tfi", e.torrentFileIndex)
+                        }
                         if (e.headers.isNotEmpty()) {
                             val h = JSONObject()
                             for ((k, v) in e.headers) h.put(k, v)
