@@ -52,8 +52,11 @@ sealed class TorrentOpenResult {
  * Torrent / magnet playback on top of libtorrent4j (github.com/aldenml/libtorrent4j), built the same way as the
  * torrent engine of mpvRx:
  *
- *  - every played video gets its OWN libtorrent session (default settings + DHT + local peer discovery), so a stream
- *    never fights with another torrent, and stopping it frees everything;
+ *  - streams run in ONE long-lived stream session of their own ([streamSession]: default settings + DHT + local peer
+ *    discovery), separate from the Download page session. Every played video is its own torrent handle inside it, and stopping
+ *    a stream removes that handle and its data. Before, a brand-new session was created and torn down for every tap: its DHT
+ *    started cold (no peers for a long time, "Buffering" without any traffic) and the native start / stop on every tap was
+ *    heavy. The session is pre-warmed while the torrent info is being fetched, so peers are found much sooner;
  *  - only the chosen file is wanted (the others are IGNORE); it is downloaded in order (SEQUENTIAL_DOWNLOAD +
  *    setSequentialRange), the first 16 pieces and the last 8 pieces are TOP priority, with deadlines;
  *  - the file is handed to mpv through [TorrentProxyServer], a loopback HTTP server with byte ranges: a read waits for
@@ -82,7 +85,7 @@ object TorrentStreamEngine {
     /** With NO peer connected at all the stream is not opened (it would only hang): the start fails after this. */
     private const val PREBUFFER_NO_PEER_TIMEOUT_MS = 90_000L
 
-    /** Public trackers: used only when the magnet / torrent brings no tracker at all (mpvRx policy), never for private torrents. */
+    /** Public trackers: added to every PUBLIC torrent (many ISPs block the torrent's own trackers), never to private torrents. */
     private val DEFAULT_TRACKERS = listOf(
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://open.stealth.si:80/announce",
@@ -97,7 +100,13 @@ object TorrentStreamEngine {
         "udp://tracker.tiny-vps.com:6969/announce",
         "udp://p4p.arenabg.com:1337/announce",
         "udp://tracker.internetwarriors.net:1337/announce",
-        "https://tracker.opentrackr.org:443/announce"
+        "https://tracker.opentrackr.org:443/announce",
+        "udp://open.tracker.cl:1337/announce",
+        "udp://tracker.moeking.me:6969/announce",
+        "udp://tracker.bittor.pw:1337/announce",
+        "udp://tracker.theoks.net:6969/announce",
+        "udp://tracker.filemail.com:6969/announce",
+        "http://tracker.opentrackr.org:1337/announce"
     )
 
     private val playableMimeTypes = mapOf(
@@ -156,6 +165,14 @@ object TorrentStreamEngine {
     }
 
     @Volatile private var active: ActiveStream? = null
+
+    /** The long-lived libtorrent session that every stream runs in (see the class comment). */
+    @Volatile private var streamSession: SessionManager? = null
+
+    /** Short reason of the last failed [prepareStream], shown to the user instead of a generic message. */
+    @Volatile var lastStartError: String? = null
+        private set
+
     @Volatile private var dataRoot: File? = null
     @Volatile private var dataRootCleaned = false
 
@@ -171,6 +188,8 @@ object TorrentStreamEngine {
         if (!NetworkSettings.p2pEnabled(app)) {
             return@withContext TorrentOpenResult.Failure("P2P torrent streaming is turned off (Settings > Network)")
         }
+        // start the stream session now: its DHT / tracker connections are warm by the time the video is played
+        try { ensureStreamSession() } catch (t: Throwable) { Log.w(TAG, "stream session pre-warm failed", t) }
         try {
             val bytes: ByteArray = when (source) {
                 is TorrentSource.Bytes -> source.data
@@ -237,7 +256,7 @@ object TorrentStreamEngine {
     private fun fetchMagnet(context: Context, magnet: String): ByteArray? {
         val sm = ensureDlSession() ?: return null
         val tmp = File(context.cacheDir, "torrent-magnet").apply { mkdirs() }
-        val full = if (magnetHasTracker(magnet)) magnet else withDefaultTrackers(magnet)
+        val full = if (magnetTrackerCount(magnet) >= 3) magnet else withDefaultTrackers(magnet)
         // a second try: the first one often only wakes up DHT / the trackers of a fresh session
         for (attempt in 0 until 2) {
             try {
@@ -250,7 +269,7 @@ object TorrentStreamEngine {
         return null
     }
 
-    private fun magnetHasTracker(magnet: String): Boolean = Regex("(^|[?&])tr=", RegexOption.IGNORE_CASE).containsMatchIn(magnet)
+    private fun magnetTrackerCount(magnet: String): Int = Regex("(^|[?&])tr=", RegexOption.IGNORE_CASE).findAll(magnet).count()
 
     private fun withDefaultTrackers(magnet: String): String {
         val sb = StringBuilder(magnet)
@@ -358,6 +377,17 @@ object TorrentStreamEngine {
         return sm
     }
 
+    /** The shared stream session (created on first use, then reused: warm DHT, no native start / stop per video). */
+    private fun ensureStreamSession(): SessionManager = synchronized(lock) {
+        streamSession ?: newStreamSession().also { streamSession = it }
+    }
+
+    /** Drops the shared stream session (after an error, or when the app closes); the next stream creates a fresh one. */
+    private fun discardStreamSession() {
+        val sm = synchronized(lock) { streamSession.also { streamSession = null } } ?: return
+        try { sm.stop() } catch (_: Throwable) {}
+    }
+
     /** Index of the video itself plus the small subtitle files that sit in the same folder of the torrent. */
     private fun wantedSideFiles(info: TorrentInfo, videoIndex: Int): Set<Int> {
         val out = HashSet<Int>()
@@ -376,12 +406,6 @@ object TorrentStreamEngine {
             }
         } catch (_: Throwable) {}
         return out
-    }
-
-    /** true when the .torrent bytes carry an "announce" / "announce-list" key (bencoded keys are plain ASCII). */
-    private fun hasOwnTrackers(torrentBytes: ByteArray): Boolean {
-        val text = String(torrentBytes, Charsets.ISO_8859_1)
-        return text.contains("8:announce") || text.contains("13:announce-list")
     }
 
     private fun addDefaultTrackers(h: TorrentHandle) {
@@ -445,34 +469,47 @@ object TorrentStreamEngine {
     /** Called with [streamMutex] held. [gen] is this request's generation: a newer request makes it return null. */
     private suspend fun startStream(context: Context, infoHash: String, fileIndex: Int, gen: Long): ActiveStream? {
         val app = context.applicationContext
-        val bytes = TorrentLibrary.loadBytes(app, infoHash) ?: return null
-        val info = try { TorrentInfo(bytes) } catch (_: Throwable) { return null }
-        if (!info.isValid) return null
+        val bytes = TorrentLibrary.loadBytes(app, infoHash)
+        if (bytes == null) {
+            lastStartError = "The saved torrent info is missing. Open the magnet / .torrent again."
+            return null
+        }
+        val info = try { TorrentInfo(bytes) } catch (_: Throwable) {
+            lastStartError = "The saved torrent info is damaged. Open the magnet / .torrent again."
+            return null
+        }
+        if (!info.isValid) {
+            lastStartError = "The saved torrent info is not valid. Open the magnet / .torrent again."
+            return null
+        }
         val fs = info.files()
-        if (fileIndex < 0 || fileIndex >= fs.numFiles()) return null
+        if (fileIndex < 0 || fileIndex >= fs.numFiles()) {
+            lastStartError = "This video is not part of the torrent any more."
+            return null
+        }
 
-        // The previous stream (another video) is stopped COMPLETELY first (session, proxy, data) - never two sessions at once.
+        // The previous stream (another video) is removed COMPLETELY first (handle, proxy, data) - never two streams at once.
         stopActiveBlocking()
         if (generation.get() != gen) return null
 
         val saveDir = File(streamRoot(app), "${UUID.randomUUID()}").apply { mkdirs() }
-        var sm: SessionManager? = null
+        var session: SessionManager? = null
+        var handleRef: TorrentHandle? = null
         var proxy: TorrentProxyServer? = null
         try {
-            val session = newStreamSession()
-            sm = session
+            session = ensureStreamSession()
             val nFiles = fs.numFiles()
             // nothing is wanted until configureStreaming picks the played file (mpvRx order)
             val none = Array(nFiles) { Priority.IGNORE }
             session.download(info, saveDir, null, none, null, TorrentFlags.SEQUENTIAL_DOWNLOAD)
             val handle = waitForHandle(session, info)
+            handleRef = handle
             if (handle == null || generation.get() != gen) {
+                if (handle == null) lastStartError = "The torrent engine did not accept this torrent."
                 cleanupStream(session, handle, null, saveDir)
                 return null
             }
-            // Public torrents often ship dead or unreachable trackers. Add the known public trackers
-            // alongside the torrent's own announce URLs so peer discovery can fall back instead of
-            // sitting at zero peers indefinitely. Never announce private torrents to public trackers.
+            // public torrents: extra public trackers (the torrent's own ones are often dead or blocked by the ISP)
             if (!info.isPrivate) addDefaultTrackers(handle)
             try { handle.forceReannounce() } catch (_: Throwable) {}
 
@@ -500,15 +537,21 @@ object TorrentStreamEngine {
             val a = ActiveStream(infoHash, fileIndex, session, info, handle, server, saveDir, server.serverUrl, side)
             configureStreaming(a)
             if (generation.get() != gen) {
-                // overtaken while the session was being set up: this one is not wanted any more
+                // overtaken while the stream was being set up: this one is not wanted any more
                 cleanupStream(session, handle, server, saveDir)
                 return null
             }
             synchronized(lock) { active = a }
             return a
         } catch (t: Throwable) {
-            if (t !is kotlinx.coroutines.CancellationException) Log.e(TAG, "startStream failed", t)
-            cleanupStream(sm, null, proxy, saveDir)
+            if (t !is kotlinx.coroutines.CancellationException) {
+                Log.e(TAG, "startStream failed", t)
+                lastStartError = if (t is UnsatisfiedLinkError || t is NoClassDefFoundError) "The torrent engine is not available on this phone."
+                else "The torrent engine could not start (${t.javaClass.simpleName})."
+            }
+            cleanupStream(session, handleRef, proxy, saveDir)
+            // a session that threw is not trusted again: the next stream starts a fresh one
+            if (t !is kotlinx.coroutines.CancellationException) discardStreamSession()
             if (t is kotlinx.coroutines.CancellationException) throw t
             return null
         }
@@ -521,6 +564,7 @@ object TorrentStreamEngine {
      */
     suspend fun prepareStream(context: Context, torrentPath: String): String? = withContext(Dispatchers.IO) {
         val (hash, index) = TorrentLibrary.parsePath(torrentPath) ?: return@withContext null
+        lastStartError = null
         // This request is the newest one: an older start / prebuffer that is still running sees the new number and stops.
         val gen = generation.incrementAndGet()
         try {
@@ -533,7 +577,13 @@ object TorrentStreamEngine {
                     startStream(context, hash, index, gen)
                 } ?: return@withLock null
                 val connected = prebuffer(a, gen)
-                if (generation.get() != gen) null else if (!connected) null else a.url
+                if (generation.get() != gen) null
+                else if (!connected) {
+                    lastStartError = "No peers found for this torrent (no seeders, or the trackers / DHT are blocked on this network)."
+                    // the stream that found nobody is removed: it must not keep a dead session entry around
+                    stopActiveBlocking()
+                    null
+                } else a.url
             }
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
@@ -607,6 +657,7 @@ object TorrentStreamEngine {
     fun fileProgressPercent(torrentPath: String): Int {
         val (hash, index) = TorrentLibrary.parsePath(torrentPath) ?: return 0
         val a = active?.takeIf { it.infoHash == hash && it.fileIndex == index } ?: return 0
+        if (!a.handle.isValid) return 0
         if (a.prebufferPct in 0..99) return a.prebufferPct
         return try {
             val size = a.info.files().fileSize(index)
@@ -621,6 +672,7 @@ object TorrentStreamEngine {
     fun statusLine(torrentPath: String): String {
         val (hash, _) = TorrentLibrary.parsePath(torrentPath) ?: return ""
         val a = active?.takeIf { it.infoHash == hash } ?: return ""
+        if (!a.handle.isValid) return ""
         return try {
             val st = a.handle.status()
             val rate = st.downloadPayloadRate().toLong()
@@ -628,7 +680,8 @@ object TorrentStreamEngine {
                 rate >= 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f MB/s", rate / 1048576.0)
                 else -> "${rate / 1024} KB/s"
             }
-            "${st.numPeers()} peers · $speed"
+            val peers = st.numPeers()
+            if (peers <= 0) "Searching for peers…" else "$peers peers (${st.numSeeds()} seeds) · $speed"
         } catch (_: Throwable) { "" }
     }
 
@@ -650,11 +703,11 @@ object TorrentStreamEngine {
         } catch (_: Throwable) { emptyList() }
     }
 
+    /** Removes ONE stream (proxy, torrent handle, data). The shared stream session itself keeps running (warm DHT). */
     private fun cleanupStream(session: SessionManager?, handle: TorrentHandle?, proxy: TorrentProxyServer?, dir: File) {
         try { proxy?.close() } catch (_: Throwable) {}
         if (session != null) {
             try { if (handle != null && handle.isValid) session.remove(handle, SessionHandle.DELETE_FILES) } catch (_: Throwable) {}
-            try { session.stop() } catch (_: Throwable) {}
         }
         try { dir.deleteRecursively() } catch (_: Throwable) {}
     }
@@ -789,7 +842,7 @@ object TorrentStreamEngine {
                 try { found.unsetFlags(TorrentFlags.AUTO_MANAGED) } catch (_: Throwable) {}
                 try { found.unsetFlags(TorrentFlags.SEQUENTIAL_DOWNLOAD) } catch (_: Throwable) {}
                 try { found.resume() } catch (_: Throwable) {}
-                if (!info.isPrivate && !hasOwnTrackers(bytes)) addDefaultTrackers(found)
+                if (!info.isPrivate) addDefaultTrackers(found)
                 try { found.forceReannounce() } catch (_: Throwable) {}
                 val dl = DlTorrent(infoHash, info, found, saveDir)
                 dl.wanted.add(fileIndex)
@@ -854,11 +907,11 @@ object TorrentStreamEngine {
     fun release() {
         generation.incrementAndGet()
         val last = synchronized(lock) { active?.also { active = null } }
-        if (last != null) {
-            // the app is closing: the clean-up must not be tied to a coroutine that dies with the process
-            Thread { cleanupStream(last.session, last.handle, last.proxy, last.saveDir) }
-                .apply { isDaemon = true; name = "torrent-stop" }.start()
-        }
+        // the app is closing: the clean-up must not be tied to a coroutine that dies with the process
+        Thread {
+            if (last != null) cleanupStream(last.session, last.handle, last.proxy, last.saveDir)
+            discardStreamSession()
+        }.apply { isDaemon = true; name = "torrent-stop" }.start()
         synchronized(lock) {
             // Videos of the Download page are still downloading: keep their session (the download service keeps the app alive).
             if (dlTorrents.isNotEmpty()) return

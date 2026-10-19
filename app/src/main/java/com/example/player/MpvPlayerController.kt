@@ -555,6 +555,60 @@ class MpvPlayerController {
         } catch (_: Throwable) {}
     }
 
+    /**
+     * Start-up watchdog for torrent videos (loopback proxy) and Network-tab links (yt-dlp result). Before, only IPTV / direct
+     * streams were watched: when mpv failed to open anything else (TLS handshake, refused request, bad option) it went idle and
+     * the player stayed on "Buffering" for ever without any data flowing. Now a load that never starts is retried ONCE with
+     * plain mpv network options (no custom lavf options, certificate check off for web links) and, if that fails too, an
+     * error is shown. A torrent is allowed to wait for its first pieces for as long as the swarm needs: it only fails when
+     * mpv itself gave up (idle).
+     */
+    private fun updateOpenWatchdog(view: VideoPlayerMpvView, posSec: Double?) {
+        val now = System.currentTimeMillis()
+        if (!directStreamStarted && posSec != null && posSec >= 0.0 && now - directStreamLoadStartedAt > 400L) {
+            directStreamStarted = true
+        }
+        if (directStreamStarted || directStreamErrorShown) return
+        val torrent = isTorrentLoopbackUrl(currentFilePath)
+        val waited = now - directStreamLoadStartedAt
+        val idle = try { view.mpv.getPropertyBoolean("idle-active") == true } catch (_: Throwable) { false }
+        val failedFast = idle && waited > 4000L
+        val timedOut = !torrent && waited > 60_000L
+        if (!failedFast && !timedOut) return
+        val retryPath = currentFilePath
+        if (onlineLoadRetries < 1 && !retryPath.isNullOrBlank()) {
+            onlineLoadRetries++
+            directStreamLoadStartedAt = now
+            _isBuffering.value = true
+            try {
+                applySafeNetworkFallback(view, torrent)
+                view.mpv.command("loadfile", retryPath, "replace")
+                view.mpv.setPropertyBoolean("pause", false)
+            } catch (_: Throwable) {}
+            return
+        }
+        directStreamErrorShown = true
+        _isBuffering.value = false
+        _errorMessage.value = if (torrent) {
+            "This torrent video could not be opened. Check your internet connection and that the torrent has seeders."
+        } else {
+            "This link could not be played. The site may have blocked the stream, or the link expired. Try again."
+        }
+    }
+
+    /** Plain mpv network behaviour for the one retry of [updateOpenWatchdog]. */
+    private fun applySafeNetworkFallback(view: VideoPlayerMpvView, torrent: Boolean) {
+        try { view.mpv.setPropertyString("stream-lavf-o", "") } catch (_: Throwable) {}
+        try { view.mpv.setPropertyString("demuxer-lavf-o", "") } catch (_: Throwable) {}
+        try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "0") } catch (_: Throwable) {}
+        try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
+        if (!torrent) {
+            // a certificate / CA-bundle problem looks exactly like "no data": the retry does not verify certificates
+            try { view.mpv.setPropertyString("tls-verify", "no") } catch (_: Throwable) {}
+            try { view.mpv.setPropertyString("network-timeout", "30") } catch (_: Throwable) {}
+        }
+    }
+
     /** Live detection, seekable window and "stream cannot be played" detection for direct streams. Runs in the poll loop. */
     private fun updateDirectStreamState(view: VideoPlayerMpvView, posSec: Double?, durSec: Double?) {
         // A position read within the first moments of a load can still belong to the PREVIOUS channel; counting it as
@@ -1303,6 +1357,10 @@ class MpvPlayerController {
                         _isPlaying.value = !paused
                         if (directStreamMode) {
                             updateDirectStreamState(view, posSec, durSec)
+                        } else if (onlineStreamMode) {
+                            // torrent (loopback proxy) and Network-tab (yt-dlp) links: a failed open used to leave the
+                            // spinner on forever; now it is retried once with plain mpv network options, then reported.
+                            updateOpenWatchdog(view, posSec)
                         }
                         if (onlineStreamMode && cacheTimeSec > 0.0) {
                             // demuxer-cache-time is already the absolute end of the cached data
@@ -1561,16 +1619,15 @@ class MpvPlayerController {
             // swarm, so mpv must not give up after its default 60 s network timeout.
             if (filePath.startsWith("http://127.0.0.1:")) {
                 try { view.mpv.setPropertyString("network-timeout", "900") } catch (_: Throwable) {}
-                // The local torrent server answers every request on its own connection. ffmpeg's keep-alive
-                // ("multiple_requests") / reconnect-at-EOF options only confuse it, so plain reconnect is used.
-                try { view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2") } catch (_: Throwable) {}
+                // stream-lavf-o / demuxer-lavf-o are NOT touched here any more: applyStreamingProfile() already set the
+                // mpvRx values for the loopback proxy (http_persistent=0 + bounded reconnect). The old override replaced them
+                // with an unbounded reconnect policy and cleared demuxer-lavf-o, so a failed read looped silently.
                 try { view.mpv.setPropertyString("cache-pause-wait", "2") } catch (_: Throwable) {}
                 try { view.mpv.setPropertyString("demuxer-readahead-secs", "60") } catch (_: Throwable) {}
-                // the start-up buffer (first 10% of the file) is already on disk: a modest probe finds every track without
+                // the start-up buffer (first pieces of the file) is already on disk: a modest probe finds every track without
                 // reading far ahead of it
                 try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "6") } catch (_: Throwable) {}
                 try { view.mpv.setPropertyString("demuxer-lavf-probesize", "10000000") } catch (_: Throwable) {}
-                try { view.mpv.setPropertyString("demuxer-lavf-o", "") } catch (_: Throwable) {}
             }
             try {
                 view.mpv.command("loadfile", filePath, "replace")
