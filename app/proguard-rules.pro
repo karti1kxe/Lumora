@@ -58,6 +58,10 @@
 -keep class org.libtorrent4j.** { *; }
 -dontwarn org.libtorrent4j.**
 
+# NanoHTTPD: loopback server of util/TorrentProxyServer.kt (torrent file -> mpv).
+-keep class fi.iki.elonen.** { *; }
+-dontwarn fi.iki.elonen.**
+
 
 # Media plugins (Network > Media): WebView JavaScript bridge methods are called by name from plugin_runtime.js
 -keepattributes JavascriptInterface

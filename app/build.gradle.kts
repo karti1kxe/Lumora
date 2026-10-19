@@ -238,6 +238,8 @@ dependencies {
   implementation(libs.libtorrent4j.android.arm64)
   implementation(libs.libtorrent4j.android.x86)
   implementation(libs.libtorrent4j.android.x8664)
+  // NanoHTTPD: loopback byte-range server that hands the torrent file to mpv (util/TorrentProxyServer.kt, same as mpvRx).
+  implementation(libs.nanohttpd)
   // media3-exoplayer / media3-ui removed: not used anywhere in the code — the app
   // plays everything through mpv-android-lib. Keeping them only added unused APK
   // weight and a second, unused player stack.

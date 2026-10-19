@@ -658,13 +658,49 @@ class MpvPlayerController {
         loadVideo(newVideoUrl, positionMs)
     }
 
+    /** true for the loopback URL of a torrent video ("http://127.0.0.1:<port>/stream/<token>") served by TorrentProxyServer. */
+    private fun isTorrentLoopbackUrl(path: String?): Boolean =
+        path != null && path.startsWith("http://127.0.0.1:") && path.contains("/stream/")
+
     /**
      * Smart buffering: while the connection is good mpv reads ~2 minutes ahead of the playhead and keeps topping the
      * window up as playback advances. That read-ahead is exactly what the seek bar's buffered line shows.
      */
     private fun applyStreamingProfile(view: VideoPlayerMpvView, online: Boolean) {
         try {
-            if (online) {
+            if (online && isTorrentLoopbackUrl(currentFilePath)) {
+                // Torrent video served by the app's own loopback proxy (TorrentProxyServer). Same mpv network options as
+                // mpvRx for it: the proxy closes every response, so persistent connections are off, and a failed or
+                // dropped read is retried a bounded number of times. The first bytes of a torrent can take a while: the
+                // read timeout must not fire before the pieces arrive.
+                view.mpv.setPropertyString("cache", "auto")
+                view.mpv.setPropertyString("cache-pause", "yes")
+                view.mpv.setPropertyString("cache-pause-wait", "2")
+                view.mpv.setPropertyString("cache-pause-initial", "no")
+                view.mpv.setPropertyString("cache-secs", "120")
+                view.mpv.setPropertyString("demuxer-readahead-secs", "60")
+                view.mpv.setPropertyString("demuxer-max-bytes", "64MiB")
+                view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
+                try { view.mpv.setPropertyString("network-timeout", "120") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("stream-buffer-size", "1MiB") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "6") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-probesize", "15000000") } catch (_: Throwable) {}
+                view.mpv.setPropertyString(
+                    "demuxer-lavf-o",
+                    "http_persistent=0,reconnect=1,reconnect_on_network_error=1,reconnect_streamed=1," +
+                        "reconnect_delay_max=5,reconnect_max_retries=5,reconnect_delay_total_max=20"
+                )
+                view.mpv.setPropertyString(
+                    "stream-lavf-o",
+                    "http_persistent=0,reconnect=1,reconnect_on_network_error=1,reconnect_on_http_error=5xx," +
+                        "reconnect_streamed=1,reconnect_delay_max=5,reconnect_max_retries=5,reconnect_delay_total_max=20"
+                )
+                view.mpv.setPropertyString("scale", "spline36")
+                view.mpv.setPropertyString("dscale", "mitchell")
+                view.mpv.setPropertyString("cscale", "bilinear")
+                view.mpv.setPropertyString("correct-downscaling", "yes")
+                streamingProfileApplied = true
+            } else if (online) {
                 view.mpv.setPropertyString(
                     "user-agent",
                     if (directStreamMode) "VLC/3.0.20 LibVLC/3.0.20"
@@ -722,6 +758,9 @@ class MpvPlayerController {
                     view.mpv.setPropertyString("cache-pause-wait", "3")
                     view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx,5xx,reconnect_at_eof=1,reconnect_delay_max=5,multiple_requests=1")
                     try { view.mpv.setPropertyString("demuxer-lavf-o", "") } catch (_: Throwable) {}
+                    // a torrent video before this one used a bigger probe: back to mpv's normal values
+                    try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "0") } catch (_: Throwable) {}
+                    try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
                 }
                 // The app-wide "fast" profile renders with bilinear scalers, which makes a chosen 720p/1080p stream look
                 // soft. Online videos get proper scalers so the selected quality is really visible.
