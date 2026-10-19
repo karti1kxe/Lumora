@@ -867,6 +867,12 @@ fun VideoPlayerScreen(
         torrentPreparing = true
         val url = try {
             com.example.util.TorrentStreamEngine.prepareStream(context, torrentPath)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // A native/libtorrent startup failure must not escape the player coroutine and
+            // take down the player UI. Treat it as a failed start and let the user retry.
+            null
         } finally {
             if (lastLoadedVideoKey == key) torrentPreparing = false
         }

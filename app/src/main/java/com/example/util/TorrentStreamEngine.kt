@@ -470,8 +470,10 @@ object TorrentStreamEngine {
                 cleanupStream(session, handle, null, saveDir)
                 return null
             }
-            // public torrents: a few extra public trackers when the torrent brings none of its own
-            if (!info.isPrivate && !hasOwnTrackers(bytes)) addDefaultTrackers(handle)
+            // Public torrents often ship dead or unreachable trackers. Add the known public trackers
+            // alongside the torrent's own announce URLs so peer discovery can fall back instead of
+            // sitting at zero peers indefinitely. Never announce private torrents to public trackers.
+            if (!info.isPrivate) addDefaultTrackers(handle)
             try { handle.forceReannounce() } catch (_: Throwable) {}
 
             val side = wantedSideFiles(info, fileIndex)
