@@ -144,6 +144,9 @@ object TorrentStreamEngine {
 
     suspend fun open(context: Context, source: TorrentSource): TorrentOpenResult = withContext(Dispatchers.IO) {
         val app = context.applicationContext
+        if (!NetworkSettings.p2pEnabled(app)) {
+            return@withContext TorrentOpenResult.Failure("P2P torrent streaming is turned off (Settings > Network)")
+        }
         try {
             val bytes: ByteArray = when (source) {
                 is TorrentSource.Bytes -> source.data

@@ -202,6 +202,7 @@ enum class SettingsCategoryTab(
     GESTURES(Icons.Outlined.Tune, R.drawable.lumora_gesture),
     PLAYER_LAYOUT(Icons.Outlined.DashboardCustomize, R.drawable.lumora_widget_5),
     FOLDERS(Icons.Outlined.Folder, R.drawable.lumora_folder),
+    NETWORK(Icons.Outlined.Language, R.drawable.lumora_network),
     ADVANCED(Icons.Outlined.Settings, R.drawable.lumora_settings_minimalistic),
     ABOUT(Icons.Outlined.Info, R.drawable.lumora_user);
 
@@ -215,6 +216,11 @@ enum class SettingsCategoryTab(
             AppLanguage.ENGLISH -> "Folders"
             AppLanguage.HINGLISH -> "Folders"
             AppLanguage.HINDI -> "फ़ोल्डर"
+        }
+        NETWORK -> when (lang) {
+            AppLanguage.ENGLISH -> "Network"
+            AppLanguage.HINGLISH -> "Network"
+            AppLanguage.HINDI -> "नेटवर्क"
         }
         PLAYER -> AppStrings.getTabPlayer(lang)
         AUDIO -> AppStrings.getTabAudio(lang)
@@ -3404,6 +3410,30 @@ fun SettingsSheet(
                         Spacer(modifier = Modifier.height(24.dp))
                     }
 
+                    SettingsCategoryTab.NETWORK -> {
+                        CategoryBanner(
+                            icon = Icons.Outlined.Language,
+                            lumoraIconRes = R.drawable.lumora_network,
+                            title = when (lang) {
+                                AppLanguage.HINDI -> "नेटवर्क"
+                                else -> "Network"
+                            }
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        NetworkSettingsPanel(
+                            isDark = isDark,
+                            cardBg = cardBg,
+                            borderColor = borderColor,
+                            primaryText = primaryText,
+                            secondaryText = secondaryText,
+                            alphaFactor = alphaFactor
+                        )
+
+                        Spacer(modifier = Modifier.height(24.dp))
+                    }
+
                     SettingsCategoryTab.ADVANCED -> {
                         CategoryBanner(
                             icon = Icons.Outlined.Settings,
@@ -6142,6 +6172,146 @@ private fun PlayerActionRow(
                     fontWeight = FontWeight.SemiBold,
                     color = if (enabled) AccentSkyBlue else secondaryText
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Settings > Network: P2P torrent streaming, HLS stream handling, the yt-dlp manager (Stable / Nightly releases from
+ * GitHub + update button) and the subtitle options for pasted links. Built from the same rows as the other tabs.
+ */
+@Composable
+private fun NetworkSettingsPanel(
+    isDark: Boolean,
+    cardBg: Color,
+    borderColor: Color,
+    primaryText: Color,
+    secondaryText: Color,
+    alphaFactor: Float
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var p2p by remember { mutableStateOf(com.example.util.NetworkSettings.p2pEnabled(context)) }
+    var hls by remember { mutableStateOf(com.example.util.NetworkSettings.hlsHandlingEnabled(context)) }
+    var subs by remember { mutableStateOf(com.example.util.NetworkSettings.downloadSubtitles(context)) }
+    var autoSubs by remember { mutableStateOf(com.example.util.NetworkSettings.autoSubtitles(context)) }
+    var channel by remember { mutableStateOf(com.example.util.NetworkSettings.ytDlpChannel(context)) }
+    var version by remember { mutableStateOf<String?>(null) }
+    var updating by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        version = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.example.util.NetworkStreamResolver.ytDlpVersion(context)
+        }
+    }
+
+    fun update(target: String) {
+        if (updating) return
+        updating = true
+        status = null
+        scope.launch {
+            val message = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.example.util.NetworkStreamResolver.updateYtDlpNow(context, target)
+            }
+            version = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.example.util.NetworkStreamResolver.ytDlpVersion(context)
+            }
+            status = message
+            updating = false
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+        PlayerSettingsCategory("P2P streaming", cardBg, borderColor, secondaryText) {
+            PlayerSwitchRow(
+                title = "Enable P2P torrent streaming",
+                description = "Stream playable media from magnet links and torrent files",
+                checked = p2p,
+                primaryText = primaryText,
+                secondaryText = secondaryText
+            ) {
+                p2p = it
+                com.example.util.NetworkSettings.setP2pEnabled(context, it)
+            }
+
+            HorizontalDivider(color = borderColor)
+
+            PlayerSwitchRow(
+                title = "Enable HLS streaming proxy",
+                description = "Normalize adaptive HLS manifests and handle split audio/video streams",
+                checked = hls,
+                primaryText = primaryText,
+                secondaryText = secondaryText
+            ) {
+                hls = it
+                com.example.util.NetworkSettings.setHlsHandlingEnabled(context, it)
+            }
+        }
+
+        PlayerSettingsCategory("yt-dlp Manager", cardBg, borderColor, secondaryText) {
+            PlayerChoiceRow(
+                title = "Release channel",
+                description = "Stable = official releases, Nightly = newest builds (both from GitHub)",
+                value = channel,
+                options = listOf(
+                    com.example.util.NetworkSettings.CHANNEL_STABLE to "Stable",
+                    com.example.util.NetworkSettings.CHANNEL_NIGHTLY to "Nightly"
+                ),
+                isDark = isDark,
+                primaryText = primaryText,
+                secondaryText = secondaryText,
+                borderColor = borderColor,
+                alphaFactor = alphaFactor
+            ) { v ->
+                channel = v
+                com.example.util.NetworkSettings.setYtDlpChannel(context, v)
+                // switching the channel installs that channel's build straight away
+                update(v)
+            }
+
+            HorizontalDivider(color = borderColor)
+
+            PlayerActionRow(
+                title = if (channel == com.example.util.NetworkSettings.CHANNEL_NIGHTLY) "Update Nightly" else "Update Stable",
+                subtitle = status
+                    ?: ("Installed: " + (version ?: "checking...") + " - install and update yt-dlp for streaming and downloads"),
+                actionLabel = if (updating) "Updating..." else "Update",
+                icon = R.drawable.lumora_download_minimalistic,
+                enabled = !updating,
+                primaryText = primaryText,
+                secondaryText = secondaryText,
+                borderColor = borderColor
+            ) { update(channel) }
+        }
+
+        PlayerSettingsCategory("Subtitles & Language", cardBg, borderColor, secondaryText) {
+            PlayerSwitchRow(
+                title = "Download Media Subtitles",
+                description = "Automatically extract and load physical subtitle tracks from supported URLs.",
+                checked = subs,
+                primaryText = primaryText,
+                secondaryText = secondaryText
+            ) {
+                subs = it
+                com.example.util.NetworkSettings.setDownloadSubtitles(context, it)
+            }
+
+            HorizontalDivider(color = borderColor)
+
+            PlayerSwitchRow(
+                title = "Include Auto-Generated Subtitles",
+                description = "Fetch auto-caption tracks (e.g. YouTube Speech-to-Text) when regular subs are absent.",
+                checked = autoSubs,
+                enabled = subs,
+                primaryText = primaryText,
+                secondaryText = secondaryText
+            ) {
+                autoSubs = it
+                com.example.util.NetworkSettings.setAutoSubtitles(context, it)
             }
         }
     }

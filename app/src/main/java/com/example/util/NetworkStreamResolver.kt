@@ -16,6 +16,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 
+/** A subtitle track that the site offers for a pasted link ([auto] = machine generated, e.g. YouTube speech-to-text). */
+data class NetworkSubtitle(val language: String, val name: String, val url: String, val auto: Boolean)
+
 /** A pasted network link, resolved to something the app's players can open. */
 data class NetworkStream(
     val pageUrl: String,
@@ -39,7 +42,9 @@ data class NetworkStream(
      * All selectable qualities (+ audio / chapters) of a video link, so the player's three-dot menu can offer
      * "Video Quality" for pasted links exactly like for Online Videos. Null = nothing to choose (plain files, live TV).
      */
-    val playback: OnlineVideoPlayback? = null
+    val playback: OnlineVideoPlayback? = null,
+    /** Subtitle tracks the site offers (manual and auto-generated); Settings > Network decides which ones are loaded. */
+    val subtitles: List<NetworkSubtitle> = emptyList()
 )
 
 /**
@@ -288,12 +293,48 @@ object NetworkStreamResolver {
      * it does nothing when the installed copy is already the latest). The yt-dlp files are replaced while
      * [updateRunLock] is held. The wait is capped at [timeoutSec] seconds.
      */
+    /** The yt-dlp release channel chosen in Settings > Network (official stable releases or the nightly builds on GitHub). */
+    private fun channelOf(context: Context): YoutubeDL.UpdateChannel =
+        if (NetworkSettings.ytDlpChannel(context) == NetworkSettings.CHANNEL_NIGHTLY) YoutubeDL.UpdateChannel.NIGHTLY
+        else YoutubeDL.UpdateChannel.STABLE
+
+    /** Installed yt-dlp version for the settings page (null while yt-dlp cannot start). */
+    fun ytDlpVersion(context: Context): String? = try {
+        if (ensureYtDlp(context)) YoutubeDL.getInstance().version(context) else null
+    } catch (_: Throwable) { null }
+
+    /**
+     * Settings > Network: installs the newest yt-dlp of [channel] from GitHub right now (no age / gap limits).
+     * Blocking: call from a background thread. Returns a short message for the user.
+     */
+    fun updateYtDlpNow(context: Context, channel: String): String {
+        val app = context.applicationContext
+        NetworkSettings.setYtDlpChannel(app, channel)
+        if (!ensureYtDlp(app)) return lastError ?: "yt-dlp could not start"
+        updateRunLock.lock()
+        try {
+            val status = YoutubeDL.getInstance().updateYoutubeDL(app, channelOf(app))
+            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putLong(KEY_LAST_YTDLP_UPDATE, System.currentTimeMillis()).apply()
+            cache.clear()
+            val v = try { YoutubeDL.getInstance().version(app) } catch (_: Throwable) { null }
+            val what = if (channel == NetworkSettings.CHANNEL_NIGHTLY) "Nightly" else "Stable"
+            return if (status?.toString() == "ALREADY_UP_TO_DATE") "$what is already up to date" + (v?.let { " ($it)" } ?: "")
+            else "Updated to $what" + (v?.let { " ($it)" } ?: "")
+        } catch (t: Throwable) {
+            Log.w(TAG, "manual yt-dlp update failed", t)
+            return "Update failed: " + shortReason(t)
+        } finally {
+            updateRunLock.unlock()
+        }
+    }
+
     private fun runLibraryUpdate(context: Context, timeoutSec: Long): Boolean {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         updateRunLock.lock()
         try {
             val task = java.util.concurrent.FutureTask<Boolean>(java.util.concurrent.Callable {
-                YoutubeDL.getInstance().updateYoutubeDL(context, YoutubeDL.UpdateChannel.STABLE)
+                YoutubeDL.getInstance().updateYoutubeDL(context, channelOf(context))
                 true
             })
             Thread(task, "ytdlp-update").apply { isDaemon = true }.start()
@@ -476,8 +517,45 @@ object NetworkStreamResolver {
             // live streams have no duration: let the player handle them like IPTV channels
             isDirect = isLive || duration <= 0L,
             isAudio = !sawVideo,
-            playback = playback
+            playback = playback,
+            subtitles = subtitlesOf(root)
         )
+    }
+
+    /** Manual subtitles first, then the auto-generated captions; one file (best format for mpv) per language. */
+    private fun subtitlesOf(root: JSONObject): List<NetworkSubtitle> {
+        val out = ArrayList<NetworkSubtitle>()
+        fun collect(key: String, auto: Boolean, limit: Int) {
+            val all = root.optJSONObject(key) ?: return
+            val langs = ArrayList<String>()
+            val it = all.keys()
+            while (it.hasNext()) langs.add(it.next())
+            // auto-caption lists hold ~150 languages: only the usual ones are offered (English / Hindi first)
+            val ordered = if (auto) langs.filter { l -> l == "en" || l == "hi" || l.startsWith("en-") || l.startsWith("hi-") }
+                .sortedBy { if (it.startsWith("hi")) 0 else 1 } else langs
+            var n = 0
+            for (lang in ordered) {
+                if (n >= limit) break
+                if (lang == "live_chat") continue
+                val formats = all.optJSONArray(lang) ?: continue
+                var best: JSONObject? = null
+                var bestRank = Int.MAX_VALUE
+                for (i in 0 until formats.length()) {
+                    val f = formats.optJSONObject(i) ?: continue
+                    val u = f.optString("url").ifBlank { null } ?: continue
+                    val rank = when (f.optString("ext").lowercase()) { "vtt" -> 0; "srt" -> 1; "ass" -> 2; else -> 9 }
+                    if (rank < bestRank && rank < 9) { best = f; bestRank = rank }
+                }
+                val b = best ?: continue
+                val url = b.optString("url").ifBlank { null } ?: continue
+                val label = b.optString("name").ifBlank { lang }
+                out.add(NetworkSubtitle(lang, if (auto) "$label (auto)" else label, url, auto))
+                n++
+            }
+        }
+        collect("subtitles", auto = false, limit = 16)
+        collect("automatic_captions", auto = true, limit = 4)
+        return out
     }
 
     /**

@@ -683,6 +683,7 @@ fun VideoPlayerScreen(
      */
     fun addMissingHlsRenditions(stream: com.example.util.media.MediaStream, loadKey: String?) {
         if (!com.example.util.media.HlsVariants.looksLikeHls(stream.link, stream.type)) return
+        if (!com.example.util.NetworkSettings.hlsHandlingEnabled(context)) return
         coroutineScope.launch {
             val headers = if (stream.headers.isNotEmpty()) stream.headers else providerHeaders(stream.link)
             val renditions = withContext(Dispatchers.IO) {
@@ -811,6 +812,25 @@ fun VideoPlayerScreen(
         controller.setOnlineStream(true)
         val stream = com.example.util.NetworkStreamResolver.resolve(context, pageUrl)
         if (lastLoadedVideoKey != key) return
+        // Settings > Network: subtitle tracks that the site offers are added once the stream is running (nothing is switched on)
+        if (stream != null && !stream.isAudio && stream.subtitles.isNotEmpty() &&
+            com.example.util.NetworkSettings.downloadSubtitles(context)
+        ) {
+            val withAuto = com.example.util.NetworkSettings.autoSubtitles(context)
+            val wanted = stream.subtitles.filter { withAuto || !it.auto }
+            if (wanted.isNotEmpty()) {
+                coroutineScope.launch {
+                    delay(4000L)
+                    if (lastLoadedVideoKey != key) return@launch
+                    withContext(Dispatchers.IO) {
+                        for (sub in wanted) {
+                            if (lastLoadedVideoKey != key) return@withContext
+                            try { controller.addExternalSubtitle(sub.url, context, originalName = sub.name, select = false) } catch (_: Throwable) {}
+                        }
+                    }
+                }
+            }
+        }
         if (stream == null) {
             Toast.makeText(context, "Could not play this link. Check the link and your internet connection.", Toast.LENGTH_LONG).show()
             return
