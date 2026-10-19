@@ -2459,7 +2459,7 @@ fun VideoPlayerScreen(
     }
 
     val isBuffering by controller.isBuffering.collectAsState()
-    val isTorrentVideo = currentVideo.isNetworkStream && com.example.torrent.isTorrentSource(currentVideo.path)
+    val isTorrentVideo = currentVideo?.let { video -> video.isNetworkStream && com.example.torrent.isTorrentSource(video.path) } == true
     val torrentState by (if (isTorrentVideo) com.example.torrent.TorrentStreaming.engine(context).state
         else com.example.torrent.TorrentStreaming.idleState).collectAsState()
     val bufferedPositionMs by controller.bufferedPositionMs.collectAsState()
