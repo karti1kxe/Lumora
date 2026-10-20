@@ -423,15 +423,11 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                // Torrent file picker (magnet / .torrent from the Network tab or from another app)
+                // Torrent file picker (download only; magnet / .torrent from the Network tab or from another app)
                 com.example.ui.components.TorrentPickerHost(
                     isDark = uiState.themeMode == ThemeMode.DARK ||
                         (uiState.themeMode == ThemeMode.SYSTEM && androidx.compose.foundation.isSystemInDarkTheme()),
-                    glassBlurTransparency = uiState.glassBlurTransparency,
-                    onPlay = { video, playlist ->
-                        com.example.util.MediaSeenManager.markSeen(this@MainActivity, video.path, video.id)
-                        viewModel.startPlaying(video, playlist)
-                    }
+                    glassBlurTransparency = uiState.glassBlurTransparency
                 )
             }
         }
@@ -600,7 +596,7 @@ class MainActivity : ComponentActivity() {
         com.example.torrent.torrentSourceFromIntent(intent)?.let { torrentSource ->
             if (intent.getBooleanExtra("lumora_torrent_handled", false)) return
             intent.putExtra("lumora_torrent_handled", true)
-            com.example.torrent.TorrentPickerState.open(torrentSource, com.example.torrent.TorrentPickerMode.PLAY)
+            com.example.torrent.TorrentPickerState.open(torrentSource)
             return
         }
 

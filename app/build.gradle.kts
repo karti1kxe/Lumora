@@ -182,14 +182,12 @@ dependencies {
   // implementation(libs.retrofit)
   implementation(libs.androidx.media)
   implementation(libs.mpv.android.lib)
-  // Torrent streaming / download (ported from mpvRx): libtorrent4j session + one native lib per ABI, and the
-  // loopback byte-range server that feeds the selected file to mpv.
+  // Torrent DOWNLOAD only (no playback / streaming): libtorrent4j session + one native lib per ABI.
   implementation(libs.libtorrent4j)
   implementation(libs.libtorrent4j.android.arm64)
   implementation(libs.libtorrent4j.android.arm)
   implementation(libs.libtorrent4j.android.x86)
   implementation(libs.libtorrent4j.android.x8664)
-  implementation(libs.nanohttpd)
   // CloudStream extension runtime (.cs3 providers, Network > Media > CloudStream repositories)
   implementation(project(":cloudstream-lib"))
   // media3-exoplayer / media3-ui removed: not used anywhere in the code — the app

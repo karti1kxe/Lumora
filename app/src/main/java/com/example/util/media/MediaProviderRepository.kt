@@ -252,7 +252,7 @@ object MediaProviderRepository {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             val url = o.optString("link", "").trim()
-            // only http(s) streams are used (magnet / torrent links are not supported any more)
+            // only http(s) streams are used (magnet / torrent links are never played)
             val isHttp = url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)
             if (!isHttp) continue
             val headers = LinkedHashMap<String, String>()

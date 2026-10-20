@@ -82,7 +82,7 @@ object YtdlpManager {
   // Lua patterns (ytdl_hook `exclude` syntax, `|`-separated) for direct media/manifest
   // paths. The prefix prevents an extension in a query parameter from bypassing yt-dlp;
   // the two suffixes cover plain and tokenized URLs. Loopback hosts are excluded outright:
-  // every SMB/FTP/SFTP/WebDAV/torrent stream is served by the app's own local proxy and
+  // every SMB/FTP/SFTP/WebDAV stream is served by the app's own local proxy and
   // must never be routed through yt-dlp, extension or not.
   private val DIRECT_MEDIA_EXCLUDE =
     (

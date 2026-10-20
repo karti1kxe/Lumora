@@ -42,6 +42,30 @@ jobs:
           unzip -t app/src/ytdlp/assets/ytdl/python313.zip >/dev/null
           ls -lh app/src/ytdlp/assets/ytdl/python313.zip
 
+      # QuickJS-NG (MIT) is the JavaScript runtime yt-dlp needs for YouTube challenges. Its C sources (~3 MB) are NOT kept
+      # in the repo any more: this step downloads the pinned release and recreates app/src/main/cpp/third_party/quickjs
+      # exactly as CMakeLists.txt expects it (byte-identical to the files that used to be committed).
+      - name: Fetch QuickJS-NG sources
+        run: |
+          set -e
+          QJS_VERSION="v0.16.2"
+          DIR=app/src/main/cpp/third_party/quickjs
+          rm -rf "$DIR" /tmp/qjs-src
+          mkdir -p "$DIR/gen" /tmp/qjs-src
+          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+            -o /tmp/quickjs.tar.gz \
+            "https://github.com/quickjs-ng/quickjs/archive/refs/tags/${QJS_VERSION}.tar.gz"
+          tar -xzf /tmp/quickjs.tar.gz -C /tmp/qjs-src --strip-components=1
+          for f in LICENSE builtin-array-fromasync.h builtin-iterator-zip-keyed.h builtin-iterator-zip.h cutils.h \
+                   dtoa.c dtoa.h libregexp-opcode.h libregexp.c libregexp.h libunicode-table.h libunicode.c \
+                   libunicode.h list.h qjs.c quickjs-atom.h quickjs-c-atomics.h quickjs-libc.c quickjs-libc.h \
+                   quickjs-opcode.h quickjs.c quickjs.h gen/repl.c gen/standalone.c; do
+            test -s "/tmp/qjs-src/$f" || { echo "::error::QuickJS-NG $QJS_VERSION is missing $f"; exit 1; }
+            cp "/tmp/qjs-src/$f" "$DIR/$f"
+          done
+          grep -E "define QJS_VERSION_(MAJOR|MINOR|PATCH)" "$DIR/quickjs.h"
+          rm -rf /tmp/qjs-src /tmp/quickjs.tar.gz
+
       # yt-dlp runtime (ported from mpvRx). cacert.pem (CA bundle for yt-dlp's TLS) is fetched here.
       #
       # libpython.so (CPython 3.13 with its extension modules built in) is a prebuilt binary per ABI and is NOT part of

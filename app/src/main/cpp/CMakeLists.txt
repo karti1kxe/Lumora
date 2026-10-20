@@ -38,7 +38,13 @@ lumora_optimize_native_target(ytdl_wrapper)
 
 # QuickJS-NG CLI used by current yt-dlp releases for YouTube n/sig challenges.
 # Package it as an executable .so beside libytdl.so so Android permits subprocess execution.
+# The QuickJS-NG sources are not committed: .github/workflows/build-apk.yml downloads the pinned release into
+# third_party/quickjs before Gradle runs. Without them (a build outside CI) only libytdl.so is produced.
 set(QUICKJS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs")
+if(NOT EXISTS "${QUICKJS_DIR}/quickjs.c")
+    message(WARNING "QuickJS-NG sources not found in ${QUICKJS_DIR}: libqjs.so is not built (CI fetches them).")
+    return()
+endif()
 add_executable(
     qjs_runtime
     "${QUICKJS_DIR}/dtoa.c"

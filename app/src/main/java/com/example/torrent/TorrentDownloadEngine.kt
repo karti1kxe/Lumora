@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Built on the libtorrent4j session / metadata handling of mpvRx's TorrentStreamingEngine (AGPL-3.0), reused here for
+ * Built on the libtorrent4j session / metadata handling of mpvRx's torrent engine (AGPL-3.0), reused here for
  * a plain "download the chosen file" flow. mpvRx itself has no separate torrent download engine.
  */
 
@@ -60,7 +60,7 @@ object TorrentDownloadEngine {
             .build()
     }
 
-    /** Returns the finished file (inside [saveDir]). Throws [TorrentStreamException] for torrent problems. */
+    /** Returns the finished file (inside [saveDir]). Throws [TorrentException] for torrent problems. */
     suspend fun download(
         context: Context,
         source: String,
@@ -71,11 +71,11 @@ object TorrentDownloadEngine {
     ): File? {
         val app = context.applicationContext
         val raw = source.trim()
-        if (raw.isEmpty()) throw TorrentStreamException("Torrent source is empty.")
-        if (hasV2OnlyMagnet(raw)) throw TorrentStreamException("BitTorrent v2-only torrents are not supported yet.")
+        if (raw.isEmpty()) throw TorrentException("Torrent source is empty.")
+        if (hasV2OnlyMagnet(raw)) throw TorrentException("BitTorrent v2-only torrents are not supported yet.")
         val normalized = normalizeTorrentSource(raw)
-            ?: if (isMetadataUri(raw)) raw else throw TorrentStreamException("Unsupported torrent source.")
-        if (!saveDir.isDirectory && !saveDir.mkdirs()) throw TorrentStreamException("Couldn't create the download folder.")
+            ?: if (isMetadataUri(raw)) raw else throw TorrentException("Unsupported torrent source.")
+        if (!saveDir.isDirectory && !saveDir.mkdirs()) throw TorrentException("Couldn't create the download folder.")
 
         val session = SessionManager()
         var handle: TorrentHandle? = null
@@ -91,9 +91,9 @@ object TorrentDownloadEngine {
             val info: TorrentInfo
             if (normalized.startsWith("magnet:?", ignoreCase = true)) {
                 val parsed = parseMagnet(normalized)
-                    ?: throw TorrentStreamException("Magnet link does not contain a supported v1 info hash.")
+                    ?: throw TorrentException("Magnet link does not contain a supported v1 info hash.")
                 val hash = runCatching { Sha1Hash.parseHex(parsed.infoHash) }.getOrNull()
-                    ?: throw TorrentStreamException("Magnet link contains an invalid v1 info hash.")
+                    ?: throw TorrentException("Magnet link contains an invalid v1 info hash.")
                 session.download(parsed.cleanMagnetUri, saveDir, TorrentFlags.UPLOAD_MODE)
                 handle = waitForHandle(session, hash, isCancelled)
                 if (parsed.trackers.isEmpty()) {
@@ -104,13 +104,13 @@ object TorrentDownloadEngine {
             } else {
                 val payload = readMetadata(app, normalized)
                 val endpoints = runCatching { extractTorrentMetadataEndpoints(payload) }.getOrElse {
-                    throw TorrentStreamException("The selected file contains invalid torrent metadata.")
+                    throw TorrentException("The selected file contains invalid torrent metadata.")
                 }
                 info = runCatching { TorrentInfo(payload) }.getOrElse {
-                    throw TorrentStreamException("The selected file is not valid torrent metadata.")
+                    throw TorrentException("The selected file is not valid torrent metadata.")
                 }
-                if (!info.isValid) throw TorrentStreamException("The selected file is not valid torrent metadata.")
-                if (!info.hasV1()) throw TorrentStreamException("BitTorrent v2-only torrents are not supported yet.")
+                if (!info.isValid) throw TorrentException("The selected file is not valid torrent metadata.")
+                if (!info.hasV1()) throw TorrentException("BitTorrent v2-only torrents are not supported yet.")
                 val ignoreAll = Array(info.files().numFiles()) { Priority.IGNORE }
                 session.download(info, saveDir, null, ignoreAll, null, TorrentFlags.SEQUENTIAL_DOWNLOAD)
                 handle = waitForHandle(session, info.infoHash(), isCancelled)
@@ -121,13 +121,13 @@ object TorrentDownloadEngine {
 
             val storage = info.files()
             if (fileIndex < 0 || fileIndex >= storage.numFiles()) {
-                throw TorrentStreamException("The selected torrent file does not exist any more.")
+                throw TorrentException("The selected torrent file does not exist any more.")
             }
             val relativePath = storage.filePath(fileIndex)
             val size = storage.fileSize(fileIndex)
             if (relativePath.isBlank() || File(relativePath).isAbsolute ||
                 relativePath.replace('\\', '/').split('/').any { it == ".." }
-            ) throw TorrentStreamException("Torrent metadata contains an unsafe file path.")
+            ) throw TorrentException("Torrent metadata contains an unsafe file path.")
 
             // libtorrent 2.x writes through memory-mapped files: a full disk (or a filesystem that cannot grow sparse
             // files) kills the whole process with SIGBUS instead of failing the write, which looked like "the app
@@ -135,7 +135,7 @@ object TorrentDownloadEngine {
             val alreadyOnDisk = File(saveDir, relativePath).takeIf { it.isFile }?.length() ?: 0L
             val neededBytes = (size - alreadyOnDisk).coerceAtLeast(0L) + MIN_FREE_HEADROOM_BYTES
             if (saveDir.usableSpace < neededBytes) {
-                throw TorrentStreamException("Not enough free storage: the device storage is full.")
+                throw TorrentException("Not enough free storage: the device storage is full.")
             }
 
             val priorities = Array(storage.numFiles()) { Priority.IGNORE }
@@ -146,7 +146,7 @@ object TorrentDownloadEngine {
 
             while (true) {
                 if (isCancelled()) return null
-                if (!handle.isValid) throw TorrentStreamException("Torrent session stopped unexpectedly.")
+                if (!handle.isValid) throw TorrentException("Torrent session stopped unexpectedly.")
                 val (status, done) = try {
                     handle.status() to (handle.fileProgress().getOrNull(fileIndex) ?: 0L).coerceIn(0L, size)
                 } catch (error: Exception) {
@@ -173,14 +173,14 @@ object TorrentDownloadEngine {
             return if (out.isFile) out else null
         } catch (cancellation: CancellationException) {
             throw cancellation
-        } catch (error: TorrentStreamException) {
+        } catch (error: TorrentException) {
             throw error
         } catch (error: LinkageError) {
             Log.e(TAG, "Torrent native runtime is unavailable", error)
-            throw TorrentStreamException("Torrent engine is not available on this device.", error)
+            throw TorrentException("Torrent engine is not available on this device.", error)
         } catch (error: Throwable) {
             Log.e(TAG, "Torrent download failed (${error::class.java.simpleName})")
-            throw TorrentStreamException("Couldn't download this torrent file.", error)
+            throw TorrentException("Couldn't download this torrent file.", error)
         } finally {
             // keep the partial data on disk: pause / retry continues from it, cancel deletes the folder itself
             runCatching { session.stop() }
@@ -194,7 +194,7 @@ object TorrentDownloadEngine {
             session.find(hash)?.takeIf { it.isValid }?.let { return it }
             delay(100L)
         }
-        throw TorrentStreamException("Timed out while adding the torrent.")
+        throw TorrentException("Timed out while adding the torrent.")
     }
 
     private suspend fun waitForMetadata(
@@ -205,7 +205,7 @@ object TorrentDownloadEngine {
         val deadline = System.currentTimeMillis() + METADATA_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             if (isCancelled()) throw CancellationException("Torrent download stopped")
-            if (!handle.isValid) throw TorrentStreamException("Torrent session stopped before metadata was received.")
+            if (!handle.isValid) throw TorrentException("Torrent session stopped before metadata was received.")
             handle.torrentFile()?.takeIf { it.isValid }?.let { return it }
             runCatching {
                 val status = handle.status()
@@ -218,7 +218,7 @@ object TorrentDownloadEngine {
             }
             delay(250L)
         }
-        throw TorrentStreamException("Timed out while fetching torrent metadata. Check that the torrent has active peers.")
+        throw TorrentException("Timed out while fetching torrent metadata. Check that the torrent has active peers.")
     }
 
     private fun isMetadataUri(source: String): Boolean =
@@ -228,29 +228,29 @@ object TorrentDownloadEngine {
         val uri = Uri.parse(source)
         val input: InputStream = when (uri.scheme?.lowercase()) {
             "content" -> app.contentResolver.openInputStream(uri)
-                ?: throw TorrentStreamException("Couldn't open the selected torrent metadata.")
-            "file" -> FileInputStream(File(uri.path ?: throw TorrentStreamException("Torrent metadata path is invalid.")))
+                ?: throw TorrentException("Couldn't open the selected torrent metadata.")
+            "file" -> FileInputStream(File(uri.path ?: throw TorrentException("Torrent metadata path is invalid.")))
             "http", "https" -> return readRemote(source)
-            else -> throw TorrentStreamException("Only magnet links and content, file, HTTP or HTTPS torrent metadata are supported.")
+            else -> throw TorrentException("Only magnet links and content, file, HTTP or HTTPS torrent metadata are supported.")
         }
         return input.use { readBounded(it) }
     }
 
     private fun readRemote(source: String): ByteArray {
         val request = runCatching { Request.Builder().url(source).get().build() }.getOrElse {
-            throw TorrentStreamException("Torrent metadata URL is invalid.")
+            throw TorrentException("Torrent metadata URL is invalid.")
         }
         return try {
             http.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw TorrentStreamException("Couldn't download torrent metadata (HTTP ${response.code}).")
-                val body = response.body ?: throw TorrentStreamException("Couldn't download torrent metadata.")
-                if (body.contentLength() > MAX_METADATA_BYTES) throw TorrentStreamException("Torrent metadata is too large.")
+                if (!response.isSuccessful) throw TorrentException("Couldn't download torrent metadata (HTTP ${response.code}).")
+                val body = response.body ?: throw TorrentException("Couldn't download torrent metadata.")
+                if (body.contentLength() > MAX_METADATA_BYTES) throw TorrentException("Torrent metadata is too large.")
                 body.byteStream().use { readBounded(it) }
             }
-        } catch (error: TorrentStreamException) {
+        } catch (error: TorrentException) {
             throw error
         } catch (error: IOException) {
-            throw TorrentStreamException("Couldn't download torrent metadata.", error)
+            throw TorrentException("Couldn't download torrent metadata.", error)
         }
     }
 
@@ -262,10 +262,10 @@ object TorrentDownloadEngine {
             val read = input.read(buffer)
             if (read < 0) break
             total += read
-            if (total > MAX_METADATA_BYTES) throw TorrentStreamException("Torrent metadata is too large.")
+            if (total > MAX_METADATA_BYTES) throw TorrentException("Torrent metadata is too large.")
             output.write(buffer, 0, read)
         }
-        if (total == 0L) throw TorrentStreamException("Torrent metadata is empty.")
+        if (total == 0L) throw TorrentException("Torrent metadata is empty.")
         return output.toByteArray()
     }
 }

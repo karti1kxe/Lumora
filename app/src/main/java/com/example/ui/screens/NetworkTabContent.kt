@@ -73,7 +73,6 @@ import com.example.ui.theme.LightGlassBorder
 import com.example.ui.theme.LightGlassSurface
 import com.example.ui.theme.LightTextPrimary
 import com.example.ui.theme.LightTextSecondary
-import com.example.torrent.TorrentPickerMode
 import com.example.torrent.TorrentPickerState
 import com.example.util.DownloadManager
 import com.example.util.NetworkStreamResolver
@@ -151,9 +150,10 @@ fun NetworkTabContent(
             return
         }
         focusManager.clearFocus()
-        // magnet / info hash / .torrent link: the torrent file picker (metadata first, then the chosen file plays)
+        // magnet / info hash / .torrent link: torrents are never played, the picker only downloads the chosen file
         if (com.example.torrent.isTorrentSource(normalized)) {
-            TorrentPickerState.open(normalized, TorrentPickerMode.PLAY)
+            Toast.makeText(context, "Torrents can only be downloaded, not played", Toast.LENGTH_SHORT).show()
+            TorrentPickerState.open(normalized)
             return
         }
         resolvingLabel = "Loading link…"
@@ -240,7 +240,7 @@ fun NetworkTabContent(
         focusManager.clearFocus()
         // a torrent has no quality list: the picker chooses the file, which is then downloaded
         if (com.example.torrent.isTorrentSource(entry.url)) {
-            TorrentPickerState.open(entry.url, TorrentPickerMode.DOWNLOAD)
+            TorrentPickerState.open(entry.url)
             onOpenDownloads()
             return
         }

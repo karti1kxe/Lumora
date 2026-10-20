@@ -74,6 +74,11 @@ Lumora/ (repo root)
                                    # about Lumora. Add real instrumented UI tests here if you write any.
 ```
 
+**Size rule:** big open-source files are NOT kept in the repo; `.github/workflows/build-apk.yml` downloads them on
+every build (and `.gitignore` keeps them out): `GoNotoCurrent-Regular.ttf`, `python313.zip` + `cacert.pem` (yt-dlp), and the
+QuickJS-NG v0.16.2 C sources into `app/src/main/cpp/third_party/quickjs/` (CMake skips `libqjs.so` with a warning when
+they are missing, e.g. a build outside CI).
+
 **Important:** `GoNotoCurrent-Regular.ttf` (the multi-script subtitle fallback
 font referenced by `player/SubtitleFontManager.kt`) is **intentionally not in
 this zip/repo**. It's a large third-party font, so the CI workflow downloads
@@ -89,7 +94,7 @@ bundled subtitle font" step in `build-apk.yml`). Its absence here is not a bug
 app/src/main/
 ├── AndroidManifest.xml     # permissions, MainActivity + all intent-filters, AudioNotificationReceiver,
 │                           # AudioPlaybackService (foreground media playback), FileProvider (share feature)
-├── assets/fonts/LTWave-Bold.otf     # the app's UI display font (see ui/theme/Type.kt) — ships in the APK
+├── assets/fonts/Lumora.ttf          # the app's UI display font (see ui/theme/Type.kt) — ships in the APK
 ├── java/com/example/
 │   ├── MainActivity.kt              # entry point: permissions, PiP, intent handling, HOME↔PLAYER nav
 │   ├── ai/                          # (5 files) optional AI features: subtitle translation via a
@@ -106,7 +111,7 @@ app/src/main/
 │   │   ├── state/                   # (3 files) AppConfig (settings/strings by language), PlayerSettings,
 │   │   │                            #   PlayerLayoutModels (customizable on-screen control layout)
 │   │   └── theme/                   # (3 files) Color.kt, Theme.kt, Type.kt — Compose Material theme,
-│   │                                #   built from the project's OWN palette + LTWave-Bold custom font.
+│   │                                #   built from the project's OWN palette + Lumora.ttf custom font.
 │   │                                #   Never swap in Material's default colors/typography — see Section 7.
 │   └── util/                        # (28 files) file IO, caching, playback/watch history, metadata
 │                                     #   extraction, private vault, playlists, block-lists, MKV muxing
@@ -118,7 +123,7 @@ app/src/main/
 │   │                        # RULE: before adding a new icon here, grep the codebase for its filename
 │   │                        # stem — if you're about to add one that duplicates an existing lumora_*
 │   │                        # icon's shape, reuse the existing one instead of creating a near-duplicate.
-│   ├── font/ltwave_bold.otf # Compose `Font(R.font.ltwave_bold)` reference to assets/fonts/LTWave-Bold.otf
+│   ├── font/lumora.ttf      # Compose `Font(R.font.lumora)` reference (same file as assets/fonts/Lumora.ttf)
 │   ├── mipmap-anydpi-v26/   # adaptive launcher icon XML (references the 3 ic_launcher_* drawable layers)
 │   ├── values/
 │   │   ├── strings.xml      # ONLY app_name lives here — all other UI text is hardcoded per-language
@@ -204,7 +209,7 @@ transcode. Equally load-bearing — do not remove.
 This app has its own design language: **liquid-glass panels
 (`ui/components/LiquidGlassComponents.kt`), its own color palette
 (`ui/theme/Color.kt`/`Theme.kt`), and its own custom display font
-(LTWave-Bold via `ui/theme/Type.kt`)**. All in-app text for every supported
+(Lumora.ttf via `ui/theme/Type.kt`)**. All in-app text for every supported
 language lives in `ui/state/AppConfig.kt` (not `strings.xml` — that file only
 holds the Android app label).
 
@@ -299,3 +304,13 @@ NewPipeExtractor has no "Posts" tab, so Posts shows an empty-state message.
 - A title's episodes come from `load()` (one season = one quality option, anime Dubbed/Subbed = audio); `loadLinks()` gives servers + subtitles.
   Not supported yet: separate audio tracks, `getVideoInterceptor`, extension settings screens.
 - R8 keep rules for the library and its dependencies are at the end of `app/proguard-rules.pro`.
+
+## 13. Torrents are DOWNLOAD ONLY (no playback)
+
+- A magnet link / info hash / .torrent (Network tab, or opened from another app) opens the file picker
+  (`ui/components/TorrentPickerSheet.kt`); the chosen file goes to `DownloadManager.enqueueTorrent` and is fetched by
+  `torrent/TorrentDownloadEngine.kt` (libtorrent4j). Nothing is ever played or streamed from a torrent.
+- `torrent/TorrentCatalogEngine.kt` only reads the file list (metadata). `TorrentPicker.kt` = picker state + intent parsing,
+  `TorrentModels.kt` = source parsing, `TorrentMetadata.kt` = tracker / web-seed reader.
+- Removed on purpose (do not re-add): streaming engine, loopback proxy (NanoHTTPD dependency), mpv torrent profile,
+  player buffering text / session hooks.

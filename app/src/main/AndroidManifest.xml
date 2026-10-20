@@ -112,8 +112,8 @@
                 <data android:host="spotify.link" />
             </intent-filter>
 
-            <!-- Torrents (ported from mpvRx's TorrentSelectionActivity filters): magnet links, .torrent files and links.
-                 They open the torrent file picker in this activity (see TorrentPickerHost). -->
+            <!-- Torrents: magnet links, .torrent files and links. They open the torrent file picker (download only,
+                 torrents are never played) in this activity (see TorrentPickerHost). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
