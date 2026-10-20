@@ -844,7 +844,12 @@ fun VideoPlayerScreen(
             }
             if (lastLoadedVideoKey != key) return
             if (!ready) {
-                Toast.makeText(context, "yt-dlp is not ready. Open Settings > Network to install it.", Toast.LENGTH_LONG).show()
+                // yt-dlp could not be prepared: the link is still tried as a plain stream (works for direct media links)
+                Toast.makeText(context, "yt-dlp is not ready (Settings > Network). Trying the link directly.", Toast.LENGTH_LONG).show()
+                controller.setOnlineStream(true)
+                controller.setDirectStream(true)
+                controller.loadVideo(stream.videoUrl, startMs)
+                controller.play()
                 return
             }
             com.example.ytdlp.YtdlpManager.setupMpvOptions(context, com.example.ytdlp.YtdlPreferences.get(context))
@@ -871,6 +876,46 @@ fun VideoPlayerScreen(
         controller.setNetworkRequestHeaders(stream.headers)
         controller.loadVideo(stream.videoUrl, startMs)
         controller.play()
+    }
+
+    /**
+     * Torrent item (ported from mpvRx PlayerActivity.startMediaLoad): the engine downloads the first pieces of the chosen
+     * file, serves it on a loopback byte-range URL and mpv plays that URL while the rest keeps downloading.
+     */
+    suspend fun startTorrentPlayback(item: VideoItem, startMs: Long, key: String) {
+        val source = item.path
+        val fileIndex = item.torrentFileIndex
+        if (fileIndex < 0) {
+            // opened without a chosen file (history / recent link): the picker chooses it, then plays it (mpvRx:
+            // redirectUnselectedTorrentToPicker)
+            com.example.torrent.TorrentPickerState.open(source, com.example.torrent.TorrentPickerMode.PLAY)
+            onBack()
+            return
+        }
+        controller.setOnlineStream(true)
+        controller.setTorrentStream(true)
+        com.example.torrent.TorrentStreaming.markPlayerOwnsSession()
+        try {
+            val result = com.example.torrent.TorrentStreaming.engine(context).startStream(
+                com.example.torrent.TorrentStreamRequest(
+                    source = source,
+                    fileIndex = fileIndex,
+                    preparationId = com.example.torrent.TorrentStreaming.takePreparation(source, fileIndex)
+                )
+            )
+            if (lastLoadedVideoKey != key) return
+            // mpvRx behaviour: buffer first (the text under the loading animation shows speed | peers | progress of
+            // that start buffer), then play; the engine keeps downloading the rest in the background while it plays.
+            com.example.torrent.TorrentStreaming.engine(context).awaitStartupBuffer(150_000L)
+            if (lastLoadedVideoKey != key) return
+            controller.loadVideo(result.localUrl, startMs)
+            controller.play()
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (e: com.example.torrent.TorrentStreamException) {
+            Toast.makeText(context, e.message ?: "Could not start this torrent.", Toast.LENGTH_LONG).show()
+            onBack()
+        }
     }
 
     val onStartTranslate: (Int) -> Unit = { sourceTrackId ->
@@ -2025,7 +2070,8 @@ fun VideoPlayerScreen(
         }
 
         // 7. Load into MPV engine & initiate playback
-        if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || path.startsWith("http://") || path.startsWith("https://"))) {
+        if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || path.startsWith("http://") || path.startsWith("https://") ||
+                (targetVideo.isNetworkStream && com.example.torrent.isTorrentSource(path)))) {
             val key = "${targetVideo.id}_${path}_$validIndex"
             lastLoadedVideoKey = key
             // A subtitle choice the user made for THIS video must not be overridden (or flashed
@@ -2047,11 +2093,18 @@ fun VideoPlayerScreen(
             coroutineScope.launch {
                 if (firstLoad) kotlinx.coroutines.delay(entryDelayMs)
                 if (lastLoadedVideoKey != key) return@launch
+                // mpvRx: a non-torrent item ends the torrent session of the previous one
+                if (!(targetVideo.isNetworkStream && com.example.torrent.isTorrentSource(path))) {
+                    com.example.torrent.TorrentStreaming.stopPlayback()
+                }
                 if (targetVideo.isDirectStream) {
                     // Imported M3U / IPTV stream: the real stream URL goes straight into the existing mpv player
                     // (with the stream's own User-Agent / headers); no YouTube resolving.
                     onlinePlayback = null
                     openDirectStream(path, initialPos, key)
+                } else if (targetVideo.isNetworkStream && com.example.torrent.isTorrentSource(path)) {
+                    onlinePlayback = null
+                    startTorrentPlayback(targetVideo, initialPos, key)
                 } else if (targetVideo.isNetworkStream) {
                     onlinePlayback = null
                     startNetworkPlayback(path, initialPos, key)
@@ -2409,10 +2462,15 @@ fun VideoPlayerScreen(
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             persistPlaybackPosition()
             controller.release()
+            // player closed: torrent session and its temporary data are cleaned (no-op when no torrent was played)
+            com.example.torrent.TorrentStreaming.stopPlayback()
         }
     }
 
     val isBuffering by controller.isBuffering.collectAsState()
+    val isTorrentVideo = currentVideo?.let { it.isNetworkStream && com.example.torrent.isTorrentSource(it.path) } == true
+    val torrentState by (if (isTorrentVideo) com.example.torrent.TorrentStreaming.engine(context).state
+        else com.example.torrent.TorrentStreaming.idleState).collectAsState()
     val bufferedPositionMs by controller.bufferedPositionMs.collectAsState()
 
     /** Media plugin quality menu: opens the same movie / episode in another quality of that website, from the same second. */
@@ -2985,7 +3043,13 @@ fun VideoPlayerScreen(
                     if (controller.onlineStreamMode && currentPositionMs <= 200L) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "Connecting to stream…",
+                            // torrent: the engine's own phase / "speed | peers | progress" (mpvRx PlayerControls buffering text)
+                            text = when (val ts = torrentState) {
+                                is com.example.torrent.TorrentStreamingState.Connecting -> ts.phase
+                                is com.example.torrent.TorrentStreamingState.Streaming ->
+                                    "${com.example.torrent.formatTorrentSpeed(ts.downloadSpeed)} | ${ts.peers} peers | ${(ts.bufferProgress * 100).toInt()}%"
+                                else -> if (isTorrentVideo) "Starting Torrent Engine..." else "Connecting to stream…"
+                            },
                             color = Color.White.copy(alpha = 0.85f),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
@@ -3906,6 +3970,8 @@ fun getPlayableFilePath(context: Context, uri: Uri?, fallbackPath: String? = nul
         if (!fallbackPath.isNullOrBlank() && fallbackPath.startsWith(OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX)) {
             return OnlineVideoService.toWatchUrl(fallbackPath)
         }
+        // a torrent (magnet / info hash / .torrent link) is resolved by the torrent engine, never turned into a file path
+        if (!fallbackPath.isNullOrBlank() && com.example.torrent.isTorrentSource(fallbackPath)) return fallbackPath
         if (!fallbackPath.isNullOrBlank()) {
             if (fallbackPath.startsWith("/") || fallbackPath.startsWith("fd://") || fallbackPath.startsWith("http://") || fallbackPath.startsWith("https://")) {
                 return fallbackPath

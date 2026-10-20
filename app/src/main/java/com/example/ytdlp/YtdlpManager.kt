@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Ported from mpvRx (https://github.com/gyrolet/mpvRx), AGPL-3.0-or-later.
+ * Ported from mpvRx (https://github.com/Riteshp2001/mpvRx), AGPL-3.0-or-later.
  * Adapted for Lumora (package com.example). This program is free software: you can
  * redistribute it and/or modify it under the terms of the GNU Affero General Public
  * License as published by the Free Software Foundation, either version 3 of the License, or
@@ -16,6 +16,7 @@ import android.system.Os
 import android.util.Log
 import com.example.BuildConfig
 import com.example.util.NetworkSettings
+import com.example.util.TlsCaBundle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -82,7 +83,7 @@ object YtdlpManager {
   // Lua patterns (ytdl_hook `exclude` syntax, `|`-separated) for direct media/manifest
   // paths. The prefix prevents an extension in a query parameter from bypassing yt-dlp;
   // the two suffixes cover plain and tokenized URLs. Loopback hosts are excluded outright:
-  // every SMB/FTP/SFTP/WebDAV stream is served by the app's own local proxy and
+  // every SMB/FTP/SFTP/WebDAV/torrent stream is served by the app's own local proxy and
   // must never be routed through yt-dlp, extension or not.
   private val DIRECT_MEDIA_EXCLUDE =
     (
@@ -270,7 +271,6 @@ object YtdlpManager {
     context: Context,
     source: String,
     preferences: YtdlPreferences,
-    headers: Map<String, String> = emptyMap(),
   ): Result<String> =
     withContext(Dispatchers.IO) {
       try {
@@ -292,22 +292,9 @@ object YtdlpManager {
               add("--user-agent")
               add(it)
             }
-            if (preferences.customUserAgent.get().isBlank()) {
-              headers.entries.firstOrNull { it.key.equals("User-Agent", true) && it.value.isNotBlank() }?.let {
-                add("--user-agent")
-                add(it.value)
-              }
-            }
-            (preferences.referer.get().takeIf(String::isNotBlank)
-              ?: headers.entries.firstOrNull { it.key.equals("Referer", true) && it.value.isNotBlank() }?.value)?.let {
+            preferences.referer.get().takeIf(String::isNotBlank)?.let {
               add("--referer")
               add(it)
-            }
-            for ((k, v) in headers) {
-              if (k.isBlank() || v.isBlank() || k.equals("User-Agent", true) || k.equals("Referer", true) || k.equals("Referrer", true)) continue
-              if (k.lowercase() in setOf("host", "range", "accept-encoding", "content-length", "connection")) continue
-              add("--add-header")
-              add("$k:$v")
             }
             preferences.proxy.get().takeIf(String::isNotBlank)?.let {
               add("--proxy")
@@ -325,10 +312,6 @@ object YtdlpManager {
             File(context.applicationInfo.nativeLibraryDir, "libqjs.so").takeIf(File::isFile)?.let {
               add("--js-runtimes")
               add("quickjs:${it.absolutePath}")
-              // same as the downloader: without the solver script the quality list only holds the reduced set that
-              // the real download never sees (HLS renditions with a made-up size)
-              add("--remote-components")
-              add("ejs:github")
             }
             add("--")
             add(source)
@@ -486,8 +469,12 @@ object YtdlpManager {
       copied = copyAssetFile(context, "ytdl/$name", File(ytdlDir, name), onLog) && copied
     }
 
-    // cacert.pem goes to filesDir/
-    copied = copyAssetFile(context, "cacert.pem", File(context.filesDir, "cacert.pem"), onLog) && copied
+    // cacert.pem (filesDir/): Lumora already builds it from the phone's own trust store (TlsCaBundle), which is
+    // what yt-dlp's TLS and mpv's tls-ca-file read.
+    if (TlsCaBundle.path(context) == null) {
+      onLog("cacert.pem: could not build the CA bundle\n")
+      copied = false
+    }
 
     copyAssetFile(context, "ytdl/wrapper", File(ytdlDir, "wrapper"), onLog)
     // Set executable permission on wrapper (just in case it's used)
@@ -694,35 +681,12 @@ object YtdlpManager {
       options["exclude"] == DIRECT_MEDIA_EXCLUDE
   }
 
-  /**
-   * The native pieces yt-dlp runs on: libytdl.so (the bridge, built from src/main/cpp) loads libpython.so at run time. They
-   * are packaged per ABI by Gradle (src/ytdlp/jniLibs/<abi>/). When one is missing from the APK the process dies with
-   * "Could not load libpython.so: dlopen failed" — this check reports the real cause (and which file) BEFORE starting it.
-   */
-  private fun missingNativeRuntime(context: Context): List<String> {
-    val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
-    return listOf("libytdl.so", "libpython.so", "libqjs.so").filter { !File(nativeLibDir, it).isFile }
-  }
-
-  private fun nativeRuntimeReady(context: Context, onLog: (String) -> Unit): Boolean {
-    val missing = missingNativeRuntime(context)
-    if (missing.isEmpty()) return true
-    val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
-    onLog(
-      "yt-dlp runtime is incomplete: ${missing.joinToString()} missing from this APK ($abi).\n" +
-        "Rebuild the app so that app/src/ytdlp/jniLibs/$abi/libpython.so is packaged (see the build-apk.yml step " +
-        "\"Fetch libpython.so\").\n",
-    )
-    return false
-  }
-
   suspend fun runInstall(
     context: Context,
     onLog: (String) -> Unit,
   ): Boolean =
     withContext(Dispatchers.IO) {
       installMutex.withLock {
-        if (!nativeRuntimeReady(context, onLog)) return@withLock false
         if (!prepareRuntimeAssets(context, onLog)) return@withLock false
         installYtdlp(context, onLog)
       }
@@ -734,7 +698,6 @@ object YtdlpManager {
   ): Boolean =
     withContext(Dispatchers.IO) {
       installMutex.withLock {
-        if (!nativeRuntimeReady(context, onLog)) return@withLock false
         if (!prepareRuntimeAssets(context, onLog) || !isInstalled(context)) {
           _installationInfo.value = readInstallationInfo(context)
           return@withLock false
@@ -760,7 +723,6 @@ object YtdlpManager {
   ): Boolean =
     withContext(Dispatchers.IO) {
       installMutex.withLock {
-        if (!nativeRuntimeReady(context, onLog)) return@withLock false
         if (!prepareRuntimeAssets(context, onLog) || !isInstalled(context)) {
           _installationInfo.value = readInstallationInfo(context)
           return@withLock false

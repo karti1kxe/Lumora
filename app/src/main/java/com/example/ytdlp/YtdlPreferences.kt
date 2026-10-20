@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Ported from mpvRx (https://github.com/gyrolet/mpvRx), AGPL-3.0-or-later.
+ * Ported from mpvRx (https://github.com/Riteshp2001/mpvRx), AGPL-3.0-or-later.
  * Adapted for Lumora: plain SharedPreferences instead of mpvRx's preference store.
  */
 

@@ -112,8 +112,8 @@
                 <data android:host="spotify.link" />
             </intent-filter>
 
-            <!-- Torrents: magnet links, .torrent files and links. They open the torrent file picker (download only,
-                 torrents are never played) in this activity (see TorrentPickerHost). -->
+            <!-- Torrents (ported from mpvRx's TorrentSelectionActivity filters): magnet links, .torrent files and links.
+                 They open the torrent file picker in this activity (see TorrentPickerHost). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -178,6 +178,12 @@
             android:name=".util.DownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Torrent downloads: libtorrent runs in its own process so a native crash cannot take the app down -->
+        <service
+            android:name=".torrent.TorrentDownloadService"
+            android:exported="false"
+            android:process=":torrent" />
 
         <!-- Foreground Service for Background Audio Playback & MediaSession -->
         <service

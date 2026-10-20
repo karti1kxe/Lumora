@@ -1,8 +1,7 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Metadata-only part of mpvRx's torrent engine (AGPL-3.0). It resolves a magnet / .torrent source into a file list for
- * the download picker. There is NO playback / streaming here: the chosen file is fetched by [TorrentDownloadEngine].
+ * Ported from mpvRx (app.gyrolet.mpvrx.domain.torrent), AGPL-3.0. Lumora package: com.example.torrent.
  */
 
 package com.example.torrent
@@ -13,20 +12,22 @@ import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.libtorrent4j.AlertListener
 import org.libtorrent4j.AnnounceEntry
+import org.libtorrent4j.AlertListener
 import org.libtorrent4j.Priority
 import org.libtorrent4j.SessionHandle
 import org.libtorrent4j.SessionManager
@@ -50,26 +51,17 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
-/** Process wide holder of the metadata engine (Lumora has no DI container). */
-object TorrentCatalogs {
-  @Volatile private var instance: TorrentCatalogEngine? = null
-
-  fun engine(context: Context): TorrentCatalogEngine =
-    instance ?: synchronized(this) {
-      instance ?: TorrentCatalogEngine(context.applicationContext).also { instance = it }
-    }
-}
-
-class TorrentCatalogEngine(
+class TorrentStreamingEngine(
   context: Context,
 ) {
   companion object {
-    private const val TAG = "TorrentCatalogEngine"
+    private const val TAG = "TorrentStreamingEngine"
     private const val METADATA_TIMEOUT_MS = 90_000L
     private const val MAX_METADATA_BYTES = 16L * 1024L * 1024L
     private const val MAX_TORRENT_FILES = 100_000
+    private const val STATUS_INTERVAL_MS = 500L
+    private const val STARTUP_HEAD_BYTES = 6 * 1024 * 1024
 
-    /** Only these file types are offered for download (same list as before). */
     private val playableMimeTypes =
       mapOf(
         "3g2" to "video/3gpp2",
@@ -127,9 +119,18 @@ class TorrentCatalogEngine(
       )
   }
 
+  private data class ActiveStream(
+    val session: SessionManager,
+    val handle: TorrentHandle,
+    val proxy: TorrentProxyServer,
+    val cacheDir: File,
+    val statsJob: Job,
+  )
+
   private data class PreparedTorrent(
     val handle: TorrentHandle,
     val info: TorrentInfo,
+    val requestedFileIndex: Int?,
     val durableSource: String,
     val infoHash: String,
   )
@@ -138,7 +139,9 @@ class TorrentCatalogEngine(
     val id: String,
     val session: SessionManager,
     val handle: TorrentHandle,
+    val info: TorrentInfo,
     val cacheDir: File,
+    val requestedFileIndex: Int?,
     val durableSource: String,
     val infoHash: String,
     val torrentName: String,
@@ -166,10 +169,11 @@ class TorrentCatalogEngine(
       .callTimeout(45L, TimeUnit.SECONDS)
       .build()
 
-  private val _phase = MutableStateFlow("Starting Torrent Engine...")
+  private val _state = MutableStateFlow<TorrentStreamingState>(TorrentStreamingState.Idle)
+  val state: StateFlow<TorrentStreamingState> = _state.asStateFlow()
 
-  /** Text for the picker while the metadata is being fetched. */
-  val phase: StateFlow<String> = _phase.asStateFlow()
+  @Volatile
+  private var active: ActiveStream? = null
 
   @Volatile
   private var prepared: PreparedSession? = null
@@ -177,45 +181,167 @@ class TorrentCatalogEngine(
   @Volatile
   private var closed = false
 
-  /** Resolves and validates torrent metadata (file list) without downloading any media file. */
+  /**
+   * Resolves and validates torrent metadata without downloading a media file.
+   *
+   * The returned opaque token keeps the prepared native session alive so the selected file can
+   * start immediately in [startStream] without fetching magnet metadata a second time.
+   */
   suspend fun prepareTorrent(source: String): TorrentCatalog =
     withContext(Dispatchers.IO) {
       val startGeneration = generation.incrementAndGet()
       lifecycleMutex.withLock {
-        check(!closed) { "Torrent engine is shut down" }
+        check(!closed) { "Torrent streaming engine is shut down" }
+        cleanupActive()
         cleanupPrepared()
         ensureCurrent(startGeneration)
 
-        val preparedSession = createPreparedSession(source, startGeneration)
+        val preparedSession = createPreparedSession(source, null, startGeneration)
         prepared = preparedSession
+        _state.value = TorrentStreamingState.Idle
         preparedSession.catalog()
       }
     }
 
-  /** Releases the metadata session of the picker (native session and its temporary folder). */
-  fun discardPreparation(preparationId: String) {
-    if (preparationId.isBlank()) return
-    scope.launch {
-      lifecycleMutex.withLock {
-        if (prepared?.id == preparationId) cleanupPrepared()
+  /**
+   * Pieces that must be on disk before the player opens the stream (the start of the file; the index at the end is
+   * requested by mpv through the proxy when it needs it). While they load the buffering text shows THIS progress (0-100 %), exactly the
+   * "buffer first, then play, keep downloading in the background" behaviour of mpvRx.
+   */
+  @Volatile private var startupPieces: IntArray = IntArray(0)
+
+  @Volatile private var startupReady = false
+
+  /** Suspends until the startup pieces are downloaded; false on timeout / stopped session (play is tried anyway). */
+  suspend fun awaitStartupBuffer(timeoutMs: Long): Boolean {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (System.currentTimeMillis() < deadline) {
+      val handle = active?.handle ?: return false
+      if (!handle.isValid) return false
+      val needed = startupPieces
+      if (needed.isEmpty() || needed.all { handle.havePiece(it) }) {
+        startupReady = true
+        return true
       }
+      delay(250L)
     }
+    return false
   }
 
-  fun shutdown() {
-    if (closed) return
-    closed = true
-    val stopGeneration = generation.incrementAndGet()
-    scope.launch {
+  suspend fun startStream(request: TorrentStreamRequest): TorrentStreamResult =
+    withContext(Dispatchers.IO) {
+      val startGeneration = generation.incrementAndGet()
       lifecycleMutex.withLock {
-        if (generation.get() == stopGeneration) cleanupPrepared()
+        check(!closed) { "Torrent streaming engine is shut down" }
+        cleanupActive()
+        ensureCurrent(startGeneration)
+
+        var sessionToClean: PreparedSession? = null
+        var proxy: TorrentProxyServer? = null
+        try {
+          val reusable =
+            request.preparationId
+              ?.let { token -> prepared?.takeIf { it.id == token } }
+          val preparedSession =
+            if (reusable != null) {
+              prepared = null
+              reusable
+            } else {
+              cleanupPrepared()
+              createPreparedSession(request.source, request.fileIndex, startGeneration)
+            }
+          sessionToClean = preparedSession
+          ensureCurrent(startGeneration)
+
+          val selectedIndex = request.fileIndex ?: preparedSession.requestedFileIndex
+          val selected =
+            when {
+              selectedIndex != null ->
+                preparedSession.playableFiles.firstOrNull { it.index == selectedIndex }
+                  ?: throw streamError("The selected torrent file is not playable.")
+              preparedSession.playableFiles.size == 1 -> preparedSession.playableFiles.single()
+              else -> throw streamError("Choose an episode or movie before starting this torrent.")
+            }
+
+          configureStreaming(preparedSession.handle, preparedSession.info, selected)
+          ensureCurrent(startGeneration)
+
+          val storage = preparedSession.info.files()
+          val fileOffset = storage.fileOffset(selected.index)
+          val pieceLength = preparedSession.info.pieceLength()
+          val firstPiece = (fileOffset / pieceLength).toInt()
+          val lastPiece = ((fileOffset + selected.size - 1L) / pieceLength).toInt()
+          val selectedPath = safeCacheFile(preparedSession.cacheDir, selected.path)
+          run {
+            val headPieces = ((STARTUP_HEAD_BYTES + pieceLength - 1) / pieceLength).coerceIn(2, 8)
+            val needed = LinkedHashSet<Int>()
+            for (piece in firstPiece..minOf(lastPiece, firstPiece + headPieces - 1)) needed += piece
+            startupPieces = needed.toIntArray()
+            startupReady = false
+          }
+
+          val startedProxy =
+            TorrentProxyServer(
+              target =
+                TorrentProxyServer.Target(
+                  handle = preparedSession.handle,
+                  file = selectedPath,
+                  fileOffset = fileOffset,
+                  fileSize = selected.size,
+                  pieceLength = pieceLength,
+                  firstPiece = firstPiece,
+                  lastPiece = lastPiece,
+                  mimeType = selected.mimeType,
+                ),
+            ).also { it.start() }
+          proxy = startedProxy
+
+          val result =
+            TorrentStreamResult(
+              localUrl = startedProxy.serverUrl,
+              selectedFile = selected,
+              source = preparedSession.durableSource,
+              infoHash = preparedSession.infoHash,
+              torrentName = preparedSession.torrentName,
+              playableFiles = preparedSession.playableFiles,
+            )
+          val statsJob = startStatsMonitoring(startGeneration, preparedSession.handle, result)
+          active =
+            ActiveStream(
+              preparedSession.session,
+              preparedSession.handle,
+              startedProxy,
+              preparedSession.cacheDir,
+              statsJob,
+            )
+          sessionToClean = null
+          proxy = null
+
+          _state.value = result.toStreamingState()
+          result
+        } catch (cancellation: CancellationException) {
+          proxy?.close()
+          sessionToClean?.let(::cleanupPreparedSession)
+          if (generation.get() == startGeneration) _state.value = TorrentStreamingState.Idle
+          throw cancellation
+        } catch (error: Throwable) {
+          proxy?.close()
+          sessionToClean?.let(::cleanupPreparedSession)
+          val safe = (error as? TorrentStreamException) ?: streamError("Couldn't start torrent streaming.", error)
+          if (error is LinkageError) {
+            Log.e(TAG, "Torrent native runtime is unavailable", error)
+          } else {
+            Log.e(TAG, "Torrent start failed (${error::class.java.simpleName})")
+          }
+          if (generation.get() == startGeneration) _state.value = TorrentStreamingState.Error(safe.message.orEmpty())
+          throw safe
+        }
       }
-      scope.cancel()
     }
-  }
 
   private suspend fun createPreparedSession(
     sourceValue: String,
+    requestedFileIndex: Int?,
     startGeneration: Long,
   ): PreparedSession {
     val source = sourceValue.trim()
@@ -226,15 +352,15 @@ class TorrentCatalogEngine(
     val normalized = normalizeTorrentSource(source)
       ?: if (isMetadataUri(source)) source else throw streamError("Unsupported torrent source.")
 
-    val cacheDir = File(appContext.cacheDir, "torrent_catalog/${UUID.randomUUID()}")
+    val cacheDir = File(appContext.cacheDir, "torrent_streaming/${UUID.randomUUID()}")
     if (!cacheDir.mkdirs() && !cacheDir.isDirectory) {
-      throw streamError("Couldn't create the torrent cache.")
+      throw streamError("Couldn't create the torrent streaming cache.")
     }
 
     var session: SessionManager? = null
     var handle: TorrentHandle? = null
     try {
-      _phase.value = "Starting Torrent Engine..."
+      _state.value = TorrentStreamingState.Connecting("Starting Torrent Engine...")
       val startedSession = SessionManager()
       session = startedSession
       val settings =
@@ -243,14 +369,14 @@ class TorrentCatalogEngine(
           setEnableDht(true)
           setEnableLsd(true)
         }
-      startedSession.start(SessionParams(settings))
+      synchronized(TorrentStreaming.nativeLock) { startedSession.start(SessionParams(settings)) }
       ensureCurrent(startGeneration)
 
       val torrent =
         if (normalized.startsWith("magnet:?", ignoreCase = true)) {
-          prepareMagnet(startedSession, cacheDir, normalized, startGeneration)
+          prepareMagnet(startedSession, cacheDir, normalized, requestedFileIndex, startGeneration)
         } else {
-          prepareMetadata(startedSession, cacheDir, normalized, startGeneration)
+          prepareMetadata(startedSession, cacheDir, normalized, requestedFileIndex, startGeneration)
         }
       handle = torrent.handle
 
@@ -268,7 +394,9 @@ class TorrentCatalogEngine(
         id = UUID.randomUUID().toString(),
         session = startedSession,
         handle = torrent.handle,
+        info = torrent.info,
         cacheDir = cacheDir,
+        requestedFileIndex = torrent.requestedFileIndex,
         durableSource = torrent.durableSource,
         infoHash = torrent.infoHash,
         torrentName = torrentName,
@@ -276,16 +404,83 @@ class TorrentCatalogEngine(
       )
     } catch (cancellation: CancellationException) {
       cleanupAfterPreparationFailure(session, handle, cacheDir)
+      if (generation.get() == startGeneration) _state.value = TorrentStreamingState.Idle
       throw cancellation
     } catch (error: Throwable) {
       cleanupAfterPreparationFailure(session, handle, cacheDir)
-      val safe = (error as? TorrentException) ?: streamError("Couldn't read torrent metadata.", error)
+      val safe = (error as? TorrentStreamException) ?: streamError("Couldn't read torrent metadata.", error)
       if (error is LinkageError) {
         Log.e(TAG, "Torrent native runtime is unavailable", error)
       } else {
         Log.e(TAG, "Torrent preparation failed (${error::class.java.simpleName})")
       }
+      if (generation.get() == startGeneration) _state.value = TorrentStreamingState.Error(safe.message.orEmpty())
       throw safe
+    }
+  }
+
+  /** true when the active stream has its head and tail pieces (see [TorrentProxyServer.hasInitialData]). */
+  fun initialBufferReady(): Boolean = startupReady
+
+  /** Suspends until every queued start / stop / discard of this engine has finished its native work. */
+  suspend fun awaitIdle() {
+    lifecycleMutex.withLock { }
+  }
+
+  /** Same as [discardPreparation], but returns only after the native session is closed. */
+  suspend fun discardPreparationNow(preparationId: String) {
+    if (preparationId.isBlank()) return
+    lifecycleMutex.withLock {
+      if (prepared?.id == preparationId) {
+        cleanupPrepared()
+        _state.value = TorrentStreamingState.Idle
+      }
+    }
+  }
+
+  /** Lifecycle-safe and non-blocking. Native shutdown and cache deletion run on the engine IO scope. */
+  fun stopStream() {
+    val stopGeneration = generation.incrementAndGet()
+    active?.statsJob?.cancel()
+    _state.value = TorrentStreamingState.Idle
+    scope.launch {
+      lifecycleMutex.withLock {
+        if (generation.get() == stopGeneration) {
+          cleanupActive()
+          cleanupPrepared()
+          _state.value = TorrentStreamingState.Idle
+        }
+      }
+    }
+  }
+
+  /** Releases a picker preparation unless it has already been consumed by playback. */
+  fun discardPreparation(preparationId: String) {
+    if (preparationId.isBlank()) return
+    scope.launch {
+      lifecycleMutex.withLock {
+        if (prepared?.id == preparationId) {
+          cleanupPrepared()
+          _state.value = TorrentStreamingState.Idle
+        }
+      }
+    }
+  }
+
+  fun shutdown() {
+    if (closed) return
+    closed = true
+    val stopGeneration = generation.incrementAndGet()
+    active?.statsJob?.cancel()
+    _state.value = TorrentStreamingState.Idle
+    scope.launch {
+      lifecycleMutex.withLock {
+        if (generation.get() == stopGeneration) {
+          cleanupActive()
+          cleanupPrepared()
+        }
+      }
+      scope.cancel()
     }
   }
 
@@ -293,13 +488,14 @@ class TorrentCatalogEngine(
     session: SessionManager,
     cacheDir: File,
     source: String,
+    explicitFileIndex: Int?,
     startGeneration: Long,
   ): PreparedTorrent {
     val parsed = parseMagnet(source) ?: throw streamError("Magnet link does not contain a supported v1 info hash.")
     val hash = runCatching { Sha1Hash.parseHex(parsed.infoHash) }.getOrNull()
       ?: throw streamError("Magnet link contains an invalid v1 info hash.")
 
-    _phase.value = "Connecting to peers and fetching torrent metadata..."
+    _state.value = TorrentStreamingState.Connecting("Connecting to peers and fetching torrent metadata...")
     return monitorTorrentErrors(session) { failure ->
       // Upload mode still permits metadata exchange but prevents unselected payload files from
       // racing onto disk before their paths and priorities have been validated.
@@ -319,6 +515,7 @@ class TorrentCatalogEngine(
       PreparedTorrent(
         handle = handle,
         info = info,
+        requestedFileIndex = explicitFileIndex ?: parsed.fileIdx,
         durableSource = magnetWithoutFileSelection(parsed.cleanMagnetUri),
         infoHash = parsed.infoHash.lowercase(),
       )
@@ -329,9 +526,10 @@ class TorrentCatalogEngine(
     session: SessionManager,
     cacheDir: File,
     source: String,
+    requestedFileIndex: Int?,
     startGeneration: Long,
   ): PreparedTorrent {
-    _phase.value = "Reading torrent metadata..."
+    _state.value = TorrentStreamingState.Connecting("Reading torrent metadata...")
     val payload = readMetadata(source)
     val endpoints = runCatching { extractTorrentMetadataEndpoints(payload) }.getOrElse {
       throw streamError("The selected file contains invalid torrent metadata.")
@@ -346,7 +544,7 @@ class TorrentCatalogEngine(
     val priorities = Array(info.files().numFiles()) { Priority.IGNORE }
 
     return monitorTorrentErrors(session) { failure ->
-      session.download(info, cacheDir, null, priorities, null, TorrentFlags.UPLOAD_MODE)
+      session.download(info, cacheDir, null, priorities, null, TorrentFlags.SEQUENTIAL_DOWNLOAD)
       val handle = waitForHandle(session, info.infoHash(), startGeneration, failure)
       endpoints.trackers.forEach { tracker -> handle.addTracker(AnnounceEntry(tracker)) }
       endpoints.webSeeds.forEach(handle::addUrlSeed)
@@ -361,15 +559,15 @@ class TorrentCatalogEngine(
           displayName = safeDisplayName(info.name(), hashHex),
           webSeeds = endpoints.webSeeds,
         )
-      PreparedTorrent(handle, info, durableSource, hashHex)
+      PreparedTorrent(handle, info, requestedFileIndex, durableSource, hashHex)
     }
   }
 
   private suspend fun <T> monitorTorrentErrors(
     session: SessionManager,
-    block: suspend (AtomicReference<TorrentException?>) -> T,
+    block: suspend (AtomicReference<TorrentStreamException?>) -> T,
   ): T {
-    val failure = AtomicReference<TorrentException?>()
+    val failure = AtomicReference<TorrentStreamException?>()
     val listener =
       object : AlertListener {
         override fun types(): IntArray =
@@ -401,7 +599,7 @@ class TorrentCatalogEngine(
     session: SessionManager,
     hash: Sha1Hash,
     startGeneration: Long,
-    failure: AtomicReference<TorrentException?>,
+    failure: AtomicReference<TorrentStreamException?>,
   ): TorrentHandle {
     val deadline = System.currentTimeMillis() + METADATA_TIMEOUT_MS
     while (System.currentTimeMillis() < deadline) {
@@ -416,7 +614,7 @@ class TorrentCatalogEngine(
   private suspend fun waitForMetadata(
     handle: TorrentHandle,
     startGeneration: Long,
-    failure: AtomicReference<TorrentException?>,
+    failure: AtomicReference<TorrentStreamException?>,
   ): TorrentInfo {
     val deadline = System.currentTimeMillis() + METADATA_TIMEOUT_MS
     while (System.currentTimeMillis() < deadline) {
@@ -426,8 +624,14 @@ class TorrentCatalogEngine(
       handle.torrentFile()?.takeIf { it.isValid }?.let { return it }
       runCatching {
         val status = handle.status()
-        _phase.value =
-          if (status.numPeers() > 0) "Downloading torrent metadata..." else "Searching for torrent peers..."
+        _state.value =
+          TorrentStreamingState.Connecting(
+            phase = if (status.numPeers() > 0) "Downloading torrent metadata..." else "Searching for torrent peers...",
+            downloadSpeed = status.downloadPayloadRate().toLong(),
+            uploadSpeed = status.uploadPayloadRate().toLong(),
+            peers = status.numPeers(),
+            seeds = status.numSeeds(),
+          )
       }
       delay(250L)
     }
@@ -472,6 +676,75 @@ class TorrentCatalogEngine(
     }
   }
 
+  private fun configureStreaming(
+    handle: TorrentHandle,
+    info: TorrentInfo,
+    selected: TorrentFileItem,
+  ) {
+    handle.setFlags(TorrentFlags.SEQUENTIAL_DOWNLOAD)
+    val storage = info.files()
+    val priorities = Array(storage.numFiles()) { Priority.IGNORE }
+    priorities[selected.index] = Priority.TOP_PRIORITY
+    handle.prioritizeFiles(priorities)
+
+    val pieceLength = info.pieceLength().toLong()
+    val fileOffset = storage.fileOffset(selected.index)
+    val firstPiece = (fileOffset / pieceLength).toInt()
+    val lastPiece = ((fileOffset + selected.size - 1L) / pieceLength).toInt()
+    handle.setSequentialRange(firstPiece, lastPiece)
+
+    val headEnd = (firstPiece + 15).coerceAtMost(lastPiece)
+    for (piece in firstPiece..headEnd) {
+      handle.piecePriority(piece, Priority.TOP_PRIORITY)
+      handle.setPieceDeadline(piece, (piece - firstPiece) * 100)
+    }
+    val tailStart = (lastPiece - 7).coerceAtLeast(firstPiece)
+    for (piece in tailStart..lastPiece) handle.piecePriority(piece, Priority.TOP_PRIORITY)
+    handle.unsetFlags(TorrentFlags.UPLOAD_MODE)
+    handle.resume()
+  }
+
+  private fun startStatsMonitoring(
+    startGeneration: Long,
+    handle: TorrentHandle,
+    result: TorrentStreamResult,
+  ): Job =
+    scope.launch {
+      while (isActive && generation.get() == startGeneration && handle.isValid) {
+        try {
+          val status = handle.status()
+          val downloaded = handle.fileProgress().getOrNull(result.selectedFile.index)?.coerceAtLeast(0L) ?: 0L
+          val needed = startupPieces
+          if (!startupReady && needed.isNotEmpty() && needed.all { handle.havePiece(it) }) startupReady = true
+          val bufferProgress =
+            if (!startupReady && needed.isNotEmpty()) {
+              needed.count { handle.havePiece(it) }.toFloat() / needed.size.toFloat()
+            } else if (result.selectedFile.size > 0L) {
+              (downloaded.toDouble() / result.selectedFile.size.toDouble()).coerceIn(0.0, 1.0).toFloat()
+            } else {
+              0f
+            }
+          _state.value =
+            TorrentStreamingState.Streaming(
+              localUrl = result.localUrl,
+              selectedFileIndex = result.selectedFile.index,
+              fileName = result.selectedFile.name,
+              fileSize = result.selectedFile.size,
+              downloadSpeed = status.downloadPayloadRate().toLong(),
+              uploadSpeed = status.uploadPayloadRate().toLong(),
+              peers = status.numPeers(),
+              seeds = status.numSeeds(),
+              bufferProgress = bufferProgress,
+              totalProgress = status.progress().coerceIn(0f, 1f),
+              downloadedBytes = downloaded,
+            )
+        } catch (error: Exception) {
+          Log.w(TAG, "Unable to read torrent status (${error::class.java.simpleName})")
+        }
+        delay(STATUS_INTERVAL_MS)
+      }
+    }
+
   private fun readMetadata(source: String): ByteArray {
     val uri = Uri.parse(source)
     val input =
@@ -499,7 +772,7 @@ class TorrentCatalogEngine(
         if (body.contentLength() > MAX_METADATA_BYTES) throw streamError("Torrent metadata is too large.")
         body.byteStream().use { readBounded(it) }
       }
-    } catch (error: TorrentException) {
+    } catch (error: TorrentStreamException) {
       throw error
     } catch (error: IOException) {
       throw streamError("Couldn't download torrent metadata.", error)
@@ -547,9 +820,21 @@ class TorrentCatalogEngine(
     return candidate
   }
 
+  private fun cleanupActive() {
+    val stream = active ?: return
+    active = null
+    stream.statsJob.cancel()
+    stream.proxy.close()
+    cleanup(stream.session, stream.handle, stream.cacheDir)
+  }
+
   private fun cleanupPrepared() {
     val preparation = prepared ?: return
     prepared = null
+    cleanupPreparedSession(preparation)
+  }
+
+  private fun cleanupPreparedSession(preparation: PreparedSession) {
     cleanup(preparation.session, preparation.handle, preparation.cacheDir)
   }
 
@@ -561,7 +846,7 @@ class TorrentCatalogEngine(
     if (handle?.isValid == true) {
       runCatching { session.remove(handle, SessionHandle.DELETE_FILES) }
     }
-    runCatching { session.stop() }
+    synchronized(TorrentStreaming.nativeLock) { runCatching { session.stop() } }
     if (cacheDir.exists() && !cacheDir.deleteRecursively()) {
       Log.w(TAG, "Torrent cache cleanup did not remove every file")
     }
@@ -583,8 +868,23 @@ class TorrentCatalogEngine(
   }
 
   private fun ensureCurrent(expected: Long) {
-    if (closed || generation.get() != expected) throw CancellationException("Torrent request superseded")
+    if (closed || generation.get() != expected) throw CancellationException("Torrent stream request superseded")
   }
+
+  private fun TorrentStreamResult.toStreamingState() =
+    TorrentStreamingState.Streaming(
+      localUrl = localUrl,
+      selectedFileIndex = selectedFile.index,
+      fileName = selectedFile.name,
+      fileSize = selectedFile.size,
+      downloadSpeed = 0L,
+      uploadSpeed = 0L,
+      peers = 0,
+      seeds = 0,
+      bufferProgress = 0f,
+      totalProgress = 0f,
+      downloadedBytes = 0L,
+    )
 
   private fun safeDisplayName(
     value: String?,
@@ -603,5 +903,5 @@ class TorrentCatalogEngine(
   private fun streamError(
     message: String,
     cause: Throwable? = null,
-  ) = TorrentException(message, cause)
+  ) = TorrentStreamException(message, cause)
 }

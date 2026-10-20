@@ -379,7 +379,7 @@ object MediaPlayback {
                         async(Dispatchers.IO) {
                             val size = estimateHlsSize(context, v.uri, headers, v.bandwidth)
                             DownloadOption(
-                                stream = s.copy(link = v.uri, type = "m3u8", quality = v.label, alternatives = emptyList()),
+                                stream = s.copy(link = v.uri, type = "m3u8", quality = v.label, subtitles = emptyList(), alternatives = emptyList()),
                                 title = s.server,
                                 detail = listOf(v.label, "HLS", v.bitrateText(), sizeText(size, true) ?: "size unavailable")
                                     .filter { it.isNotBlank() }.joinToString(" · "),
@@ -400,7 +400,7 @@ object MediaPlayback {
         }
         val detail = listOf(quality, format, sizeText(size, estimated) ?: "size unavailable")
             .filter { !it.isNullOrBlank() }.joinToString(" · ")
-        return listOf(DownloadOption(s.copy(alternatives = emptyList()), s.server, detail, quality))
+        return listOf(DownloadOption(s.copy(subtitles = emptyList(), alternatives = emptyList()), s.server, detail, quality))
     }
 
     /** The download list of a movie / episode: every file / quality the website offers, best quality first, with sizes when known. */
@@ -409,9 +409,7 @@ object MediaPlayback {
             .awaitAll()
             .flatten()
             .distinctBy { it.stream.link }
-        val allSubs = streams.flatMap { it.subtitles }.distinctBy { it.uri }
-        all.map { o -> if (o.stream.subtitles.isEmpty() && allSubs.isNotEmpty()) o.copy(stream = o.stream.copy(subtitles = allSubs)) else o }
-            .sortedByDescending { heightOf(it.quality) }
+        all.sortedByDescending { heightOf(it.quality) }
     }
 
     /**
@@ -426,19 +424,17 @@ object MediaPlayback {
             val quality = qualityOf(s)
             return listOf(
                 DownloadOption(
-                    s.copy(alternatives = emptyList()),
+                    s.copy(subtitles = emptyList(), alternatives = emptyList()),
                     s.server,
                     listOf(quality, formatOf(s), note).filter { !it.isNullOrBlank() }.joinToString(" · "),
                     quality
                 )
             )
         }
-        val allSubs = streams.flatMap { it.subtitles }.distinctBy { it.uri }
         val slots = arrayOfNulls<List<DownloadOption>>(ordered.size)
         for ((i, s) in ordered.withIndex()) slots[i] = row(s, "checking size…")
         suspend fun emit() {
             val flat = synchronized(slots) { slots.flatMap { it ?: emptyList() }.distinctBy { it.stream.link } }
-                .map { o -> if (o.stream.subtitles.isEmpty() && allSubs.isNotEmpty()) o.copy(stream = o.stream.copy(subtitles = allSubs)) else o }
             withContext(Dispatchers.Main) { onUpdate(flat) }
         }
         emit()
@@ -527,9 +523,7 @@ object MediaPlayback {
             container = null,
             estimatedBytes = 0L,
             thumbnailUrl = poster.ifBlank { null },
-            headers = stream.headers,
-            // every subtitle track the website lists for this stream is attached to the finished video
-            subtitles = stream.subtitles.distinctBy { it.uri }
+            headers = stream.headers
         )
         return try {
             DownloadManager.enqueueCustom(context, request)

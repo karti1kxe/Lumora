@@ -465,6 +465,13 @@ class MpvPlayerController {
      */
     @Volatile private var webLinkMode: Boolean = false
 
+    /**
+     * Torrent streaming (ported from mpvRx): mpv reads the selected torrent file from the loopback byte-range server of
+     * TorrentProxyServer ("http://127.0.0.1:<port>/stream/<token>"). The proxy only answers once the requested pieces are
+     * downloaded, so the open may legitimately take a long time; the start-up watchdog is relaxed for it and the plain
+     * network fallback (which would drop http_persistent=0) is replaced by the torrent profile itself.
+     */
+    @Volatile private var torrentMode: Boolean = false
     @Volatile private var ytdlpMode: Boolean = false
 
     /** Call BEFORE [loadVideo] for every file. [enabled] = false for local files (clears leftovers of an online video). */
@@ -477,6 +484,7 @@ class MpvPlayerController {
         directStreamMode = false
         providerVodMode = false
         webLinkMode = false
+        torrentMode = false
         ytdlpMode = false
         networkRequestOptions = null
         hlsBitrate = "max"
@@ -496,6 +504,11 @@ class MpvPlayerController {
     /** Call right after [setOnlineStream] (true) and BEFORE [loadVideo] for a web page that mpv's ytdl_hook (yt-dlp) plays. */
     fun setYtdlpStream(enabled: Boolean) {
         ytdlpMode = enabled
+    }
+
+    /** Call right after [setOnlineStream] (true) and BEFORE [loadVideo] with the loopback URL of a torrent stream. */
+    fun setTorrentStream(enabled: Boolean) {
+        torrentMode = enabled
     }
 
     /**
@@ -579,7 +592,8 @@ class MpvPlayerController {
         val waited = now - directStreamLoadStartedAt
         val idle = try { view.mpv.getPropertyBoolean("idle-active") == true } catch (_: Throwable) { false }
         val failedFast = idle && waited > 4000L
-        val timedOut = waited > 60_000L
+        // a torrent open waits for the first pieces of the file, which can take minutes on a slow swarm
+        val timedOut = waited > (if (torrentMode) 240_000L else 60_000L)
         if (!failedFast && !timedOut) return
         val retryPath = currentFilePath
         if (onlineLoadRetries < 1 && !retryPath.isNullOrBlank()) {
@@ -587,7 +601,7 @@ class MpvPlayerController {
             directStreamLoadStartedAt = now
             _isBuffering.value = true
             try {
-                applySafeNetworkFallback(view)
+                if (torrentMode) applyStreamingProfile(view, true) else applySafeNetworkFallback(view)
                 view.mpv.command("loadfile", retryPath, "replace")
                 view.mpv.setPropertyBoolean("pause", false)
             } catch (_: Throwable) {}
@@ -596,7 +610,8 @@ class MpvPlayerController {
         directStreamErrorShown = true
         _isBuffering.value = false
         run {
-            val base = "This link could not be played. The site may have blocked the stream, or the link expired. Try again."
+            val base = if (torrentMode) "This torrent could not be played. It may have no active peers. Try again or pick another file."
+                else "This link could not be played. The site may have blocked the stream, or the link expired. Try again."
             _errorMessage.value = base
             // what the SERVER says to a plain request from the app: 403 / 410 = refused or expired, 200 / 206 = mpv is the problem
             val url = retryPath
@@ -759,7 +774,33 @@ class MpvPlayerController {
      */
     private fun applyStreamingProfile(view: VideoPlayerMpvView, online: Boolean) {
         try {
-            if (online && webLinkMode && !directStreamMode) {
+            if (online && torrentMode && !directStreamMode) {
+                // Torrent loopback stream (mpvRx PlaybackSession.applyStreamingOptionsLocked, viaLoopbackProxy = true):
+                // mpv's own cache, playback starts after 2 s of data, bounded reconnects, and NO persistent HTTP
+                // connection because the loopback proxy closes every response.
+                try { view.mpv.setPropertyString("network-timeout", "120") } catch (_: Throwable) {}
+                view.mpv.setPropertyString("cache", "auto")
+                view.mpv.setPropertyString("cache-pause", "yes")
+                view.mpv.setPropertyString("cache-pause-initial", "no")
+                view.mpv.setPropertyString("cache-pause-wait", "2")
+                view.mpv.setPropertyString("cache-secs", "1000000000")
+                view.mpv.setPropertyString("demuxer-readahead-secs", "1")
+                view.mpv.setPropertyString("demuxer-max-bytes", "64MiB")
+                view.mpv.setPropertyString("demuxer-max-back-bytes", "32MiB")
+                try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "0") } catch (_: Throwable) {}
+                try { view.mpv.setPropertyString("demuxer-lavf-probesize", "5000000") } catch (_: Throwable) {}
+                view.mpv.setPropertyString(
+                    "demuxer-lavf-o",
+                    "http_persistent=0,reconnect=1,reconnect_on_network_error=1,reconnect_streamed=1," +
+                        "reconnect_delay_max=5,reconnect_max_retries=5,reconnect_delay_total_max=20"
+                )
+                view.mpv.setPropertyString(
+                    "stream-lavf-o",
+                    "http_persistent=0,reconnect=1,reconnect_on_network_error=1,reconnect_on_http_error=5xx," +
+                        "reconnect_streamed=1,reconnect_delay_max=5,reconnect_max_retries=5,reconnect_delay_total_max=20"
+                )
+                streamingProfileApplied = true
+            } else if (online && webLinkMode && !directStreamMode) {
                 // Network-tab link: mpvRx's network defaults (PlaybackSession.applyStreamingOptionsLocked). mpv's own cache decides
                 // the read-ahead (demuxer-max-bytes caps it), playback starts after 2 s of data, and a dropped / failed read is
                 // retried a BOUNDED number of times, so a bad stream ends in an error instead of endless buffering.

@@ -14,9 +14,9 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import com.example.torrent.TorrentDownloadEngine
+import kotlinx.coroutines.sync.withLock
 import com.example.ytdlp.YtdlpDownloader
 import com.example.ytdlp.YtdlpManager
-import com.example.ytdlp.YtdlpProbe
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -168,8 +168,7 @@ object DownloadManager {
                 formatSpec = req.formatSpec,
                 container = req.container,
                 thumbnailUrl = req.thumbnailUrl,
-                headers = req.headers,
-                subtitles = req.subtitles
+                headers = req.headers
             )
         )
         // Direct provider links often have no size metadata in the plugin response. Probe the origin in
@@ -267,10 +266,6 @@ object DownloadManager {
                 linkDir(app, id).deleteRecursively()
             } catch (_: Throwable) {
             }
-            try {
-                torrentDir(app, id).deleteRecursively()
-            } catch (_: Throwable) {
-            }
         }
     }
 
@@ -284,14 +279,6 @@ object DownloadManager {
         File(app.getExternalFilesDir(null) ?: app.filesDir, "downloads").apply { mkdirs() }
 
     private fun linkDir(app: Context, id: String): File = File(baseDir(app), id)
-
-    /**
-     * Torrent data lives in the app's INTERNAL storage (a real ext4 / f2fs filesystem), not in the FUSE-backed external
-     * files folder: libtorrent's memory-mapped writes are not safe there. It survives app restarts / crashes, so a
-     * torrent continues from the pieces that are already on disk.
-     */
-    private fun torrentDir(app: Context, id: String): File =
-        File(File(app.filesDir, "torrent_downloads"), id)
 
     private fun looksAudio(url: String): Boolean {
         val host = try { java.net.URI(url).host?.lowercase() ?: "" } catch (_: Throwable) { "" }
@@ -359,7 +346,7 @@ object DownloadManager {
         return listOf(
             "unsupported url", "video unavailable", "private video", "is private", "sign in",
             "not a valid", "storage is full", "has been removed", "copyright", "age-restricted", "can not be downloaded",
-            "requested format is not available", "can not join the downloaded", "v2-only", "unsafe file path", "does not exist any more", "engine is not available", "invalid torrent metadata"
+            "v2-only", "unsafe file path", "does not exist any more", "engine is not available", "invalid torrent metadata"
         ).any { m.contains(it) }
     }
 
@@ -421,10 +408,7 @@ object DownloadManager {
                 fileUri = saved.uri
             )
         }
-        DownloadStore.get(id)?.let {
-            DownloadService.notifyDone(app, it)
-            attachSubtitles(app, it, saved)
-        }
+        DownloadStore.get(id)?.let { DownloadService.notifyDone(app, it) }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -445,69 +429,21 @@ object DownloadManager {
      */
     private fun usesYtdlp(item: DownloadItem): Boolean {
         val src = item.source
-        if (!com.example.BuildConfig.ENABLE_YTDLP) return false
+        if (!com.example.BuildConfig.ENABLE_YTDLP || item.headers.isNotEmpty()) return false
         if (!src.startsWith("http://", ignoreCase = true) && !src.startsWith("https://", ignoreCase = true)) return false
         val path = src.substringBefore('?').substringBefore('#').lowercase()
-        // HLS / DASH can never be fetched as one file: they go through yt-dlp WITH the provider's headers
-        if (path.endsWith(".m3u8") || path.endsWith(".mpd") || path.contains(".m3u8/")) return true
-        if (item.headers.isNotEmpty()) return false
+        if (path.endsWith(".m3u8") || path.endsWith(".mpd")) return true
         return YtdlpManager.requiresYtdlp(src)
     }
 
     private fun ytdlpFormats(item: DownloadItem): String? {
         val spec = item.formatSpec?.trim()?.takeIf { it.isNotEmpty() }
-        // Keep yt-dlp format expressions intact. Rewriting "+" as a comma routes them through
-        // Android MediaMuxer, which cannot handle many codec/container pairs or subtitle attachments.
-        if (spec != null) return spec
+        if (spec != null) return spec.replace('+', ',')
         val youtube = Regex("^https?://([a-z0-9-]+\\.)*(youtube\\.com|youtu\\.be)/", RegexOption.IGNORE_CASE).containsMatchIn(item.source)
         return when {
             item.isAudio -> YtdlpDownloader.AUDIO_FORMAT
             youtube -> YtdlpDownloader.YOUTUBE_SPLIT_FORMAT
             else -> null
-        }
-    }
-
-    /**
-     * HLS / DASH link without a chosen quality: the best video with every audio language the manifest offers
-     * (null = yt-dlp's own default). Only formats the manifest really lists are used.
-     */
-    private suspend fun autoManifestFormats(app: Context, item: DownloadItem): String? {
-        if (item.isAudio) return null
-        val path = item.source.substringBefore('?').substringBefore('#').lowercase()
-        if (!(path.endsWith(".m3u8") || path.endsWith(".mpd") || path.contains(".m3u8/"))) return null
-        return try {
-            YtdlpProbe.autoSpec(app, item.source, item.headers)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    /** Provider subtitles of a finished download become subtitle tracks of the saved video. */
-    private fun attachSubtitles(app: Context, item: DownloadItem, saved: DownloadFileSaver.Saved) {
-        if (item.subtitles.isEmpty()) return
-        scope.launch(Dispatchers.IO) {
-            val used = HashSet<String>()
-            for (sub in item.subtitles) {
-                try {
-                    val local = com.example.util.media.SubtitleDownloader.download(app, sub.uri, item.headers) ?: continue
-                    val kept = CustomSubtitlePersistenceManager.persistSubtitleFromFile(app, local)
-                    val base = sub.title.ifBlank { sub.language }.ifBlank { "Subtitle" }
-                    var name = base
-                    var n = 2
-                    while (!used.add(name.lowercase())) name = "$base ${n++}"
-                    CustomSubtitlePersistenceManager.addAttachedSubtitle(
-                        context = app,
-                        path = saved.path,
-                        uriString = saved.uri,
-                        title = item.title,
-                        filePath = kept.absolutePath,
-                        originalName = name,
-                        isSelected = false
-                    )
-                } catch (_: Throwable) {}
-            }
         }
     }
 
@@ -595,7 +531,7 @@ object DownloadManager {
             YtdlpDownloader.download(
                 context = app,
                 url = item.source,
-                formats = ytdlpFormats(item) ?: autoManifestFormats(app, item),
+                formats = ytdlpFormats(item),
                 workDir = dir,
                 headers = item.headers,
                 isCancelled = isCancelled
@@ -647,13 +583,24 @@ object DownloadManager {
      * One file of a torrent: libtorrent downloads only the chosen file into the download's own folder (pause keeps the
      * data, resume continues it), the finished file is then moved to the public Movies / Music folder.
      */
+    /** One libtorrent session at a time: further torrent downloads wait for their turn (several sessions = crash risk). */
+    private val torrentTurn = kotlinx.coroutines.sync.Mutex()
+
     private suspend fun runTorrent(app: Context, id: String) {
+        if (torrentTurn.isLocked) {
+            DownloadStore.update(app, id) {
+                if (it.status == DownloadStatus.DOWNLOADING) it.copy(note = "Waiting for another torrent…") else it
+            }
+        }
+        torrentTurn.withLock { runTorrentNow(app, id) }
+    }
+
+    private suspend fun runTorrentNow(app: Context, id: String) {
         val item = DownloadStore.get(id) ?: return
-        val dir = torrentDir(app, id).apply { mkdirs() }
+        val dir = File(linkDir(app, id), "torrent").apply { mkdirs() }
         val isCancelled = { stops.containsKey(id) }
 
         var speed = 0.0
-        var lastPersistAt = 0L
         val file: File? = TorrentDownloadEngine.download(
             context = app,
             source = item.source,
@@ -667,23 +614,15 @@ object DownloadManager {
                 val sp = speed.toLong()
                 val total = if (p.totalBytes > 0L) p.totalBytes else item.totalBytes
                 val eta = if (sp > 0L && total > p.downloadedBytes) (total - p.downloadedBytes) / sp else -1L
-                // progress is written to disk every few seconds (not only on state changes), so after a crash / kill the
-                // Download page and the resumed download continue from the saved progress instead of 0
-                val now = System.currentTimeMillis()
-                val persistNow = now - lastPersistAt >= 4_000L
-                if (persistNow) lastPersistAt = now
-                DownloadStore.update(app, id, persist = persistNow) {
+                DownloadStore.update(app, id) {
                     if (it.status == DownloadStatus.DOWNLOADING) {
-                        // libtorrent re-verifies the data already on disk after a restart and reports 0 meanwhile: the
-                        // shown progress never goes backwards
-                        val shown = maxOf(p.downloadedBytes, it.downloadedBytes)
                         it.copy(
-                            downloadedBytes = shown,
+                            downloadedBytes = p.downloadedBytes,
                             totalBytes = total,
                             speedBps = sp,
                             etaSec = eta,
                             // a note hides the progress bar / speed of the Download page: only used while no data flows yet
-                            note = p.phase ?: if (p.downloadedBytes < it.downloadedBytes) "Resuming from saved progress…" else null
+                            note = p.phase
                         )
                     } else it
                 }
@@ -702,7 +641,6 @@ object DownloadManager {
             ?: throw IllegalStateException("Could not save the file (is the storage full?)")
         complete(app, id, saved)
         try { linkDir(app, id).deleteRecursively() } catch (_: Throwable) {}
-        try { torrentDir(app, id).deleteRecursively() } catch (_: Throwable) {}
     }
 
     /**

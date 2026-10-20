@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Ported from mpvRx (https://github.com/gyrolet/mpvRx) utils/media/HttpUtils.kt, AGPL-3.0-or-later.
+ * Ported from mpvRx (https://github.com/Riteshp2001/mpvRx) utils/media/HttpUtils.kt, AGPL-3.0-or-later.
  */
 
 package com.example.ytdlp

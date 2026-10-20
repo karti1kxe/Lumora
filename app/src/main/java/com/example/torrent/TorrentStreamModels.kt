@@ -1,13 +1,20 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Torrent source parsing / metadata models (download only, no playback). Based on mpvRx (AGPL-3.0).
+ * Ported from mpvRx (app.gyrolet.mpvrx.domain.torrent), AGPL-3.0. Lumora package: com.example.torrent.
  */
 
 package com.example.torrent
 
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
+
+data class TorrentStreamRequest(
+  val source: String,
+  val fileIndex: Int? = null,
+  /** Opaque token returned by [TorrentStreamingEngine.prepareTorrent]. */
+  val preparationId: String? = null,
+)
 
 data class TorrentFileItem(
   val index: Int,
@@ -21,7 +28,21 @@ data class TorrentFileItem(
   }
 }
 
-/** Metadata-only result used by the torrent file picker (download only). */
+data class TorrentStreamResult(
+  val localUrl: String,
+  val selectedFile: TorrentFileItem,
+  /** A durable source. This is never the temporary loopback playback URL. */
+  val source: String,
+  val infoHash: String,
+  var torrentName: String,
+  val playableFiles: List<TorrentFileItem>,
+) {
+  init {
+    torrentName = normalizeTorrentDisplayName(torrentName)
+  }
+}
+
+/** Metadata-only result used by the pre-player file picker. */
 data class TorrentCatalog(
   val preparationId: String,
   /** A durable source. This is never a content grant or loopback proxy URL. */
@@ -43,7 +64,35 @@ data class ParsedMagnet(
   val trackers: List<String>,
 )
 
-class TorrentException(
+sealed class TorrentStreamingState {
+  data object Idle : TorrentStreamingState()
+
+  data class Connecting(
+    val phase: String = "Starting Torrent Engine...",
+    val downloadSpeed: Long = 0L,
+    val uploadSpeed: Long = 0L,
+    val peers: Int = 0,
+    val seeds: Int = 0,
+  ) : TorrentStreamingState()
+
+  data class Streaming(
+    val localUrl: String,
+    val selectedFileIndex: Int,
+    val fileName: String,
+    val fileSize: Long,
+    val downloadSpeed: Long,
+    val uploadSpeed: Long,
+    val peers: Int,
+    val seeds: Int,
+    val bufferProgress: Float,
+    val totalProgress: Float,
+    val downloadedBytes: Long = 0L,
+  ) : TorrentStreamingState()
+
+  data class Error(val message: String) : TorrentStreamingState()
+}
+
+class TorrentStreamException(
   message: String,
   cause: Throwable? = null,
 ) : Exception(message, cause)

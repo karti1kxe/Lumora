@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Adapted from mpvRx (https://github.com/gyrolet/mpvRx) domain/download/YtdlpDownloadEngine.kt and
+ * Adapted from mpvRx (https://github.com/Riteshp2001/mpvRx) domain/download/YtdlpDownloadEngine.kt and
  * YtdlpMediaMerger.kt, AGPL-3.0-or-later. Lumora runs it as one job of its own DownloadManager
  * (no separate service/queue); the separate video+audio streams are muxed with MediaMuxHelper.
  */
@@ -30,14 +30,9 @@ import java.io.InputStreamReader
 object YtdlpDownloader {
   private const val TAG = "YtdlpDownloader"
   private const val FINAL_OUTPUT_PREFIX = "LUMORA_FINAL_OUTPUT="
-  // Prefer a progressive A/V file: Android MediaMuxer cannot mux every codec/container pair and
-  // cannot preserve Matroska attachments or subtitle tracks. Keep the source container intact when possible.
-  const val DEFAULT_SINGLE_FILE_FORMAT = "best[acodec!=none][vcodec!=none]"
+  const val DEFAULT_SINGLE_FILE_FORMAT = "best/bestvideo/bestaudio"
   const val AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
-  // Avoid splitting YouTube video/audio into separate files on Android. The old comma selector forced
-  // MediaMuxHelper to add arbitrary codec tracks to MP4, causing "Failed to add the track to the muxer"
-  // for formats such as VP9+Opus or AV1+Opus. A progressive format needs no lossy/restrictive remux.
-  const val YOUTUBE_SPLIT_FORMAT = "best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]"
+  const val YOUTUBE_SPLIT_FORMAT = "bestvideo[vcodec^=avc1]/bestvideo,bestaudio[ext=m4a]/bestaudio"
 
   data class Progress(
     /** Bytes finished over all streams of this job (0 when unknown). */
@@ -202,20 +197,10 @@ object YtdlpDownloader {
       add("--no-warnings")
       add("--no-colors")
       add("--progress")
-      // a long download must survive short connection drops: many retries with a growing pause, a socket timeout so a
-      // dead connection is retried instead of hanging, and 10 MB range chunks (YouTube throttles / cuts one long read)
       add("--retries")
-      add("20")
-      add("--fragment-retries")
-      add("20")
-      add("--extractor-retries")
       add("5")
-      add("--retry-sleep")
-      add("linear=1::2")
-      add("--socket-timeout")
-      add("30")
-      add("--http-chunk-size")
-      add("10M")
+      add("--fragment-retries")
+      add("5")
       add("--concurrent-fragments")
       add("4")
       add("--no-keep-video")
@@ -234,19 +219,6 @@ object YtdlpDownloader {
       prefs.customUserAgent.get().takeIf(String::isNotBlank)?.let {
         add("--user-agent")
         add(it)
-      }
-      if (prefs.customUserAgent.get().isBlank()) {
-        headers.entries.firstOrNull { it.key.equals("User-Agent", true) && it.value.isNotBlank() }?.let {
-          add("--user-agent")
-          add(it.value)
-        }
-      }
-      // the provider's own headers (Origin, Cookie, token ...) go with every request of the manifest and its segments
-      for ((k, v) in headers) {
-        if (k.isBlank() || v.isBlank() || k.equals("User-Agent", true) || k.equals("Referer", true) || k.equals("Referrer", true)) continue
-        if (k.lowercase() in setOf("host", "range", "accept-encoding", "content-length", "connection")) continue
-        add("--add-header")
-        add("$k:$v")
       }
       val referer = prefs.referer.get().takeIf(String::isNotBlank) ?: headers.entries.firstOrNull { it.key.equals("Referer", true) }?.value
       referer?.let {
@@ -290,50 +262,29 @@ object YtdlpDownloader {
     val video =
       inspected.firstOrNull { it.hasVideo && !it.hasAudio } ?: inspected.firstOrNull { it.hasVideo }
         ?: throw DownloadException("Downloaded video stream was not found")
-    val audios =
-      inspected.filter { it.file != video.file && it.hasAudio && !it.hasVideo }.ifEmpty {
-        inspected.filter { it.file != video.file && it.hasAudio }.take(1)
-      }
-    val audio = audios.firstOrNull() ?: throw DownloadException("Downloaded audio stream was not found")
-    // VP9 + Opus (the 1440p / 2160p YouTube streams) can only be joined into WebM, everything else into MP4
-    val webmPair = video.videoMime in WEBM_VIDEO && audio.audioMime in WEBM_AUDIO
-    val outExt = if (webmPair) "webm" else "mp4"
-    val out = File(workDir, "media.$outExt")
-    val merging = File(workDir, "merging.$outExt")
+    val audio =
+      inspected.firstOrNull { it.file != video.file && it.hasAudio && !it.hasVideo }
+        ?: inspected.firstOrNull { it.file != video.file && it.hasAudio }
+        ?: throw DownloadException("Downloaded audio stream was not found")
+    val out = File(workDir, "media.mp4")
     try {
-      merging.delete()
-      try {
-        // every audio language of the link ends up in the one file (WebM keeps the first)
-        MediaMuxHelper.muxMulti(video.file, audios.map { it.file }.sortedBy { it.name }.let { sorted ->
-          // the audio that was requested first stays the first (default) track
-          listOf(audio.file) + sorted.filter { it != audio.file }
-        }, merging, isCancelled)
-      } catch (e: MediaMuxHelper.Cancelled) {
-        throw e
-      } catch (e: Exception) {
-        merging.delete()
-        throw DownloadException("This device cannot mux this codec/container combination without re-encoding (${e.message ?: e.javaClass.simpleName}). Try a progressive source format or a compatible MP4/WebM format.")
-      }
-      if (!merging.isFile || merging.length() == 0L) throw DownloadException("Media merge produced no output")
+      MediaMuxHelper.mux(video.file, audio.file, File(workDir, "merging.mp4").also { it.delete() }, isCancelled)
+      val muxed = File(workDir, "merging.mp4")
+      if (!muxed.isFile || muxed.length() == 0L) throw DownloadException("Media merge produced no output")
       out.delete()
-      if (!merging.renameTo(out)) throw DownloadException("Could not finalize merged download")
+      if (!muxed.renameTo(out)) throw DownloadException("Could not finalize merged download")
     } catch (e: MediaMuxHelper.Cancelled) {
-      merging.delete()
+      File(workDir, "merging.mp4").delete()
       throw e
     }
     candidates.forEach { runCatching { it.delete() } }
     return out
   }
 
-  private val WEBM_VIDEO = setOf("video/x-vnd.on2.vp9", "video/x-vnd.on2.vp8")
-  private val WEBM_AUDIO = setOf("audio/opus", "audio/vorbis")
-
   private class Inspected(
     val file: File,
     val hasVideo: Boolean,
     val hasAudio: Boolean,
-    val videoMime: String = "",
-    val audioMime: String = "",
   )
 
   private fun inspect(file: File): Inspected? =
@@ -343,20 +294,12 @@ object YtdlpDownloader {
         extractor.setDataSource(file.absolutePath)
         var hasVideo = false
         var hasAudio = false
-        var videoMime = ""
-        var audioMime = ""
         repeat(extractor.trackCount) { index ->
           val mime = extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME).orEmpty()
-          if (mime.startsWith("video/")) {
-            hasVideo = true
-            if (videoMime.isEmpty()) videoMime = mime
-          }
-          if (mime.startsWith("audio/")) {
-            hasAudio = true
-            if (audioMime.isEmpty()) audioMime = mime
-          }
+          if (mime.startsWith("video/")) hasVideo = true
+          if (mime.startsWith("audio/")) hasAudio = true
         }
-        Inspected(file, hasVideo, hasAudio, videoMime, audioMime).takeIf { it.hasVideo || it.hasAudio }
+        Inspected(file, hasVideo, hasAudio).takeIf { it.hasVideo || it.hasAudio }
       } finally {
         extractor.release()
       }

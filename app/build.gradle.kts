@@ -62,7 +62,7 @@ android {
   sourceSets {
     getByName("main") {
       jniLibs.setSrcDirs(listOf("src/main/jniLibs") + if (enableYtdlp) listOf("src/ytdlp/jniLibs") else emptyList())
-      // ytdl/{setup.py,python313.zip,wrapper} + cacert.pem are assembled by .github/workflows/build-apk.yml
+      // ytdl/{setup.py,python313.zip,wrapper} + cacert.pem (see .github/workflows/build-apk.yml)
       if (enableYtdlp) assets.srcDir("src/ytdlp/assets")
     }
   }
@@ -182,12 +182,14 @@ dependencies {
   // implementation(libs.retrofit)
   implementation(libs.androidx.media)
   implementation(libs.mpv.android.lib)
-  // Torrent DOWNLOAD only (no playback / streaming): libtorrent4j session + one native lib per ABI.
+  // Torrent streaming / download (ported from mpvRx): libtorrent4j session + one native lib per ABI, and the
+  // loopback byte-range server that feeds the selected file to mpv.
   implementation(libs.libtorrent4j)
   implementation(libs.libtorrent4j.android.arm64)
   implementation(libs.libtorrent4j.android.arm)
   implementation(libs.libtorrent4j.android.x86)
   implementation(libs.libtorrent4j.android.x8664)
+  implementation(libs.nanohttpd)
   // CloudStream extension runtime (.cs3 providers, Network > Media > CloudStream repositories)
   implementation(project(":cloudstream-lib"))
   // media3-exoplayer / media3-ui removed: not used anywhere in the code — the app

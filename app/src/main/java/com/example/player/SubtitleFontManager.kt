@@ -1225,12 +1225,12 @@ object SubtitleFontManager {
         return deletedCount
     }
 
-    // The app's OWN UI/branding font (assets/fonts/Lumora.ttf, used by ui/theme/Type.kt
+    // The app's OWN UI/branding font (assets/fonts/LTWave-Bold.otf, used by ui/theme/Type.kt
     // for on-screen text) must never end up in the subtitle font picker. It used to be swept
     // in here along with everything else under assets/fonts/, so it silently appeared in
     // "Settings → Subtitles → Fonts" and in the in-player font list as if the user had
     // uploaded it themselves — with no way to tell it apart from a real custom subtitle font.
-    private val NON_SUBTITLE_ASSET_FONT_BASENAMES = setOf("lumora")
+    private val NON_SUBTITLE_ASSET_FONT_BASENAMES = setOf("ltwave-bold", "ltwave_bold", "ltwave")
 
     private fun copyAssetFonts(context: Context, destDir: File) {
         val assetManager = context.assets

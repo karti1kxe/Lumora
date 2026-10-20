@@ -149,9 +149,6 @@ fun DownloadOptionsSheet(
             if (!titleEdited && t != null && t.isNotBlank()) title = t
             val u = loaded.uploader
             if (author.isBlank() && u != null) author = u
-            // the list is sorted best first: the top quality (with its real size) is the default choice
-            if (videoSel == null) videoSel = loaded.videoFormats.firstOrNull()
-            if (audioSel == null) audioSel = loaded.audioFormats.firstOrNull()
         }
     }
 
@@ -166,7 +163,6 @@ fun DownloadOptionsSheet(
         // every offered quality is one file (sound included), so the original format / container is kept
         val spec: String? = when {
             sel == null -> null
-            sel.spec != null -> sel.spec
             isAudio -> sel.id + "/ba/b"
             else -> sel.id
         }
@@ -261,7 +257,7 @@ fun DownloadOptionsSheet(
         DownloadQualityRow(
             option = selected,
             badge = selected?.ext ?: (if (isAudio) "AUTO" else "AUTO"),
-            title = selected?.label ?: (if (isAudio) "Best audio (auto)" else "Best video (auto)"),
+            title = selected?.label ?: (if (isAudio) "Best audio (auto)" else "Best video up to 1080p (auto)"),
             isDark = isDark,
             enabled = true,
             onClick = { if (!loading && options.isNotEmpty()) picker = if (isAudio) 2 else 1 }
@@ -333,21 +329,19 @@ fun DownloadOptionsSheet(
                 color = primaryText,
                 modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
             )
-            if (list.isEmpty()) {
-                DownloadQualityRow(
-                    option = null,
-                    badge = "AUTO",
-                    title = if (forAudio) "Best audio (auto)" else "Best video (auto)",
-                    isDark = isDark,
-                    enabled = current == null,
-                    onClick = {
-                        if (forAudio) audioSel = null else videoSel = null
-                        picker = 0
-                    }
-                )
-            }
-            for ((index, opt) in list.withIndex()) {
-                if (index > 0) Spacer(modifier = Modifier.height(8.dp))
+            DownloadQualityRow(
+                option = null,
+                badge = "AUTO",
+                title = if (forAudio) "Best audio (auto)" else "Best video up to 1080p (auto)",
+                isDark = isDark,
+                enabled = current == null,
+                onClick = {
+                    if (forAudio) audioSel = null else videoSel = null
+                    picker = 0
+                }
+            )
+            for (opt in list) {
+                Spacer(modifier = Modifier.height(8.dp))
                 DownloadQualityRow(
                     option = opt,
                     badge = opt.ext,

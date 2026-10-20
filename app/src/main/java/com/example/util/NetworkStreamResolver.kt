@@ -75,7 +75,7 @@ object NetworkStreamResolver {
 
     /** Adds https:// when needed and returns null when the text is not a usable web link. */
     fun normalizeUrl(raw: String): String? {
-        // Magnet links, info hashes and .torrent links are handled by the torrent picker.
+        // magnet links, info hashes and .torrent links are handled by the torrent engine (picker), not by a web resolver
         com.example.torrent.normalizeTorrentSource(raw)?.let { return it }
         val t = raw.trim().replace("\\s".toRegex(), "")
         if (t.isEmpty()) return null
@@ -155,12 +155,12 @@ object NetworkStreamResolver {
                 // the NewPipe path is what Online Music/Video already use
                 resolveWithNewPipe(appCtx, url)
             } else {
-                // Extensionless direct file URLs are common on CDNs; inspect Content-Type before treating them as pages.
-                val contentType = probeDirectMediaContentType(url)
-                if (contentType != null) {
-                    directStream(url, contentType)
+                // other sites: the bundled yt-dlp (through mpv's ytdl_hook) resolves the page when it plays
+                if (isLanHost(hostOf(url)) || looksLikeMedia(url)) {
+                    // a media link without a file extension (Chrome "copy video address", a phone / NAS / DLNA server on the
+                    // local network): played directly, yt-dlp is not involved
+                    directStream(url)
                 } else if (com.example.BuildConfig.ENABLE_YTDLP && com.example.ytdlp.YtdlpManager.requiresYtdlp(url)) {
-                    // other sites: the bundled yt-dlp (through mpv's ytdl_hook) resolves the page when it plays
                     ytdlpStream(url)
                 } else {
                     lastError = "This link is not supported right now"
@@ -175,6 +175,35 @@ object NetworkStreamResolver {
         if (result != null) cache[url] = System.currentTimeMillis() to result
         else if (lastError == null) lastError = "No playable stream found"
         return result
+    }
+
+    private fun isLanHost(host: String): Boolean {
+        if (host.isEmpty()) return false
+        if (host == "localhost" || host.endsWith(".local") || host == "::1" || host == "[::1]") return true
+        val p = host.split('.')
+        if (p.size != 4) return false
+        val a = p[0].toIntOrNull() ?: return false
+        val b = p[1].toIntOrNull() ?: return false
+        return a == 10 || a == 127 || (a == 192 && b == 168) || (a == 172 && b in 16..31) || (a == 169 && b == 254)
+    }
+
+    /** HEAD (or a 1-byte GET) of the link: true when the server says it is video / audio / an HLS-DASH manifest. */
+    private fun looksLikeMedia(url: String): Boolean {
+        val client = spotifyHttp.newBuilder()
+            .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+        fun typeOf(request: okhttp3.Request): String? = try {
+            client.newCall(request).execute().use { resp ->
+                if (resp.code >= 400 && resp.code != 416) null
+                else resp.header("Content-Type")?.lowercase()
+            }
+        } catch (_: Throwable) { null }
+        val ua = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        val type = typeOf(okhttp3.Request.Builder().url(url).head().header("User-Agent", ua).build())
+            ?: typeOf(okhttp3.Request.Builder().url(url).get().header("Range", "bytes=0-0").header("User-Agent", ua).build())
+            ?: return false
+        return type.startsWith("video/") || type.startsWith("audio/") || type.contains("mpegurl") ||
+            type.contains("dash+xml") || type.contains("x-matroska") || type.contains("application/ogg")
     }
 
     private fun ytdlpStream(url: String): NetworkStream {
@@ -196,27 +225,7 @@ object NetworkStreamResolver {
         )
     }
 
-    private suspend fun probeDirectMediaContentType(url: String): String? = withContext(Dispatchers.IO) {
-        try {
-            val request = okhttp3.Request.Builder().url(url).head()
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Safari/537.36")
-                .build()
-            spotifyHttp.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext null
-                val type = response.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase().orEmpty()
-                type.takeIf {
-                    it.startsWith("video/") || it.startsWith("audio/") ||
-                        it in setOf("application/vnd.apple.mpegurl", "application/x-mpegurl",
-                            "application/dash+xml", "application/octet-stream")
-                }
-            }
-        } catch (t: Throwable) {
-            Log.d(TAG, "Direct-media HEAD probe unavailable: ${t.javaClass.simpleName}")
-            null
-        }
-    }
-
-    private fun directStream(url: String, contentType: String? = null): NetworkStream {
+    private fun directStream(url: String): NetworkStream {
         val name = try {
             java.net.URLDecoder.decode(url.substringBefore('?').substringAfterLast('/'), "UTF-8")
         } catch (_: Throwable) { url.substringAfterLast('/') }
@@ -230,7 +239,7 @@ object NetworkStreamResolver {
             audioUrl = null,
             headers = emptyMap(),
             isDirect = true,
-            isAudio = extensionOf(url) in audioExtensions || contentType?.startsWith("audio/") == true
+            isAudio = extensionOf(url) in audioExtensions
         )
     }
 

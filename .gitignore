@@ -11,8 +11,13 @@
 .cxx
 local.properties
 .env
-# fetched by .github/workflows/build-apk.yml on every build (kept out of the repo to keep it small)
-/app/src/main/cpp/third_party/quickjs/
-/app/src/ytdlp/assets/ytdl/python313.zip
-/app/src/ytdlp/assets/cacert.pem
-/app/src/main/assets/fonts/GoNotoCurrent-Regular.ttf
+
+# fetched by CI at build time (see .github/workflows/build-apk.yml)
+app/src/ytdlp/assets/ytdl/python313.zip
+app/src/ytdlp/assets/cacert.pem
+app/src/ytdlp/jniLibs/
+
+# yt-dlp runtime binaries: fetched by the GitHub Action from mpvRx (never committed, keeps the repo small)
+app/src/ytdlp/jniLibs/
+app/src/ytdlp/assets/ytdl/python313.zip
+app/src/main/cpp/third_party/
