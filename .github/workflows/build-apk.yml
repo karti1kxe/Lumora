@@ -31,6 +31,17 @@ jobs:
             "https://github.com/satbyy/go-noto-universal/releases/download/v7.0/GoNotoCurrent-Regular.ttf"
           ls -lh app/src/main/assets/fonts/GoNotoCurrent-Regular.ttf
 
+      - name: Fetch yt-dlp Python standard library archive
+        run: |
+          set -e
+          mkdir -p app/src/ytdlp/assets/ytdl
+          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+            -o app/src/ytdlp/assets/ytdl/python313.zip \
+            "https://raw.githubusercontent.com/Riteshp2001/mpvRx/master/app/src/ytdlp/assets/ytdl/python313.zip"
+          test -s app/src/ytdlp/assets/ytdl/python313.zip
+          unzip -t app/src/ytdlp/assets/ytdl/python313.zip >/dev/null
+          ls -lh app/src/ytdlp/assets/ytdl/python313.zip
+
       # yt-dlp runtime (ported from mpvRx). cacert.pem (CA bundle for yt-dlp's TLS) is fetched here.
       #
       # libpython.so (CPython 3.13 with its extension modules built in) is a prebuilt binary per ABI and is NOT part of

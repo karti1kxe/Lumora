@@ -62,7 +62,7 @@ android {
   sourceSets {
     getByName("main") {
       jniLibs.setSrcDirs(listOf("src/main/jniLibs") + if (enableYtdlp) listOf("src/ytdlp/jniLibs") else emptyList())
-      // ytdl/{setup.py,python313.zip,wrapper} + cacert.pem (see .github/workflows/build-apk.yml)
+      // ytdl/{setup.py,python313.zip,wrapper} + cacert.pem are assembled by .github/workflows/build-apk.yml
       if (enableYtdlp) assets.srcDir("src/ytdlp/assets")
     }
   }

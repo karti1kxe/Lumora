@@ -456,7 +456,9 @@ object DownloadManager {
 
     private fun ytdlpFormats(item: DownloadItem): String? {
         val spec = item.formatSpec?.trim()?.takeIf { it.isNotEmpty() }
-        if (spec != null) return spec.replace('+', ',')
+        // Keep yt-dlp format expressions intact. Rewriting "+" as a comma routes them through
+        // Android MediaMuxer, which cannot handle many codec/container pairs or subtitle attachments.
+        if (spec != null) return spec
         val youtube = Regex("^https?://([a-z0-9-]+\\.)*(youtube\\.com|youtu\\.be)/", RegexOption.IGNORE_CASE).containsMatchIn(item.source)
         return when {
             item.isAudio -> YtdlpDownloader.AUDIO_FORMAT

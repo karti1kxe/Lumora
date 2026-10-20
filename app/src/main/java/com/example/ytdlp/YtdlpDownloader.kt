@@ -30,9 +30,14 @@ import java.io.InputStreamReader
 object YtdlpDownloader {
   private const val TAG = "YtdlpDownloader"
   private const val FINAL_OUTPUT_PREFIX = "LUMORA_FINAL_OUTPUT="
-  const val DEFAULT_SINGLE_FILE_FORMAT = "best/bestvideo/bestaudio"
+  // Prefer a progressive A/V file: Android MediaMuxer cannot mux every codec/container pair and
+  // cannot preserve Matroska attachments or subtitle tracks. Keep the source container intact when possible.
+  const val DEFAULT_SINGLE_FILE_FORMAT = "best[acodec!=none][vcodec!=none]"
   const val AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
-  const val YOUTUBE_SPLIT_FORMAT = "bestvideo[vcodec^=avc1]/bestvideo,bestaudio[ext=m4a]/bestaudio"
+  // Avoid splitting YouTube video/audio into separate files on Android. The old comma selector forced
+  // MediaMuxHelper to add arbitrary codec tracks to MP4, causing "Failed to add the track to the muxer"
+  // for formats such as VP9+Opus or AV1+Opus. A progressive format needs no lossy/restrictive remux.
+  const val YOUTUBE_SPLIT_FORMAT = "best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]"
 
   data class Progress(
     /** Bytes finished over all streams of this job (0 when unknown). */
@@ -307,7 +312,7 @@ object YtdlpDownloader {
         throw e
       } catch (e: Exception) {
         merging.delete()
-        throw DownloadException("This phone can not join the downloaded video and audio streams (${e.message ?: e.javaClass.simpleName}).")
+        throw DownloadException("This device cannot mux this codec/container combination without re-encoding (${e.message ?: e.javaClass.simpleName}). Try a progressive source format or a compatible MP4/WebM format.")
       }
       if (!merging.isFile || merging.length() == 0L) throw DownloadException("Media merge produced no output")
       out.delete()

@@ -62,7 +62,7 @@ class TorrentStreamingEngine(
     private const val STATUS_INTERVAL_MS = 1_000L
 
     /** Data that must be on disk right at the playback position before mpv is started (and the 100% of the % shown). */
-    private const val INITIAL_BUFFER_BYTES = 8L * 1024L * 1024L
+    private const val INITIAL_BUFFER_BYTES = 64L * 1024L * 1024L
     private const val BUFFER_WAIT_TIMEOUT_MS = 240_000L
     private const val NO_PEERS_TIMEOUT_MS = 120_000L
 
@@ -765,7 +765,9 @@ class TorrentStreamingEngine(
           if (waited > NO_PEERS_TIMEOUT_MS && current.peers == 0 && current.downloadedBytes == 0L) {
             throw streamError("No active peers found for this torrent. Try again later or pick another torrent.")
           }
-          if (waited > BUFFER_WAIT_TIMEOUT_MS) return
+          if (waited > BUFFER_WAIT_TIMEOUT_MS) {
+            throw streamError("Initial buffer timed out before enough torrent data arrived. Check peer availability and try again.")
+          }
         }
         is TorrentStreamingState.Error -> throw streamError(current.message)
         is TorrentStreamingState.Idle -> throw CancellationException("Torrent stream stopped")
