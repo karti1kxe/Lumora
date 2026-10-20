@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 import com.example.torrent.TorrentDownloadEngine
 import com.example.ytdlp.YtdlpDownloader
 import com.example.ytdlp.YtdlpManager
+import com.example.ytdlp.YtdlpProbe
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -167,7 +168,8 @@ object DownloadManager {
                 formatSpec = req.formatSpec,
                 container = req.container,
                 thumbnailUrl = req.thumbnailUrl,
-                headers = req.headers
+                headers = req.headers,
+                subtitles = req.subtitles
             )
         )
         // Direct provider links often have no size metadata in the plugin response. Probe the origin in
@@ -357,7 +359,7 @@ object DownloadManager {
         return listOf(
             "unsupported url", "video unavailable", "private video", "is private", "sign in",
             "not a valid", "storage is full", "has been removed", "copyright", "age-restricted", "can not be downloaded",
-            "v2-only", "unsafe file path", "does not exist any more", "engine is not available", "invalid torrent metadata"
+            "requested format is not available", "can not join the downloaded", "v2-only", "unsafe file path", "does not exist any more", "engine is not available", "invalid torrent metadata"
         ).any { m.contains(it) }
     }
 
@@ -419,7 +421,10 @@ object DownloadManager {
                 fileUri = saved.uri
             )
         }
-        DownloadStore.get(id)?.let { DownloadService.notifyDone(app, it) }
+        DownloadStore.get(id)?.let {
+            DownloadService.notifyDone(app, it)
+            attachSubtitles(app, it, saved)
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -440,10 +445,12 @@ object DownloadManager {
      */
     private fun usesYtdlp(item: DownloadItem): Boolean {
         val src = item.source
-        if (!com.example.BuildConfig.ENABLE_YTDLP || item.headers.isNotEmpty()) return false
+        if (!com.example.BuildConfig.ENABLE_YTDLP) return false
         if (!src.startsWith("http://", ignoreCase = true) && !src.startsWith("https://", ignoreCase = true)) return false
         val path = src.substringBefore('?').substringBefore('#').lowercase()
-        if (path.endsWith(".m3u8") || path.endsWith(".mpd")) return true
+        // HLS / DASH can never be fetched as one file: they go through yt-dlp WITH the provider's headers
+        if (path.endsWith(".m3u8") || path.endsWith(".mpd") || path.contains(".m3u8/")) return true
+        if (item.headers.isNotEmpty()) return false
         return YtdlpManager.requiresYtdlp(src)
     }
 
@@ -455,6 +462,50 @@ object DownloadManager {
             item.isAudio -> YtdlpDownloader.AUDIO_FORMAT
             youtube -> YtdlpDownloader.YOUTUBE_SPLIT_FORMAT
             else -> null
+        }
+    }
+
+    /**
+     * HLS / DASH link without a chosen quality: the best video with every audio language the manifest offers
+     * (null = yt-dlp's own default). Only formats the manifest really lists are used.
+     */
+    private suspend fun autoManifestFormats(app: Context, item: DownloadItem): String? {
+        if (item.isAudio) return null
+        val path = item.source.substringBefore('?').substringBefore('#').lowercase()
+        if (!(path.endsWith(".m3u8") || path.endsWith(".mpd") || path.contains(".m3u8/"))) return null
+        return try {
+            YtdlpProbe.autoSpec(app, item.source, item.headers)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** Provider subtitles of a finished download become subtitle tracks of the saved video. */
+    private fun attachSubtitles(app: Context, item: DownloadItem, saved: DownloadFileSaver.Saved) {
+        if (item.subtitles.isEmpty()) return
+        scope.launch(Dispatchers.IO) {
+            val used = HashSet<String>()
+            for (sub in item.subtitles) {
+                try {
+                    val local = com.example.util.media.SubtitleDownloader.download(app, sub.uri, item.headers) ?: continue
+                    val kept = CustomSubtitlePersistenceManager.persistSubtitleFromFile(app, local)
+                    val base = sub.title.ifBlank { sub.language }.ifBlank { "Subtitle" }
+                    var name = base
+                    var n = 2
+                    while (!used.add(name.lowercase())) name = "$base ${n++}"
+                    CustomSubtitlePersistenceManager.addAttachedSubtitle(
+                        context = app,
+                        path = saved.path,
+                        uriString = saved.uri,
+                        title = item.title,
+                        filePath = kept.absolutePath,
+                        originalName = name,
+                        isSelected = false
+                    )
+                } catch (_: Throwable) {}
+            }
         }
     }
 
@@ -542,7 +593,7 @@ object DownloadManager {
             YtdlpDownloader.download(
                 context = app,
                 url = item.source,
-                formats = ytdlpFormats(item),
+                formats = ytdlpFormats(item) ?: autoManifestFormats(app, item),
                 workDir = dir,
                 headers = item.headers,
                 isCancelled = isCancelled

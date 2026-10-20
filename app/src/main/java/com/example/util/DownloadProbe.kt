@@ -16,7 +16,12 @@ data class FormatOption(
     val hasAudio: Boolean,
     /** Frame height in pixels (0 = unknown / audio). */
     val height: Int = 0,
-    val fps: Int = 0
+    val fps: Int = 0,
+    /**
+     * Full yt-dlp `--format` string of this quality, with fallbacks (a comma separates the video and the audio stream
+     * that are fetched one after another and joined afterwards). null = [id] alone is used.
+     */
+    val spec: String? = null
 )
 
 data class LinkInfo(
@@ -42,7 +47,9 @@ data class DownloadRequest(
     /** Cover / thumbnail of the link (embedded into downloaded audio, shown on the Download page). */
     val thumbnailUrl: String? = null,
     /** HTTP headers (Referer / User-Agent / ...) the link needs; used by media-plugin streams. */
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    /** Subtitle tracks the provider lists for this stream; attached to the downloaded video when it is finished. */
+    val subtitles: List<com.example.util.media.MediaSubtitle> = emptyList()
 )
 
 /**

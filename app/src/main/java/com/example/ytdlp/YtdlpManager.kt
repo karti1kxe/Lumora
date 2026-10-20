@@ -270,6 +270,7 @@ object YtdlpManager {
     context: Context,
     source: String,
     preferences: YtdlPreferences,
+    headers: Map<String, String> = emptyMap(),
   ): Result<String> =
     withContext(Dispatchers.IO) {
       try {
@@ -291,9 +292,22 @@ object YtdlpManager {
               add("--user-agent")
               add(it)
             }
-            preferences.referer.get().takeIf(String::isNotBlank)?.let {
+            if (preferences.customUserAgent.get().isBlank()) {
+              headers.entries.firstOrNull { it.key.equals("User-Agent", true) && it.value.isNotBlank() }?.let {
+                add("--user-agent")
+                add(it.value)
+              }
+            }
+            (preferences.referer.get().takeIf(String::isNotBlank)
+              ?: headers.entries.firstOrNull { it.key.equals("Referer", true) && it.value.isNotBlank() }?.value)?.let {
               add("--referer")
               add(it)
+            }
+            for ((k, v) in headers) {
+              if (k.isBlank() || v.isBlank() || k.equals("User-Agent", true) || k.equals("Referer", true) || k.equals("Referrer", true)) continue
+              if (k.lowercase() in setOf("host", "range", "accept-encoding", "content-length", "connection")) continue
+              add("--add-header")
+              add("$k:$v")
             }
             preferences.proxy.get().takeIf(String::isNotBlank)?.let {
               add("--proxy")
@@ -311,6 +325,10 @@ object YtdlpManager {
             File(context.applicationInfo.nativeLibraryDir, "libqjs.so").takeIf(File::isFile)?.let {
               add("--js-runtimes")
               add("quickjs:${it.absolutePath}")
+              // same as the downloader: without the solver script the quality list only holds the reduced set that
+              // the real download never sees (HLS renditions with a made-up size)
+              add("--remote-components")
+              add("ejs:github")
             }
             add("--")
             add(source)

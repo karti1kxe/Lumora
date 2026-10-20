@@ -22,65 +22,85 @@ object MediaMuxHelper {
     class Cancelled : RuntimeException("cancelled")
 
     /** Video-only [videoFile] + audio-only [audioFile] -> [out] (mp4 or webm, chosen from the out file's extension). */
-    fun mux(videoFile: File, audioFile: File, out: File, isCancelled: () -> Boolean) {
-        val format = if (out.extension.equals("webm", ignoreCase = true)) MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
-        else MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+    fun mux(videoFile: File, audioFile: File, out: File, isCancelled: () -> Boolean) =
+        muxMulti(videoFile, listOf(audioFile), out, isCancelled)
+
+    /**
+     * One video + every audio file (several languages) -> [out]. All audio tracks are copied unchanged; a track this
+     * phone's muxer refuses is skipped (the first audio must work). WebM keeps only the first audio.
+     */
+    fun muxMulti(videoFile: File, audioFiles: List<File>, out: File, isCancelled: () -> Boolean) {
+        val isWebm = out.extension.equals("webm", ignoreCase = true)
+        val format = if (isWebm) MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM else MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+        val files = if (isWebm) audioFiles.take(1) else audioFiles
         val vEx = MediaExtractor()
-        val aEx = MediaExtractor()
+        val aExs = ArrayList<MediaExtractor>()
         var muxer: MediaMuxer? = null
         var started = false
         try {
             vEx.setDataSource(videoFile.absolutePath)
-            aEx.setDataSource(audioFile.absolutePath)
             val vTrack = firstTrack(vEx, "video/") ?: throw IllegalStateException("No video track in the downloaded video")
-            val aTrack = firstTrack(aEx, "audio/") ?: throw IllegalStateException("No audio track in the downloaded audio")
             vEx.selectTrack(vTrack)
-            aEx.selectTrack(aTrack)
             val vFormat = vEx.getTrackFormat(vTrack)
-            val aFormat = aEx.getTrackFormat(aTrack)
 
             muxer = MediaMuxer(out.absolutePath, format)
             if (vFormat.containsKey(MediaFormat.KEY_ROTATION)) {
                 try { muxer.setOrientationHint(vFormat.getInteger(MediaFormat.KEY_ROTATION)) } catch (_: Throwable) {}
             }
             val vOut = muxer.addTrack(vFormat)
-            val aOut = muxer.addTrack(aFormat)
+            val audioOuts = ArrayList<Int>()
+            var maxHint = maxOf(sizeHint(vFormat), 1 shl 20)
+            for ((i, f) in files.withIndex()) {
+                val ex = MediaExtractor()
+                try {
+                    ex.setDataSource(f.absolutePath)
+                    val t = firstTrack(ex, "audio/") ?: throw IllegalStateException("No audio track in the downloaded audio")
+                    ex.selectTrack(t)
+                    val fmt = ex.getTrackFormat(t)
+                    val outIndex = muxer.addTrack(fmt)
+                    aExs += ex
+                    audioOuts += outIndex
+                    maxHint = maxOf(maxHint, sizeHint(fmt))
+                } catch (e: Exception) {
+                    try { ex.release() } catch (_: Throwable) {}
+                    if (i == 0) throw e
+                }
+            }
             muxer.start()
             started = true
 
-            var buffer = ByteBuffer.allocateDirect(maxOf(sizeHint(vFormat), sizeHint(aFormat), 1 shl 20))
+            var buffer = ByteBuffer.allocateDirect(maxHint)
             val info = MediaCodec.BufferInfo()
-            var vDone = false
-            var aDone = false
+            val all = ArrayList<MediaExtractor>().apply { add(vEx); addAll(aExs) }
+            val outs = ArrayList<Int>().apply { add(vOut); addAll(audioOuts) }
+            val done = BooleanArray(all.size)
             var counter = 0
-            // the two streams are written in time order, so the file plays and seeks smoothly
-            while (!vDone || !aDone) {
+            // all streams are written in time order, so the file plays and seeks smoothly
+            while (done.any { !it }) {
                 if ((++counter and 0xFF) == 0 && isCancelled()) throw Cancelled()
-                val useVideo = when {
-                    vDone -> false
-                    aDone -> true
-                    else -> vEx.sampleTime <= aEx.sampleTime
+                var pick = -1
+                var pickTime = Long.MAX_VALUE
+                for (i in all.indices) {
+                    if (done[i]) continue
+                    val t = all[i].sampleTime
+                    if (t < 0L) { done[i] = true; continue }
+                    if (t < pickTime) { pickTime = t; pick = i }
                 }
-                val ex = if (useVideo) vEx else aEx
+                if (pick < 0) break
+                val ex = all[pick]
                 val size = ex.sampleSize
-                if (size < 0L || ex.sampleTime < 0L) {
-                    if (useVideo) vDone = true else aDone = true
-                    continue
-                }
+                if (size < 0L) { done[pick] = true; continue }
                 if (size > buffer.capacity()) buffer = ByteBuffer.allocateDirect((size * 2).toInt())
                 buffer.clear()
                 val read = ex.readSampleData(buffer, 0)
-                if (read < 0) {
-                    if (useVideo) vDone = true else aDone = true
-                    continue
-                }
+                if (read < 0) { done[pick] = true; continue }
                 info.set(0, read, ex.sampleTime, flagsOf(ex.sampleFlags))
-                muxer.writeSampleData(if (useVideo) vOut else aOut, buffer, info)
+                muxer.writeSampleData(outs[pick], buffer, info)
                 ex.advance()
             }
         } finally {
             try { vEx.release() } catch (_: Throwable) {}
-            try { aEx.release() } catch (_: Throwable) {}
+            for (e in aExs) { try { e.release() } catch (_: Throwable) {} }
             try { if (started) muxer?.stop() } catch (_: Throwable) {}
             try { muxer?.release() } catch (_: Throwable) {}
         }

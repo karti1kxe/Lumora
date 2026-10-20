@@ -42,7 +42,9 @@ data class DownloadItem(
     val headers: Map<String, String> = emptyMap(),
     /** [DownloadSourceType.TORRENT]: [source] is the magnet / .torrent source and only file [torrentFileIndex] is downloaded. */
     val sourceType: DownloadSourceType = DownloadSourceType.LINK,
-    val torrentFileIndex: Int = -1
+    val torrentFileIndex: Int = -1,
+    /** Provider subtitle tracks that are attached to the finished video. */
+    val subtitles: List<com.example.util.media.MediaSubtitle> = emptyList()
 ) {
     val isActive: Boolean
         get() = status == DownloadStatus.QUEUED || status == DownloadStatus.DOWNLOADING || status == DownloadStatus.PROCESSING
@@ -189,7 +191,14 @@ object DownloadStore {
                         m
                     } ?: emptyMap(),
                     sourceType = try { DownloadSourceType.valueOf(o.optString("stype", "LINK")) } catch (_: Throwable) { DownloadSourceType.LINK },
-                    torrentFileIndex = o.optInt("tfi", -1)
+                    torrentFileIndex = o.optInt("tfi", -1),
+                    subtitles = o.optJSONArray("subs")?.let { a ->
+                        (0 until a.length()).mapNotNull { j ->
+                            val so = a.optJSONObject(j) ?: return@mapNotNull null
+                            val u = so.optString("u")
+                            if (u.isBlank()) null else com.example.util.media.MediaSubtitle(so.optString("t"), so.optString("l"), u)
+                        }
+                    } ?: emptyList()
                 )
             }
         } catch (_: Throwable) {
@@ -221,6 +230,11 @@ object DownloadStore {
                         if (e.sourceType != DownloadSourceType.LINK) {
                             put("stype", e.sourceType.name)
                             put("tfi", e.torrentFileIndex)
+                        }
+                        if (e.subtitles.isNotEmpty()) {
+                            val a = JSONArray()
+                            for (s in e.subtitles) a.put(JSONObject().put("t", s.title).put("l", s.language).put("u", s.uri))
+                            put("subs", a)
                         }
                         if (e.headers.isNotEmpty()) {
                             val h = JSONObject()

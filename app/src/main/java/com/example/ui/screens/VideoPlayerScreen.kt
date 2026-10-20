@@ -3025,10 +3025,12 @@ fun VideoPlayerScreen(
         // Streams (online / M3U live TV) always show it so a black screen never looks like a hang.
         // A torrent also shows it while the engine is still starting / fetching metadata / filling the first buffer
         // (isPlaying is still false then), so speed | peers | buffer % are visible from the very first second.
+        // mpvRx behaviour: the animation covers ONLY the start-up (engine starting / metadata / first pieces) and a REAL
+        // mpv cache stall (isBuffering = paused-for-cache / seeking). Once the video plays, the engine's read-ahead
+        // percentage (bufferReady) must NOT bring the animation back: the rest of the file keeps downloading silently.
         val torrentLoading = isTorrentVideo && (
             isBuffering ||
-                torrentState is com.example.torrent.TorrentStreamingState.Connecting ||
-                (torrentState as? com.example.torrent.TorrentStreamingState.Streaming)?.bufferReady == false
+                torrentState is com.example.torrent.TorrentStreamingState.Connecting
             )
         if (((uiState.playerSettings.showLoadingCircle || controller.onlineStreamMode) &&
             isBuffering && isPlaying) || torrentLoading) {
