@@ -265,6 +265,10 @@ object DownloadManager {
                 linkDir(app, id).deleteRecursively()
             } catch (_: Throwable) {
             }
+            try {
+                torrentDir(app, id).deleteRecursively()
+            } catch (_: Throwable) {
+            }
         }
     }
 
@@ -278,6 +282,14 @@ object DownloadManager {
         File(app.getExternalFilesDir(null) ?: app.filesDir, "downloads").apply { mkdirs() }
 
     private fun linkDir(app: Context, id: String): File = File(baseDir(app), id)
+
+    /**
+     * Torrent data lives in the app's INTERNAL storage (a real ext4 / f2fs filesystem), not in the FUSE-backed external
+     * files folder: libtorrent's memory-mapped writes are not safe there. It survives app restarts / crashes, so a
+     * torrent continues from the pieces that are already on disk.
+     */
+    private fun torrentDir(app: Context, id: String): File =
+        File(File(app.filesDir, "torrent_downloads"), id)
 
     private fun looksAudio(url: String): Boolean {
         val host = try { java.net.URI(url).host?.lowercase() ?: "" } catch (_: Throwable) { "" }
@@ -584,10 +596,11 @@ object DownloadManager {
      */
     private suspend fun runTorrent(app: Context, id: String) {
         val item = DownloadStore.get(id) ?: return
-        val dir = File(linkDir(app, id), "torrent").apply { mkdirs() }
+        val dir = torrentDir(app, id).apply { mkdirs() }
         val isCancelled = { stops.containsKey(id) }
 
         var speed = 0.0
+        var lastPersistAt = 0L
         val file: File? = TorrentDownloadEngine.download(
             context = app,
             source = item.source,
@@ -601,15 +614,23 @@ object DownloadManager {
                 val sp = speed.toLong()
                 val total = if (p.totalBytes > 0L) p.totalBytes else item.totalBytes
                 val eta = if (sp > 0L && total > p.downloadedBytes) (total - p.downloadedBytes) / sp else -1L
-                DownloadStore.update(app, id) {
+                // progress is written to disk every few seconds (not only on state changes), so after a crash / kill the
+                // Download page and the resumed download continue from the saved progress instead of 0
+                val now = System.currentTimeMillis()
+                val persistNow = now - lastPersistAt >= 4_000L
+                if (persistNow) lastPersistAt = now
+                DownloadStore.update(app, id, persist = persistNow) {
                     if (it.status == DownloadStatus.DOWNLOADING) {
+                        // libtorrent re-verifies the data already on disk after a restart and reports 0 meanwhile: the
+                        // shown progress never goes backwards
+                        val shown = maxOf(p.downloadedBytes, it.downloadedBytes)
                         it.copy(
-                            downloadedBytes = p.downloadedBytes,
+                            downloadedBytes = shown,
                             totalBytes = total,
                             speedBps = sp,
                             etaSec = eta,
                             // a note hides the progress bar / speed of the Download page: only used while no data flows yet
-                            note = p.phase
+                            note = p.phase ?: if (p.downloadedBytes < it.downloadedBytes) "Resuming from saved progress…" else null
                         )
                     } else it
                 }
@@ -628,6 +649,7 @@ object DownloadManager {
             ?: throw IllegalStateException("Could not save the file (is the storage full?)")
         complete(app, id, saved)
         try { linkDir(app, id).deleteRecursively() } catch (_: Throwable) {}
+        try { torrentDir(app, id).deleteRecursively() } catch (_: Throwable) {}
     }
 
     /**

@@ -43,6 +43,7 @@ class TorrentProxyServer(
     private const val READ_AHEAD_BYTES = 16L * 1024L * 1024L
     private const val PIECE_WAIT_TIMEOUT_MS = 120_000L
     private const val PIECE_POLL_INTERVAL_MS = 40L
+    private const val PLAYBACK_READER_MIN_BYTES = 512L * 1024L
   }
 
   private class HeadResponse(
@@ -54,6 +55,14 @@ class TorrentProxyServer(
   private val capability = UUID.randomUUID().toString().replace("-", "")
   private val route = "/stream/$capability"
   private val openStreams = ConcurrentHashMap.newKeySet<TorrentStreamInputStream>()
+  /**
+   * File offset (relative to the selected file) the main playback reader is at. Short head / tail probes that mpv issues
+   * while it opens the file are ignored, so this follows the real playhead and drives the buffering percentage.
+   */
+  @Volatile
+  var playbackOffset: Long = 0L
+    private set
+
   private val priorityLock = Any()
   private var prioritizedFrom = -1
   private var prioritizedThrough = -1
@@ -98,6 +107,7 @@ class TorrentProxyServer(
               length = range.length,
               prioritize = ::prioritize,
               onActivity = onActivity,
+              onPlayback = { playbackOffset = it },
               onClosed = { openStreams.remove(it) },
             )
           openStreams += stream
@@ -176,10 +186,12 @@ class TorrentProxyServer(
     private val length: Long,
     private val prioritize: (Long) -> Unit,
     private val onActivity: () -> Unit,
+    private val onPlayback: (Long) -> Unit,
     private val onClosed: (TorrentStreamInputStream) -> Unit,
   ) : InputStream() {
     private var input: RandomAccessFile? = null
     private var position = 0L
+    private var served = 0L
     private var closed = false
 
     override fun read(): Int {
@@ -210,6 +222,9 @@ class TorrentProxyServer(
       val read = file.read(buffer, offset, requested)
       if (read < 0) throw IOException("Verified torrent data was not available on disk")
       position += read
+      served += read
+      // a reader that has served more than a probe's worth of data is the playback reader
+      if (served > PLAYBACK_READER_MIN_BYTES) onPlayback(startOffset + position)
       onActivity()
       return read
     }

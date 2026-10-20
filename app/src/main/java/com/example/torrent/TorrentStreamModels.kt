@@ -87,6 +87,8 @@ sealed class TorrentStreamingState {
     val bufferProgress: Float,
     val totalProgress: Float,
     val downloadedBytes: Long = 0L,
+    /** true once the data right at the playback position is on disk (see TorrentStreamingEngine.awaitInitialBuffer). */
+    val bufferReady: Boolean = false,
   ) : TorrentStreamingState()
 
   data class Error(val message: String) : TorrentStreamingState()

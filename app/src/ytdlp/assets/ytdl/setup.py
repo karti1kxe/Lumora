@@ -17,18 +17,6 @@ for path in (scriptdest, "youtube-dl", download_name):
     except:
         pass
 
-# The Android Python runtime must be shipped beside libytdl.so. Downloading the
-# yt-dlp script alone cannot provide this native dependency. Fail with an actionable
-# message instead of reporting a misleading generic network error.
-python_lib = os.path.join(native_lib_dir, "libpython3.13.so")
-if not os.path.isfile(python_lib):
-    # Some builds name the library libpython.so; accept that ABI packaging too.
-    python_lib = os.path.join(native_lib_dir, "libpython.so")
-if not os.path.isfile(python_lib):
-    print("Missing Android Python runtime: libpython3.13.so (or libpython.so) was not packaged for this device ABI.")
-    print("This is a build/package issue, not a network connection issue.")
-    sys.exit(1)
-
 print("Downloading '{}' to '{}'...".format(url, download_name))
 try:
     # Use a real browser user-agent for download

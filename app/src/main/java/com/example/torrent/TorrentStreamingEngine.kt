@@ -61,6 +61,11 @@ class TorrentStreamingEngine(
     private const val MAX_TORRENT_FILES = 100_000
     private const val STATUS_INTERVAL_MS = 1_000L
 
+    /** Data that must be on disk right at the playback position before mpv is started (and the 100% of the % shown). */
+    private const val INITIAL_BUFFER_BYTES = 12L * 1024L * 1024L
+    private const val BUFFER_WAIT_TIMEOUT_MS = 240_000L
+    private const val NO_PEERS_TIMEOUT_MS = 120_000L
+
     private val playableMimeTypes =
       mapOf(
         "3g2" to "video/3gpp2",
@@ -246,6 +251,12 @@ class TorrentStreamingEngine(
           val firstPiece = (fileOffset / pieceLength).toInt()
           val lastPiece = ((fileOffset + selected.size - 1L) / pieceLength).toInt()
           val selectedPath = safeCacheFile(preparedSession.cacheDir, selected.path)
+          // libtorrent writes through memory-mapped files: on a full disk that is a SIGBUS (process crash), not an
+          // IOException, so a nearly full device is refused up front.
+          val requiredSpace = minOf(selected.size, 1024L * 1024L * 1024L) + 64L * 1024L * 1024L
+          if (preparedSession.cacheDir.usableSpace < requiredSpace) {
+            throw streamError("Not enough free storage to stream this file. Free some space and try again.")
+          }
 
           val startedProxy =
             TorrentProxyServer(
@@ -272,7 +283,17 @@ class TorrentStreamingEngine(
               torrentName = preparedSession.torrentName,
               playableFiles = preparedSession.playableFiles,
             )
-          val statsJob = startStatsMonitoring(startGeneration, preparedSession.handle, result)
+          val statsJob =
+            startStatsMonitoring(
+              startGeneration = startGeneration,
+              handle = preparedSession.handle,
+              result = result,
+              proxy = startedProxy,
+              fileOffset = fileOffset,
+              pieceLength = pieceLength,
+              firstPiece = firstPiece,
+              lastPiece = lastPiece,
+            )
           active =
             ActiveStream(
               preparedSession.session,
@@ -656,18 +677,29 @@ class TorrentStreamingEngine(
     startGeneration: Long,
     handle: TorrentHandle,
     result: TorrentStreamResult,
+    proxy: TorrentProxyServer,
+    fileOffset: Long,
+    pieceLength: Int,
+    firstPiece: Int,
+    lastPiece: Int,
   ): Job =
     scope.launch {
       while (isActive && generation.get() == startGeneration && handle.isValid) {
         try {
           val status = handle.status()
           val downloaded = handle.fileProgress().getOrNull(result.selectedFile.index)?.coerceAtLeast(0L) ?: 0L
-          val bufferProgress =
-            if (result.selectedFile.size > 0L) {
-              (downloaded.toDouble() / result.selectedFile.size.toDouble()).coerceIn(0.0, 1.0).toFloat()
-            } else {
-              0f
-            }
+          // Real buffer: how much of the data from the CURRENT playback position onwards is already verified on
+          // disk, measured against the read-ahead target. 100% = mpv can start / keep playing without waiting.
+          val (bufferProgress, bufferReady) =
+            computeBuffer(
+              handle = handle,
+              playbackOffset = proxy.playbackOffset,
+              fileOffset = fileOffset,
+              fileSize = result.selectedFile.size,
+              pieceLength = pieceLength,
+              firstPiece = firstPiece,
+              lastPiece = lastPiece,
+            )
           _state.value =
             TorrentStreamingState.Streaming(
               localUrl = result.localUrl,
@@ -681,13 +713,67 @@ class TorrentStreamingEngine(
               bufferProgress = bufferProgress,
               totalProgress = status.progress().coerceIn(0f, 1f),
               downloadedBytes = downloaded,
+              bufferReady = bufferReady,
             )
         } catch (error: Exception) {
           Log.w(TAG, "Unable to read torrent status (${error::class.java.simpleName})")
         }
-        delay(STATUS_INTERVAL_MS)
+        delay(STATUS_INTERVAL_MS / 2)
       }
     }
+
+  /** (progress 0..1, ready) of the contiguous verified data that starts at [playbackOffset] inside the selected file. */
+  private fun computeBuffer(
+    handle: TorrentHandle,
+    playbackOffset: Long,
+    fileOffset: Long,
+    fileSize: Long,
+    pieceLength: Int,
+    firstPiece: Int,
+    lastPiece: Int,
+  ): Pair<Float, Boolean> {
+    if (fileSize <= 0L) return 1f to true
+    val offset = playbackOffset.coerceIn(0L, fileSize - 1L)
+    val target = minOf(INITIAL_BUFFER_BYTES, fileSize - offset).coerceAtLeast(1L)
+    val absStart = fileOffset + offset
+    val absEnd = fileOffset + fileSize
+    var piece = (absStart / pieceLength).toInt().coerceIn(firstPiece, lastPiece)
+    var bytes = 0L
+    while (piece <= lastPiece && bytes < target && handle.havePiece(piece)) {
+      val pieceStart = piece.toLong() * pieceLength
+      val from = maxOf(pieceStart, absStart)
+      val to = minOf(pieceStart + pieceLength, absEnd)
+      bytes += (to - from).coerceAtLeast(0L)
+      piece++
+    }
+    val progress = (bytes.toDouble() / target.toDouble()).coerceIn(0.0, 1.0).toFloat()
+    return progress to (bytes >= target)
+  }
+
+  /**
+   * Suspends until the data at the playback position is on disk, so mpv is only started when it can really play
+   * (mpvRx behaviour: buffer first, play afterwards while the rest keeps downloading in the background). Throws when
+   * the swarm has no peers at all; after a long wait with progress the player is started anyway.
+   */
+  suspend fun awaitInitialBuffer() {
+    val startedAt = System.currentTimeMillis()
+    while (true) {
+      when (val current = _state.value) {
+        is TorrentStreamingState.Streaming -> {
+          if (current.bufferReady) return
+          val waited = System.currentTimeMillis() - startedAt
+          if (waited > NO_PEERS_TIMEOUT_MS && current.peers == 0 && current.downloadedBytes == 0L) {
+            throw streamError("No active peers found for this torrent. Try again later or pick another torrent.")
+          }
+          if (waited > BUFFER_WAIT_TIMEOUT_MS) return
+        }
+        is TorrentStreamingState.Error -> throw streamError(current.message)
+        is TorrentStreamingState.Idle -> throw CancellationException("Torrent stream stopped")
+        else -> Unit
+      }
+      delay(250L)
+    }
+  }
 
   private fun readMetadata(source: String): ByteArray {
     val uri = Uri.parse(source)

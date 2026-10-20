@@ -899,6 +899,11 @@ fun VideoPlayerScreen(
                 )
             )
             if (lastLoadedVideoKey != key) return
+            // mpvRx behaviour: the data at the start must be on disk BEFORE mpv opens the stream, so playback starts
+            // smoothly; the engine keeps downloading ahead in the background while the video plays. The loading
+            // animation shows the engine's real speed / peers / buffer % meanwhile.
+            com.example.torrent.TorrentStreaming.engine(context).awaitInitialBuffer()
+            if (lastLoadedVideoKey != key) return
             controller.loadVideo(result.localUrl, startMs)
             controller.play()
         } catch (c: kotlinx.coroutines.CancellationException) {
@@ -3018,8 +3023,15 @@ fun VideoPlayerScreen(
         // BUFFERING INDICATOR
         // -------------------------------------------------------------
         // Streams (online / M3U live TV) always show it so a black screen never looks like a hang.
-        if ((uiState.playerSettings.showLoadingCircle || controller.onlineStreamMode) &&
-            isBuffering && isPlaying) {
+        // A torrent also shows it while the engine is still starting / fetching metadata / filling the first buffer
+        // (isPlaying is still false then), so speed | peers | buffer % are visible from the very first second.
+        val torrentLoading = isTorrentVideo && (
+            isBuffering ||
+                torrentState is com.example.torrent.TorrentStreamingState.Connecting ||
+                (torrentState as? com.example.torrent.TorrentStreamingState.Streaming)?.bufferReady == false
+            )
+        if (((uiState.playerSettings.showLoadingCircle || controller.onlineStreamMode) &&
+            isBuffering && isPlaying) || torrentLoading) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -3031,7 +3043,7 @@ fun VideoPlayerScreen(
                         size = 56.dp,
                         isDark = true
                     )
-                    if (controller.onlineStreamMode && currentPositionMs <= 200L) {
+                    if (controller.onlineStreamMode && (currentPositionMs <= 200L || isTorrentVideo)) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
                             // torrent: the engine's own phase / "speed | peers | progress" (mpvRx PlayerControls buffering text)

@@ -676,12 +676,35 @@ object YtdlpManager {
       options["exclude"] == DIRECT_MEDIA_EXCLUDE
   }
 
+  /**
+   * The native pieces yt-dlp runs on: libytdl.so (the bridge, built from src/main/cpp) loads libpython.so at run time. They
+   * are packaged per ABI by Gradle (src/ytdlp/jniLibs/<abi>/). When one is missing from the APK the process dies with
+   * "Could not load libpython.so: dlopen failed" — this check reports the real cause (and which file) BEFORE starting it.
+   */
+  private fun missingNativeRuntime(context: Context): List<String> {
+    val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
+    return listOf("libytdl.so", "libpython.so", "libqjs.so").filter { !File(nativeLibDir, it).isFile }
+  }
+
+  private fun nativeRuntimeReady(context: Context, onLog: (String) -> Unit): Boolean {
+    val missing = missingNativeRuntime(context)
+    if (missing.isEmpty()) return true
+    val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+    onLog(
+      "yt-dlp runtime is incomplete: ${missing.joinToString()} missing from this APK ($abi).\n" +
+        "Rebuild the app so that app/src/ytdlp/jniLibs/$abi/libpython.so is packaged (see the build-apk.yml step " +
+        "\"Fetch libpython.so\").\n",
+    )
+    return false
+  }
+
   suspend fun runInstall(
     context: Context,
     onLog: (String) -> Unit,
   ): Boolean =
     withContext(Dispatchers.IO) {
       installMutex.withLock {
+        if (!nativeRuntimeReady(context, onLog)) return@withLock false
         if (!prepareRuntimeAssets(context, onLog)) return@withLock false
         installYtdlp(context, onLog)
       }
@@ -693,6 +716,7 @@ object YtdlpManager {
   ): Boolean =
     withContext(Dispatchers.IO) {
       installMutex.withLock {
+        if (!nativeRuntimeReady(context, onLog)) return@withLock false
         if (!prepareRuntimeAssets(context, onLog) || !isInstalled(context)) {
           _installationInfo.value = readInstallationInfo(context)
           return@withLock false
@@ -718,6 +742,7 @@ object YtdlpManager {
   ): Boolean =
     withContext(Dispatchers.IO) {
       installMutex.withLock {
+        if (!nativeRuntimeReady(context, onLog)) return@withLock false
         if (!prepareRuntimeAssets(context, onLog) || !isInstalled(context)) {
           _installationInfo.value = readInstallationInfo(context)
           return@withLock false

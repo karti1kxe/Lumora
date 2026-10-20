@@ -40,6 +40,7 @@ object TorrentDownloadEngine {
     private const val METADATA_TIMEOUT_MS = 120_000L
     private const val MAX_METADATA_BYTES = 16L * 1024L * 1024L
     private const val POLL_MS = 1_000L
+    private const val MIN_FREE_HEADROOM_BYTES = 64L * 1024L * 1024L
 
     data class Progress(
         val downloadedBytes: Long,
@@ -128,6 +129,15 @@ object TorrentDownloadEngine {
                 relativePath.replace('\\', '/').split('/').any { it == ".." }
             ) throw TorrentStreamException("Torrent metadata contains an unsafe file path.")
 
+            // libtorrent 2.x writes through memory-mapped files: a full disk (or a filesystem that cannot grow sparse
+            // files) kills the whole process with SIGBUS instead of failing the write, which looked like "the app
+            // crashes right after the download starts". So the free space is checked BEFORE any data is requested.
+            val alreadyOnDisk = File(saveDir, relativePath).takeIf { it.isFile }?.length() ?: 0L
+            val neededBytes = (size - alreadyOnDisk).coerceAtLeast(0L) + MIN_FREE_HEADROOM_BYTES
+            if (saveDir.usableSpace < neededBytes) {
+                throw TorrentStreamException("Not enough free storage: the device storage is full.")
+            }
+
             val priorities = Array(storage.numFiles()) { Priority.IGNORE }
             priorities[fileIndex] = Priority.TOP_PRIORITY
             handle.prioritizeFiles(priorities)
@@ -137,8 +147,15 @@ object TorrentDownloadEngine {
             while (true) {
                 if (isCancelled()) return null
                 if (!handle.isValid) throw TorrentStreamException("Torrent session stopped unexpectedly.")
-                val status = handle.status()
-                val done = (handle.fileProgress().getOrNull(fileIndex) ?: 0L).coerceIn(0L, size)
+                val (status, done) = try {
+                    handle.status() to (handle.fileProgress().getOrNull(fileIndex) ?: 0L).coerceIn(0L, size)
+                } catch (error: Exception) {
+                    if (error is CancellationException) throw error
+                    // a single failed status read must never end (or crash) the download: the next tick tries again
+                    Log.w(TAG, "Unable to read torrent status (${error::class.java.simpleName})")
+                    delay(POLL_MS)
+                    continue
+                }
                 onProgress(
                     Progress(
                         downloadedBytes = done,
