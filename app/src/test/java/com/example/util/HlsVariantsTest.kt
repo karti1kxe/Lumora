@@ -36,7 +36,8 @@ https://cdn.example/1080/index.m3u8
     @Test
     fun headerValuesWithCommasKeepTheirCommas() {
         assertEquals("Accept: a/b", StreamRequestOptions.mpvListItem("Accept: a/b"))
-        assertEquals("%24%Accept: text/html,image/png", StreamRequestOptions.mpvListItem("Accept: text/html,image/png"))
+        val text = "Accept: text/html,image/png"
+        assertEquals("%${text.toByteArray().size}%$text", StreamRequestOptions.mpvListItem(text))
     }
 
     @Test

@@ -131,7 +131,9 @@ fun VideoItemCard(
     showNetworkThumbnails: Boolean = false,
     onThumbnailClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
-    reorderMode: Boolean = false
+    reorderMode: Boolean = false,
+    /** Provider (online) cards: a bigger picture that is shown whole instead of cropped. */
+    largeThumbnail: Boolean = false
 ) {
     val surfaceColor = if (isDark) {
         if (isSelected) Color(0xFF1E1B4B).copy(alpha = 0.90f) else DarkGlassSurface
@@ -229,9 +231,10 @@ fun VideoItemCard(
                     showNetworkThumbnails = showNetworkThumbnails,
                     remoteThumbnailUrl = video.thumbnailUrl,
                     onThumbnailClick = onThumbnailClick,
+                    showWholeImage = largeThumbnail,
                     modifier = Modifier
-                        .width(136.dp)
-                        .height(80.dp)
+                        .width(if (largeThumbnail) 178.dp else 136.dp)
+                        .height(if (largeThumbnail) 104.dp else 80.dp)
                 )
             } else {
                 // Compact icon when thumbnails are hidden

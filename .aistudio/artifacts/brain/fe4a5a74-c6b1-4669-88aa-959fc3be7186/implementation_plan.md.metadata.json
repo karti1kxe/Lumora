@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan to resolve the audio attachment failure (VP9 + AAC mux error) by enforcing direct pre-combined progressive MP4 downloads for Instagram, Facebook, and other social media links, preventing post-download audio mixing, and minimizing playback buffering with fast-start stream resolution.",
+  "updatedAt":  "2026-10-23T09:22:03.704581580Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

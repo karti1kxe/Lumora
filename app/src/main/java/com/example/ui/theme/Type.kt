@@ -9,16 +9,16 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 
 /**
- * Custom font family loaded from res/font/ltwave_bold.otf (LTWave-Bold.otf).
+ * Custom font family loaded from res/font/lumora.ttf (Lumora.ttf).
  */
 val AppCustomFontFamily = FontFamily(
-    Font(R.font.ltwave_bold)
+    Font(R.font.lumora)
 )
 
 /**
  * Returns the active font family for the application.
  * When isSystemFontEnabled (or useSystemFont) is enabled, returns the native device default font family (FontFamily.Default).
- * When disabled (default), returns the custom font LTWave-Bold.otf (AppCustomFontFamily).
+ * When disabled (default), returns the custom font Lumora.ttf (AppCustomFontFamily).
  */
 fun getAppFontFamily(isSystemFontEnabled: Boolean): FontFamily {
     return if (isSystemFontEnabled) FontFamily.Default else AppCustomFontFamily

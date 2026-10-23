@@ -54,7 +54,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -99,12 +98,10 @@ import com.example.util.media.MediaPost
 import com.example.util.media.MediaProviderRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 
 /**
- * Network > "Media": the plugin manager. Paste a plugin repository URL (e.g. https://github.com/Zenda-Cross/vega-providers.git),
- * load its plugin list, then download the plugins you want. Every downloaded plugin gets its own tab next to "Media".
+ * Network > "Media": installed providers and retained repository-entry UI. Repository loading and provider install/update actions are disabled;
+ * providers installed before the cleanup remain available for playback.
  */
 @Composable
 fun MediaPluginManager(
@@ -113,8 +110,6 @@ fun MediaPluginManager(
     onOpenPlugin: (MediaPluginInfo) -> Unit = {}
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val focusManager = LocalFocusManager.current
     val clipboard = LocalClipboardManager.current
 
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
@@ -128,18 +123,13 @@ fun MediaPluginManager(
     val installed = remember(tick) { MediaPluginStore.getInstalled(context) }
 
     var repoUrl by rememberSaveable { mutableStateOf(MediaPluginStore.getRepoUrl(context)) }
-    var isLoading by remember { mutableStateOf(false) }
-    var errorText by remember { mutableStateOf<String?>(null) }
-    val busy = remember { mutableStateListOf<String>() }
-    var bulkLabel by remember { mutableStateOf<String?>(null) }
 
-    // Downloaded plugins are listed first (the one downloaded last on top) and stay listed when another repository is loaded;
-    // the not downloaded ones of the loaded repository follow. The scroll position is never moved by a download or a removal.
+    // Installed plugins are listed first; repository entries follow.
     val ordered = remember(manifest, installed) {
         val manifestById = manifest.associateBy { it.value }
         val done = installed.sortedByDescending { it.installedAt }.map { inst ->
             val listed = manifestById[inst.value]
-            // the repository's entry carries the newest version / description; fall back to what was saved at download time
+            // fall back to the locally saved version / description
             listed ?: inst
         }
         val installedIds = installed.map { it.value }.toSet()
@@ -154,61 +144,7 @@ fun MediaPluginManager(
         }
     }
 
-    fun loadRepo() {
-        if (repoUrl.isBlank() || isLoading) return
-        focusManager.clearFocus()
-        isLoading = true
-        errorText = null
-        scope.launch {
-            val result = MediaPluginStore.refreshManifest(context, repoUrl)
-            result.onFailure { errorText = it.message ?: "Could not load the repository" }
-            isLoading = false
-            // the providers that are already downloaded are refreshed from the repository too (latest code, latest site addresses)
-            if (result.isSuccess) {
-                val n = MediaPluginStore.updateInstalled(context)
-                if (n > 0) Toast.makeText(context, "$n provider(s) updated", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
 
-    fun downloadOne(plugin: MediaPluginInfo) {
-        if (busy.contains(plugin.value)) return
-        busy.add(plugin.value)
-        scope.launch {
-            val r = MediaPluginStore.download(context, plugin)
-            busy.remove(plugin.value)
-            r.onFailure {
-                Toast.makeText(context, plugin.name + ": " + (it.message ?: "download failed"), Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    fun downloadAll() {
-        if (bulkLabel != null) return
-        val todo = manifest.filter { MediaPluginStore.getInstalledVersion(context, it.value) != it.version }
-        if (todo.isEmpty()) return
-        scope.launch {
-            var done = 0
-            var failed = 0
-            val gate = Semaphore(3)
-            val jobs = todo.map { plugin ->
-                launch {
-                    gate.withPermit {
-                        busy.add(plugin.value)
-                        val r = MediaPluginStore.download(context, plugin)
-                        busy.remove(plugin.value)
-                        if (r.isFailure) failed++
-                        done++
-                        bulkLabel = "Downloading $done/${todo.size}"
-                    }
-                }
-            }
-            bulkLabel = "Downloading 0/${todo.size}"
-            jobs.forEach { it.join() }
-            bulkLabel = null
-            if (failed > 0) Toast.makeText(context, "$failed plugin(s) could not be downloaded", Toast.LENGTH_SHORT).show()
-        }
-    }
 
     Column(modifier = modifier.fillMaxSize()) {
         // repository URL card (same look as the Local Network link field)
@@ -254,12 +190,12 @@ fun MediaPluginManager(
                         textStyle = TextStyle(color = primaryText, fontSize = 15.sp, fontWeight = FontWeight.Normal),
                         cursorBrush = SolidColor(AccentSkyBlue),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
-                        keyboardActions = KeyboardActions(onGo = { loadRepo() }),
+                        keyboardActions = KeyboardActions(onGo = { }),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
                 if (repoUrl.isNotEmpty()) {
-                    // cancel: removes the whole pasted link in one tap (the downloaded providers below stay)
+                    // cancel: removes the text from the retained repository input
                     Box(
                         modifier = Modifier
                             .size(40.dp)
@@ -269,7 +205,6 @@ fun MediaPluginManager(
                                 indication = null
                             ) {
                                 repoUrl = ""
-                                errorText = null
                                 pasteFlash = false
                             },
                         contentAlignment = Alignment.Center
@@ -309,7 +244,7 @@ fun MediaPluginManager(
                 }
             }
             Spacer(modifier = Modifier.width(10.dp))
-            val canLoad = repoUrl.isNotBlank() && !isLoading
+            val canLoad = false
             Box(
                 modifier = Modifier
                     .size(56.dp)
@@ -319,40 +254,26 @@ fun MediaPluginManager(
                         if (canLoad) Modifier.clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
-                        ) { loadRepo() } else Modifier
+                        ) { } else Modifier
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                if (canLoad || isLoading) Box(modifier = Modifier.fillMaxSize().background(AccentGradient))
-                if (isLoading) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color.White, strokeWidth = 2.6.dp)
-                } else {
-                    StyledIcon(
-                        drawableRes = R.drawable.lumora_download_minimalistic,
-                        contentDescription = "Load plugins",
-                        tint = if (canLoad) Color.White else secondaryText.copy(alpha = 0.75f),
-                        modifier = Modifier.size(26.dp)
-                    )
-                }
+                StyledIcon(
+                    drawableRes = R.drawable.lumora_download_minimalistic,
+                    contentDescription = "Plugin repository loading disabled",
+                    tint = secondaryText.copy(alpha = 0.45f),
+                    modifier = Modifier.size(26.dp)
+                )
             }
         }
 
         Spacer(modifier = Modifier.height(10.dp))
         com.example.ui.components.NetworkBypassCard(isDark = isDark)
 
-        errorText?.let {
-            Text(
-                text = it,
-                fontSize = 12.5.sp,
-                color = Color(0xFFEF4444),
-                modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 10.dp)
-            )
-        }
-
-        if (manifest.isEmpty()) {
+        if (manifest.isEmpty() && installed.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
                 Text(
-                    text = "Paste a plugin repository link (for example github.com/Zenda-Cross/vega-providers) and tap download to list its websites.",
+                    text = "Plugin repository loading and provider installs are disabled. Previously installed providers can still be opened.",
                     fontSize = 13.sp,
                     color = secondaryText,
                     modifier = Modifier.padding(horizontal = 28.dp, vertical = 32.dp)
@@ -366,16 +287,14 @@ fun MediaPluginManager(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Plugins (${manifest.size})",
+                    text = "Plugins (${ordered.size})",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = primaryText,
                     modifier = Modifier.weight(1f)
                 )
                 val pending = manifest.count { p -> installed.firstOrNull { it.value == p.value }?.version != p.version }
-                if (bulkLabel != null) {
-                    Text(text = bulkLabel.orEmpty(), fontSize = 12.5.sp, color = secondaryText)
-                } else if (pending > 0) {
+                if (pending > 0) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(16.dp))
@@ -384,10 +303,10 @@ fun MediaPluginManager(
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null
-                            ) { downloadAll() }
+                            ) { }
                             .padding(horizontal = 14.dp, vertical = 8.dp)
                     ) {
-                        Text(text = "Download all", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = primaryText)
+                        Text(text = "Install all (disabled)", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = primaryText.copy(alpha = 0.45f))
                     }
                 }
             }
@@ -399,18 +318,16 @@ fun MediaPluginManager(
             ) {
                 items(ordered, key = { it.value }) { plugin ->
                     val installedVersion = installed.firstOrNull { it.value == plugin.value }?.version
-                    val isBusy = busy.contains(plugin.value)
                     PluginRow(
                         modifier = Modifier.animateItem(),
                         onOpen = if (installedVersion != null) { { onOpenPlugin(installed.first { it.value == plugin.value }) } } else null,
                         plugin = plugin,
                         installedVersion = installedVersion,
-                        busy = isBusy,
+                        busy = false,
                         primaryText = primaryText,
                         secondaryText = secondaryText,
                         surfaceColor = surfaceColor,
                         borderColor = borderColor,
-                        onDownload = { downloadOne(plugin) },
                         onRemove = { MediaPluginStore.remove(context, plugin.value) }
                     )
                 }
@@ -430,7 +347,6 @@ private fun PluginRow(
     secondaryText: Color,
     surfaceColor: Color,
     borderColor: Color,
-    onDownload: () -> Unit,
     onRemove: () -> Unit
 ) {
     val isInstalled = installedVersion != null
@@ -500,7 +416,7 @@ private fun PluginRow(
             }
             if (isInstalled) {
                 Text(
-                    text = if (hasUpdate) "Update available · downloaded v$installedVersion" else "Downloaded",
+                    text = if (hasUpdate) "Update available · installed v$installedVersion" else "Installed",
                     fontSize = 12.sp,
                     color = AccentSkyBlue,
                     maxLines = 1,
@@ -508,17 +424,11 @@ private fun PluginRow(
                 )
             }
         }
-        if (busy) {
-            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(modifier = Modifier.size(20.dp), color = AccentSkyBlue, strokeWidth = 2.2.dp)
-            }
-        } else {
-            if (!isInstalled || hasUpdate) {
-                PluginIconButton(R.drawable.lumora_download_minimalistic, if (hasUpdate) "Update" else "Download", primaryText.copy(alpha = 0.9f), onDownload)
-            }
-            if (isInstalled) {
-                PluginIconButton(R.drawable.lumora_trash_bin_2, "Remove", secondaryText.copy(alpha = 0.9f), onRemove)
-            }
+        if (!isInstalled || hasUpdate) {
+            PluginIconButton(R.drawable.lumora_download_minimalistic, if (hasUpdate) "Update (disabled)" else "Download (disabled)", primaryText.copy(alpha = 0.45f)) { }
+        }
+        if (isInstalled) {
+            PluginIconButton(R.drawable.lumora_trash_bin_2, "Remove", secondaryText.copy(alpha = 0.9f), onRemove)
         }
     }
 }

@@ -11,7 +11,7 @@ plugins {
   // were all unused dead weight left over from the AI Studio default template.
 }
 
-// yt-dlp (link play / link download / Settings > Network update). Bundled by default; -PenableYtdlp=false or
+// yt-dlp runtime for Online Video playback / Settings > Network runtime update. No user media download path remains. Bundled by default; -PenableYtdlp=false or
 // ENABLE_YTDLP=false builds without it (no native helpers, no python assets).
 val enableYtdlp: Boolean =
   (providers.gradleProperty("enableYtdlp").orNull ?: System.getenv("ENABLE_YTDLP") ?: "true").toBoolean()
@@ -62,7 +62,7 @@ android {
   sourceSets {
     getByName("main") {
       jniLibs.setSrcDirs(listOf("src/main/jniLibs") + if (enableYtdlp) listOf("src/ytdlp/jniLibs") else emptyList())
-      // ytdl/{setup.py,python313.zip,wrapper} + cacert.pem (see .github/workflows/build-apk.yml)
+      // ytdl/{setup.py,python313.zip,wrapper} + cacert.pem are assembled by .github/workflows/build-apk.yml
       if (enableYtdlp) assets.srcDir("src/ytdlp/assets")
     }
   }
@@ -93,6 +93,7 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = true
       isShrinkResources = true
+      // proguard-android-optimize.txt is required by AGP. Optimization passes can be toggled via -dontoptimize in proguard-rules.pro.
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       val hasReleaseConfig = signingConfigs.findByName("release") != null
       if (hasReleaseConfig) {
@@ -103,6 +104,11 @@ android {
       }
     }
     debug { signingConfig = signingConfigs.getByName("debugConfig") }
+  }
+  // Build time: the release "lintVital" check alone took ~3 min on GitHub Actions and is not needed for the APK.
+  lint {
+    checkReleaseBuilds = false
+    abortOnError = false
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -182,14 +188,12 @@ dependencies {
   // implementation(libs.retrofit)
   implementation(libs.androidx.media)
   implementation(libs.mpv.android.lib)
-  // Torrent streaming / download (ported from mpvRx): libtorrent4j session + one native lib per ABI, and the
-  // loopback byte-range server that feeds the selected file to mpv.
+  // Torrent DOWNLOAD only (no playback / streaming): libtorrent4j session + one native lib per ABI.
   implementation(libs.libtorrent4j)
   implementation(libs.libtorrent4j.android.arm64)
   implementation(libs.libtorrent4j.android.arm)
   implementation(libs.libtorrent4j.android.x86)
   implementation(libs.libtorrent4j.android.x8664)
-  implementation(libs.nanohttpd)
   // CloudStream extension runtime (.cs3 providers, Network > Media > CloudStream repositories)
   implementation(project(":cloudstream-lib"))
   // media3-exoplayer / media3-ui removed: not used anywhere in the code — the app

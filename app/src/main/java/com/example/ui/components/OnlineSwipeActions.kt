@@ -26,9 +26,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import android.widget.Toast
-import androidx.compose.ui.platform.LocalContext
-import com.example.util.DownloadManager
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -92,7 +89,7 @@ fun Modifier.swipeLeftForActions(enabled: Boolean = true, onTriggered: () -> Uni
 
 /**
  * Bottom floating glass toolbar (same look as the selection toolbar of the offline lists):
- * Play next · Play last · Playlist · Watch later · Not interested · Download · Share.
+ * Play next · Play last · Playlist · Watch later · Not interested · Share.
  */
 @Composable
 fun OnlineQuickActionBar(
@@ -101,12 +98,12 @@ fun OnlineQuickActionBar(
     isSavedForLater: Boolean,
     onPlayNext: (() -> Unit)? = null,
     onPlayLast: (() -> Unit)? = null,
+    onDownload: (() -> Unit)? = null,
     onSaveToPlaylist: () -> Unit,
     onWatchLater: () -> Unit,
     onNotInterested: (() -> Unit)? = null,
     onShare: () -> Unit,
-    modifier: Modifier = Modifier,
-    onDownload: (() -> Unit)? = null
+    modifier: Modifier = Modifier
 ) {
     val barBg = if (isDark) {
         if (alphaRatio >= 0.99f) Color(0xFF0F172A)
@@ -143,6 +140,9 @@ fun OnlineQuickActionBar(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (onDownload != null) {
+                QuickActionItem(R.drawable.lumora_download_minimalistic, "Download", AccentSkyBlue, Modifier.width(78.dp), onDownload)
+            }
             if (onPlayNext != null) {
                 QuickActionItem(R.drawable.lumora_next_in_queue, "Play next", Color(0xFF38BDF8), Modifier.width(78.dp), onPlayNext)
             }
@@ -159,9 +159,6 @@ fun OnlineQuickActionBar(
             )
             if (onNotInterested != null) {
                 QuickActionItem(R.drawable.lumora_block, "Not interested", Color(0xFFEF4444), Modifier.width(78.dp), onNotInterested)
-            }
-            if (onDownload != null) {
-                QuickActionItem(R.drawable.lumora_download_minimalistic, "Download", Color(0xFF34D399), Modifier.width(78.dp), onDownload)
             }
             QuickActionItem(R.drawable.lumora_share, "Share", primaryText, Modifier.width(78.dp), onShare)
         }
@@ -212,43 +209,4 @@ fun shareOnlineLink(context: Context, title: String, url: String) {
         }
         context.startActivity(Intent.createChooser(send, "Share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     } catch (_: Throwable) {}
-}
-
-/**
- * Download button of the swipe toolbar: opens the same quality sheet as the Network tab (qualities with their sizes)
- * and starts the download. [audioOnly] (online audio player) shows only the audio qualities; the track's thumbnail
- * is embedded into the downloaded audio file.
- */
-@Composable
-fun OnlineDownloadSheet(
-    isDark: Boolean,
-    glassBlurTransparency: Float,
-    url: String,
-    title: String,
-    author: String?,
-    thumbnailUrl: String?,
-    audioOnly: Boolean,
-    onDismiss: () -> Unit
-) {
-    val context = LocalContext.current
-    DownloadOptionsSheet(
-        isDark = isDark,
-        glassBlurTransparency = glassBlurTransparency,
-        url = url,
-        initialTitle = title,
-        initialAuthor = author,
-        startWithAudio = audioOnly,
-        audioOnly = audioOnly,
-        initialThumbnail = thumbnailUrl,
-        onDismiss = onDismiss,
-        onDownload = { request ->
-            onDismiss()
-            val message = try {
-                DownloadManager.enqueueCustom(context, request)
-            } catch (_: Throwable) {
-                "Could not start the download"
-            }
-            Toast.makeText(context, "$message (see Network › Download)", Toast.LENGTH_SHORT).show()
-        }
-    )
 }

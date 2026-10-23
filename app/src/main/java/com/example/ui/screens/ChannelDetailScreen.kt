@@ -234,7 +234,6 @@ fun ChannelDetailScreen(
     var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     if (actionTarget != null) lastActionTarget = actionTarget
     var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
-    var downloadTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var hiddenVersion by remember { mutableIntStateOf(0) }
     var watchLaterList by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
     LaunchedEffect(Unit) {
@@ -910,25 +909,8 @@ fun ChannelDetailScreen(
                             com.example.ui.components.shareOnlineLink(context, t.title, t.videoUrl)
                             actionTarget = null
                         },
-                        onDownload = {
-                            downloadTarget = t
-                            actionTarget = null
-                        }
                     )
                 }
-            }
-
-            downloadTarget?.let { t ->
-                com.example.ui.components.OnlineDownloadSheet(
-                    isDark = isDark,
-                    glassBlurTransparency = uiState?.glassBlurTransparency ?: 75f,
-                    url = t.videoUrl,
-                    title = t.title,
-                    author = t.artist,
-                    thumbnailUrl = t.thumbnailUrl,
-                    audioOnly = false,
-                    onDismiss = { downloadTarget = null }
-                )
             }
 
             playlistTarget?.let { t ->

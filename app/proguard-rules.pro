@@ -1,3 +1,6 @@
+# Skip R8 optimization passes to reduce build time; shrinking and obfuscation remain active
+-dontoptimize
+
 # Preserve line numbers for stack traces
 -keepattributes SourceFile,LineNumberTable,Signature,InnerClasses,EnclosingMethod,*Annotation*
 
@@ -74,12 +77,9 @@
 -dontwarn javax.**
 -dontwarn java.lang.invoke.**
 
-# Torrent streaming / download (ported from mpvRx): libtorrent4j is a SWIG/JNI binding (native code calls back by
-# name) and NanoHTTPD serves the loopback stream to mpv.
+# Torrent download only: libtorrent4j is a SWIG/JNI binding (native code calls back by name).
 -keep class org.libtorrent4j.** { *; }
 -dontwarn org.libtorrent4j.**
--keep class fi.iki.elonen.** { *; }
--dontwarn fi.iki.elonen.**
 -keep class com.example.torrent.** { *; }
 
 # yt-dlp bridge (ported from mpvRx): driven by name from mpv options / child processes, never reflectively renamed.

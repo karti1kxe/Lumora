@@ -811,111 +811,21 @@ fun VideoPlayerScreen(
         controller.setOnlineStream(true)
         val stream = com.example.util.NetworkStreamResolver.resolve(context, pageUrl)
         if (lastLoadedVideoKey != key) return
-        // Settings > Network: subtitle tracks that the site offers are added once the stream is running (nothing is switched on)
-        if (stream != null && !stream.isAudio && stream.subtitles.isNotEmpty() &&
-            com.example.util.NetworkSettings.downloadSubtitles(context)
-        ) {
-            val withAuto = com.example.util.NetworkSettings.autoSubtitles(context)
-            val wanted = stream.subtitles.filter { withAuto || !it.auto }
-            if (wanted.isNotEmpty()) {
-                coroutineScope.launch {
-                    delay(4000L)
-                    if (lastLoadedVideoKey != key) return@launch
-                    withContext(Dispatchers.IO) {
-                        for (sub in wanted) {
-                            if (lastLoadedVideoKey != key) return@withContext
-                            try { controller.addExternalSubtitle(sub.url, context, originalName = sub.name, select = false) } catch (_: Throwable) {}
-                        }
-                    }
-                }
-            }
-        }
-        if (stream == null) {
-            Toast.makeText(context, "Could not play this link. Check the link and your internet connection.", Toast.LENGTH_LONG).show()
-            return
-        }
-        if (stream.viaYtdlp) {
-            // link of any other site: mpv's ytdl_hook runs the bundled yt-dlp (ported from mpvRx PlayerActivity)
-            controller.setOnlineStream(true)
-            controller.setWebLinkStream(true)
-            controller.setYtdlpStream(true)
-            val ready = withContext(Dispatchers.IO) {
-                com.example.ytdlp.YtdlpManager.prepareForPlayback(context, stream.videoUrl)
-            }
-            if (lastLoadedVideoKey != key) return
-            if (!ready) {
-                // yt-dlp could not be prepared: the link is still tried as a plain stream (works for direct media links)
-                Toast.makeText(context, "yt-dlp is not ready (Settings > Network). Trying the link directly.", Toast.LENGTH_LONG).show()
-                controller.setOnlineStream(true)
-                controller.setDirectStream(true)
-                controller.loadVideo(stream.videoUrl, startMs)
-                controller.play()
-                return
-            }
-            com.example.ytdlp.YtdlpManager.setupMpvOptions(context, com.example.ytdlp.YtdlPreferences.get(context))
-            controller.loadVideo(stream.videoUrl, startMs)
-            controller.play()
-            return
-        }
-        val pbWithQualities = stream.playback
-        if (pbWithQualities != null && !stream.isAudio) {
-            // Same quality menu (Auto / 1080p / 720p ...) as Online Videos: switching reloads at the same second.
-            controller.setOnlineStream(true)
-            beginResolvedPlayback(pbWithQualities, startMs, stream.headers, webLink = true)
-            return
-        }
-        val separateAudio = stream.audioUrl
-        if (separateAudio != null) {
-            controller.setOnlineStream(true, listOf(OnlineAudioSource(separateAudio, "Audio", "")), 0, null)
-            controller.setWebLinkStream(true)
-        } else {
-            controller.setOnlineStream(true)
-            // plain media links and live streams: same handling as imported IPTV channels
-            if (stream.isDirect) controller.setDirectStream(true) else controller.setWebLinkStream(true)
-        }
-        controller.setNetworkRequestHeaders(stream.headers)
-        controller.loadVideo(stream.videoUrl, startMs)
-        controller.play()
-    }
-
-    /**
-     * Torrent item (ported from mpvRx PlayerActivity.startMediaLoad): the engine downloads the first pieces of the chosen
-     * file, serves it on a loopback byte-range URL and mpv plays that URL while the rest keeps downloading.
-     */
-    suspend fun startTorrentPlayback(item: VideoItem, startMs: Long, key: String) {
-        val source = item.path
-        val fileIndex = item.torrentFileIndex
-        if (fileIndex < 0) {
-            // opened without a chosen file (history / recent link): the picker chooses it, then plays it (mpvRx:
-            // redirectUnselectedTorrentToPicker)
-            com.example.torrent.TorrentPickerState.open(source, com.example.torrent.TorrentPickerMode.PLAY)
-            onBack()
+        if (stream == null || stream.isAudio) {
+            Toast.makeText(
+                context,
+                if (stream == null) "Only direct media URLs are supported in Local Network." else "Open this audio link from the audio player.",
+                Toast.LENGTH_LONG
+            ).show()
             return
         }
         controller.setOnlineStream(true)
-        controller.setTorrentStream(true)
-        com.example.torrent.TorrentStreaming.markPlayerOwnsSession()
-        try {
-            val result = com.example.torrent.TorrentStreaming.engine(context).startStream(
-                com.example.torrent.TorrentStreamRequest(
-                    source = source,
-                    fileIndex = fileIndex,
-                    preparationId = com.example.torrent.TorrentStreaming.takePreparation(source, fileIndex)
-                )
-            )
-            if (lastLoadedVideoKey != key) return
-            // mpvRx behaviour: buffer first (the text under the loading animation shows speed | peers | progress of
-            // that start buffer), then play; the engine keeps downloading the rest in the background while it plays.
-            com.example.torrent.TorrentStreaming.engine(context).awaitStartupBuffer(150_000L)
-            if (lastLoadedVideoKey != key) return
-            controller.loadVideo(result.localUrl, startMs)
-            controller.play()
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            throw c
-        } catch (e: com.example.torrent.TorrentStreamException) {
-            Toast.makeText(context, e.message ?: "Could not start this torrent.", Toast.LENGTH_LONG).show()
-            onBack()
-        }
+        controller.setDirectStream(true)
+        controller.setWebLinkStream(false)
+        controller.setYtdlpStream(false)
+        controller.setNetworkRequestHeaders(stream.headers)
+        controller.loadVideo(stream.videoUrl, startMs)
+        controller.play()
     }
 
     val onStartTranslate: (Int) -> Unit = { sourceTrackId ->
@@ -2070,8 +1980,7 @@ fun VideoPlayerScreen(
         }
 
         // 7. Load into MPV engine & initiate playback
-        if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || path.startsWith("http://") || path.startsWith("https://") ||
-                (targetVideo.isNetworkStream && com.example.torrent.isTorrentSource(path)))) {
+        if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || path.startsWith("http://") || path.startsWith("https://"))) {
             val key = "${targetVideo.id}_${path}_$validIndex"
             lastLoadedVideoKey = key
             // A subtitle choice the user made for THIS video must not be overridden (or flashed
@@ -2093,18 +2002,11 @@ fun VideoPlayerScreen(
             coroutineScope.launch {
                 if (firstLoad) kotlinx.coroutines.delay(entryDelayMs)
                 if (lastLoadedVideoKey != key) return@launch
-                // mpvRx: a non-torrent item ends the torrent session of the previous one
-                if (!(targetVideo.isNetworkStream && com.example.torrent.isTorrentSource(path))) {
-                    com.example.torrent.TorrentStreaming.stopPlayback()
-                }
                 if (targetVideo.isDirectStream) {
                     // Imported M3U / IPTV stream: the real stream URL goes straight into the existing mpv player
                     // (with the stream's own User-Agent / headers); no YouTube resolving.
                     onlinePlayback = null
                     openDirectStream(path, initialPos, key)
-                } else if (targetVideo.isNetworkStream && com.example.torrent.isTorrentSource(path)) {
-                    onlinePlayback = null
-                    startTorrentPlayback(targetVideo, initialPos, key)
                 } else if (targetVideo.isNetworkStream) {
                     onlinePlayback = null
                     startNetworkPlayback(path, initialPos, key)
@@ -2462,15 +2364,10 @@ fun VideoPlayerScreen(
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             persistPlaybackPosition()
             controller.release()
-            // player closed: torrent session and its temporary data are cleaned (no-op when no torrent was played)
-            com.example.torrent.TorrentStreaming.stopPlayback()
         }
     }
 
     val isBuffering by controller.isBuffering.collectAsState()
-    val isTorrentVideo = currentVideo?.let { it.isNetworkStream && com.example.torrent.isTorrentSource(it.path) } == true
-    val torrentState by (if (isTorrentVideo) com.example.torrent.TorrentStreaming.engine(context).state
-        else com.example.torrent.TorrentStreaming.idleState).collectAsState()
     val bufferedPositionMs by controller.bufferedPositionMs.collectAsState()
 
     /** Media plugin quality menu: opens the same movie / episode in another quality of that website, from the same second. */
@@ -2485,7 +2382,7 @@ fun VideoPlayerScreen(
         coroutineScope.launch {
             Toast.makeText(context, "Loading $label…", Toast.LENGTH_SHORT).show()
             val result = com.example.util.media.MediaPlayback.resolveChoice(
-                context, session.plugin, choice, session.episodeIndex, session.episodeTitle, session.isSeries, false
+                context, session.plugin, choice, session.episodeIndex, session.episodeTitle, session.isSeries
             )
             val stream = result.getOrNull()
             if (stream == null) {
@@ -2512,8 +2409,6 @@ fun VideoPlayerScreen(
         // a server picked by hand stays: nothing switches it by itself afterwards
         if (!automatic) {
             session.manualChoice = true
-            // the new server gets its own chance: if it does not play either, its download link is tried
-            session.fallbackTried = false
         }
         val pos = controller.currentPositionMs.value
         val loadKey = lastLoadedVideoKey
@@ -2582,87 +2477,6 @@ fun VideoPlayerScreen(
         }
         if (!session.manualChoice && !session.hasPlayed && session.selectedServer + 1 < session.servers.size) {
             switchPluginServer(session.selectedServer + 1, automatic = true)
-        }
-    }
-
-    /**
-     * Streaming keeps buffering / does not start: the same movie / episode is opened from the plugin's own DOWNLOAD link (a
-     * plain file the downloader fetches from the same website), from the same second. Used by the watchdog below, and for a
-     * server that was picked by hand but does not play. Without such a link the current stream is simply left as it is.
-     */
-    fun switchToDownloadLink() {
-        val session = pluginSession ?: return
-        val video = currentVideo ?: return
-        val link = session.sourceLink ?: return
-        if (session.fallbackTried) return
-        val current = session.servers.getOrNull(session.selectedServer)
-        if (current?.server?.startsWith(com.example.util.media.MediaPlayback.DIRECT_PREFIX) == true) return
-        session.fallbackTried = true
-        val pos = controller.currentPositionMs.value
-        val loadKey = lastLoadedVideoKey
-        val serverName = current?.server
-        val targetHeight = hlsVariants.firstOrNull { hlsKey(it) == hlsSelectedKey }?.height?.takeIf { it > 0 } ?: 720
-        coroutineScope.launch {
-            val dl = com.example.util.media.MediaPlayback.resolveDownloadFallback(
-                context, session.plugin, link, session.sourceType ?: "movie", serverName, targetHeight
-            )
-            if (dl == null || lastLoadedVideoKey != loadKey) return@launch
-            Toast.makeText(context, "Switching to the download link…", Toast.LENGTH_SHORT).show()
-            // nothing else switches the server after this
-            session.manualChoice = true
-            session.servers = session.servers + dl
-            session.selectedServer = session.servers.lastIndex
-            // registers this file's headers (User-Agent / Referer) like the first load
-            com.example.util.media.MediaPlayback.toVideoItem(context, session.plugin, video.displayName, video.thumbnailUrl.orEmpty(), dl, session)
-            pluginServerIndex = session.selectedServer
-            controller.clearError()
-            openPluginStream(dl, pos, loadKey, followPosition = true)
-            attachPluginSubtitles(session.subtitles, loadKey)
-        }
-    }
-
-    // Watchdog: a provider stream that never starts, fails on its last server, or keeps freezing is replaced by the plugin's
-    // download link of the same video (see switchToDownloadLink). It starts again for every server, also after a manual change.
-    LaunchedEffect(pluginSession, pluginServerIndex, lastLoadedVideoKey) {
-        val session = pluginSession ?: return@LaunchedEffect
-        val sourceLink = session.sourceLink ?: return@LaunchedEffect
-        if (session.fallbackTried) return@LaunchedEffect
-        var sinceLoadMs = 0L
-        var stallMs = 0L
-        var wasBuffering = false
-        var prefetched = false
-        val stallStarts = ArrayList<Long>()
-        while (true) {
-            delay(500L)
-            sinceLoadMs += 500L
-            if (session.fallbackTried) return@LaunchedEffect
-            val buffering = controller.isBuffering.value
-            if (buffering) {
-                stallMs += 500L
-                if (!wasBuffering && session.hasPlayed) stallStarts.add(sinceLoadMs)
-            } else {
-                stallMs = 0L
-            }
-            wasBuffering = buffering
-            stallStarts.removeAll { sinceLoadMs - it > 120_000L }
-            // the download link is looked up in the background while the stream is still trying, so the switch is quick
-            if (buffering && stallMs >= 4000L && !prefetched) {
-                prefetched = true
-                launch(Dispatchers.IO) {
-                    try {
-                        com.example.util.media.MediaProviderRepository.loadStreams(context, session.plugin.value, sourceLink, session.sourceType ?: "movie", true)
-                    } catch (_: Throwable) {}
-                }
-            }
-            val noMoreServers = session.manualChoice || session.selectedServer + 1 >= session.servers.size
-            val failed = controller.errorMessage.value != null && noMoreServers
-            val startLimitMs = if (session.manualChoice) 15_000L else 25_000L
-            val neverStarted = !session.hasPlayed && noMoreServers && sinceLoadMs >= startLimitMs
-            val chronic = session.hasPlayed && (stallMs >= 12_000L || stallStarts.size >= 4)
-            if (failed || neverStarted || chronic) {
-                switchToDownloadLink()
-                return@LaunchedEffect
-            }
         }
     }
 
@@ -3043,13 +2857,7 @@ fun VideoPlayerScreen(
                     if (controller.onlineStreamMode && currentPositionMs <= 200L) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            // torrent: the engine's own phase / "speed | peers | progress" (mpvRx PlayerControls buffering text)
-                            text = when (val ts = torrentState) {
-                                is com.example.torrent.TorrentStreamingState.Connecting -> ts.phase
-                                is com.example.torrent.TorrentStreamingState.Streaming ->
-                                    "${com.example.torrent.formatTorrentSpeed(ts.downloadSpeed)} | ${ts.peers} peers | ${(ts.bufferProgress * 100).toInt()}%"
-                                else -> if (isTorrentVideo) "Starting Torrent Engine..." else "Connecting to stream…"
-                            },
+                            text = "Connecting to stream…",
                             color = Color.White.copy(alpha = 0.85f),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
@@ -3970,8 +3778,6 @@ fun getPlayableFilePath(context: Context, uri: Uri?, fallbackPath: String? = nul
         if (!fallbackPath.isNullOrBlank() && fallbackPath.startsWith(OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX)) {
             return OnlineVideoService.toWatchUrl(fallbackPath)
         }
-        // a torrent (magnet / info hash / .torrent link) is resolved by the torrent engine, never turned into a file path
-        if (!fallbackPath.isNullOrBlank() && com.example.torrent.isTorrentSource(fallbackPath)) return fallbackPath
         if (!fallbackPath.isNullOrBlank()) {
             if (fallbackPath.startsWith("/") || fallbackPath.startsWith("fd://") || fallbackPath.startsWith("http://") || fallbackPath.startsWith("https://")) {
                 return fallbackPath

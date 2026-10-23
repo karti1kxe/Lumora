@@ -1,6 +1,7 @@
 package com.example.util
 
 import android.content.Context
+import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONArray
@@ -8,84 +9,154 @@ import org.json.JSONObject
 import java.util.Locale
 
 enum class DownloadStatus { QUEUED, DOWNLOADING, PAUSED, PROCESSING, COMPLETED, FAILED }
+enum class DownloadSourceType { VIDEO, AUDIO, NETWORK, MEDIA_PLUGIN, TORRENT }
 
-/** Which engine downloads an item: a normal link (ParallelDownloader / yt-dlp) or one file of a torrent (libtorrent4j). */
-enum class DownloadSourceType { LINK, TORRENT }
-
-/** One entry of the Download page: a link. */
+/** Comprehensive download task model supporting all media types, quality, audio tracks, and persistence. */
 data class DownloadItem(
     val id: String,
-    /** The pasted / provider link. */
     val source: String,
     val title: String,
     val subtitle: String? = null,
     val isAudio: Boolean = false,
     val status: DownloadStatus = DownloadStatus.QUEUED,
     val downloadedBytes: Long = 0L,
-    /** 0 = not known (yet). */
     val totalBytes: Long = 0L,
     val speedBps: Long = 0L,
-    /** Seconds left, -1 = not known. */
     val etaSec: Long = -1L,
-    /** Short status line ("Merging…") while running, the error text when [status] is FAILED. */
     val note: String? = null,
     val filePath: String? = null,
     val fileUri: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-    /** Format id chosen in the options sheet (null = default quality). */
-    val formatSpec: String? = null,
-    /** Chosen output container (mp4 / mkv / webm / mp3 / m4a / opus / wav), null = default. */
-    val container: String? = null,
-    /** Cover / thumbnail link of the media (embedded into audio files, shown on the Download page). */
     val thumbnailUrl: String? = null,
-    /** HTTP headers sent with the download (media-plugin streams need a Referer / User-Agent). */
-    val headers: Map<String, String> = emptyMap(),
-    /** [DownloadSourceType.TORRENT]: [source] is the magnet / .torrent source and only file [torrentFileIndex] is downloaded. */
-    val sourceType: DownloadSourceType = DownloadSourceType.LINK,
-    val torrentFileIndex: Int = -1
+    val sourceType: DownloadSourceType = DownloadSourceType.VIDEO,
+    val torrentFileIndex: Int = -1,
+    val selectedQuality: String? = null,
+    val audioTrackNames: List<String> = emptyList(),
+    val audioStreamUrls: List<String> = emptyList(),
+    val subtitleUrls: List<String> = emptyList(),
+    val hasLyrics: Boolean = false,
+    val formatContainer: String? = null,
+    val targetCategory: String = if (isAudio) "Music" else "Videos"
 ) {
     val isActive: Boolean
         get() = status == DownloadStatus.QUEUED || status == DownloadStatus.DOWNLOADING || status == DownloadStatus.PROCESSING
 
     val fraction: Float
         get() = if (totalBytes > 0L) (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f) else 0f
+
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id)
+        put("source", source)
+        put("title", title)
+        put("subtitle", subtitle ?: "")
+        put("isAudio", isAudio)
+        put("status", status.name)
+        put("downloadedBytes", downloadedBytes)
+        put("totalBytes", totalBytes)
+        put("speedBps", speedBps)
+        put("etaSec", etaSec)
+        put("note", note ?: "")
+        put("filePath", filePath ?: "")
+        put("fileUri", fileUri ?: "")
+        put("createdAt", createdAt)
+        put("thumbnailUrl", thumbnailUrl ?: "")
+        put("sourceType", sourceType.name)
+        put("torrentFileIndex", torrentFileIndex)
+        put("selectedQuality", selectedQuality ?: "")
+        put("audioTrackNames", JSONArray(audioTrackNames))
+        put("audioStreamUrls", JSONArray(audioStreamUrls))
+        put("subtitleUrls", JSONArray(subtitleUrls))
+        put("hasLyrics", hasLyrics)
+        put("formatContainer", formatContainer ?: "")
+        put("targetCategory", targetCategory)
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject): DownloadItem {
+            val audioNames = ArrayList<String>()
+            json.optJSONArray("audioTrackNames")?.let { arr ->
+                for (i in 0 until arr.length()) audioNames.add(arr.optString(i))
+            }
+            val audioUrls = ArrayList<String>()
+            json.optJSONArray("audioStreamUrls")?.let { arr ->
+                for (i in 0 until arr.length()) audioUrls.add(arr.optString(i))
+            }
+            val subUrls = ArrayList<String>()
+            json.optJSONArray("subtitleUrls")?.let { arr ->
+                for (i in 0 until arr.length()) subUrls.add(arr.optString(i))
+            }
+            val statusParsed = try {
+                DownloadStatus.valueOf(json.optString("status", "QUEUED"))
+            } catch (_: Throwable) {
+                DownloadStatus.QUEUED
+            }
+            val typeParsed = try {
+                DownloadSourceType.valueOf(json.optString("sourceType", "VIDEO"))
+            } catch (_: Throwable) {
+                DownloadSourceType.VIDEO
+            }
+            return DownloadItem(
+                id = json.optString("id"),
+                source = json.optString("source"),
+                title = json.optString("title"),
+                subtitle = json.optString("subtitle").takeIf { it.isNotBlank() },
+                isAudio = json.optBoolean("isAudio", false),
+                status = statusParsed,
+                downloadedBytes = json.optLong("downloadedBytes", 0L),
+                totalBytes = json.optLong("totalBytes", 0L),
+                speedBps = json.optLong("speedBps", 0L),
+                etaSec = json.optLong("etaSec", -1L),
+                note = json.optString("note").takeIf { it.isNotBlank() },
+                filePath = json.optString("filePath").takeIf { it.isNotBlank() },
+                fileUri = json.optString("fileUri").takeIf { it.isNotBlank() },
+                createdAt = json.optLong("createdAt", System.currentTimeMillis()),
+                thumbnailUrl = json.optString("thumbnailUrl").takeIf { it.isNotBlank() },
+                sourceType = typeParsed,
+                torrentFileIndex = json.optInt("torrentFileIndex", -1),
+                selectedQuality = json.optString("selectedQuality").takeIf { it.isNotBlank() },
+                audioTrackNames = audioNames,
+                audioStreamUrls = audioUrls,
+                subtitleUrls = subUrls,
+                hasLyrics = json.optBoolean("hasLyrics", false),
+                formatContainer = json.optString("formatContainer").takeIf { it.isNotBlank() },
+                targetCategory = json.optString("targetCategory", "Videos")
+            )
+        }
+    }
 }
 
-/** Human readable sizes / speeds / times shared by the Download page and the notification. */
 object DownloadFormat {
     fun bytes(b: Long): String {
         if (b <= 0L) return "0 B"
         val units = arrayOf("B", "KB", "MB", "GB", "TB")
-        var v = b.toDouble()
-        var i = 0
-        while (v >= 1024.0 && i < units.size - 1) {
-            v /= 1024.0
-            i++
+        var value = b.toDouble()
+        var index = 0
+        while (value >= 1024.0 && index < units.size - 1) {
+            value /= 1024.0
+            index++
         }
-        if (i == 0) return "$b B"
-        val fmt = if (v >= 100.0) "%.0f %s" else if (v >= 10.0) "%.1f %s" else "%.2f %s"
-        return String.format(Locale.US, fmt, v, units[i])
+        if (index == 0) return "$b B"
+        val format = if (value >= 100.0) "%.0f %s" else if (value >= 10.0) "%.1f %s" else "%.2f %s"
+        return String.format(Locale.US, format, value, units[index])
     }
 
     fun speed(bps: Long): String = bytes(bps) + "/s"
 
     fun eta(sec: Long): String {
         if (sec < 0L) return "--"
-        val h = sec / 3600
-        val m = (sec % 3600) / 60
-        val s = sec % 60
+        val hours = sec / 3600
+        val minutes = (sec % 3600) / 60
+        val seconds = sec % 60
         return when {
-            h > 0 -> "${h}h ${m}m"
-            m > 0 -> "${m}m ${s}s"
-            else -> "${s}s"
+            hours > 0 -> "${hours}h ${minutes}m"
+            minutes > 0 -> "${minutes}m ${seconds}s"
+            else -> "${seconds}s"
         }
     }
 
-    /** "12.4 MB / 80.2 MB" (total shown as "?" while unknown). */
     fun sizeLine(item: DownloadItem): String =
         bytes(item.downloadedBytes) + " / " + (if (item.totalBytes > 0L) bytes(item.totalBytes) else "?")
 
-    /** "3.2 MB/s • 21s left" for a running download. */
     fun speedLine(item: DownloadItem): String {
         val parts = ArrayList<String>()
         parts.add(speed(item.speedBps))
@@ -94,143 +165,90 @@ object DownloadFormat {
     }
 }
 
-/**
- * Persistent list of downloads (one small JSON string in SharedPreferences). Progress ticks only update the in-memory
- * flow; state changes (start, pause, finish, ...) are written to disk.
- */
+/** Persistent download store with SharedPreferences JSON backing and resume restoration. */
 object DownloadStore {
-    private const val PREFS = "lumora_downloads"
-    private const val KEY = "items_v1"
-
+    private const val PREFS_NAME = "lumora_persistent_downloads_v2"
+    private const val KEY_ITEMS = "stored_items_json"
     private val _items = MutableStateFlow<List<DownloadItem>>(emptyList())
     val items: StateFlow<List<DownloadItem>> = _items
 
     @Volatile private var loaded = false
+    private val lock = Any()
 
     @Synchronized
     fun init(context: Context) {
         if (loaded) return
         loaded = true
-        // A download that was running when the app process ended is paused now, so it can be resumed with one tap.
-        // (The ids are remembered: DownloadManager.resumeInterrupted continues them automatically on app start.)
-        _items.value = read(context.applicationContext).map {
-            if (it.isActive) {
-                interrupted.add(it.id)
-                it.copy(status = DownloadStatus.PAUSED, speedBps = 0L, etaSec = -1L, note = null)
-            } else it
+        val prefs = prefs(context)
+        val raw = prefs.getString(KEY_ITEMS, null)
+        val restored = ArrayList<DownloadItem>()
+        if (!raw.isNullOrBlank()) {
+            try {
+                val array = JSONArray(raw)
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val item = DownloadItem.fromJson(obj)
+                    // If task was in-flight when app died, reset to PAUSED so it can resume
+                    val adjusted = if (item.status == DownloadStatus.DOWNLOADING || item.status == DownloadStatus.QUEUED || item.status == DownloadStatus.PROCESSING) {
+                        item.copy(status = DownloadStatus.PAUSED, speedBps = 0L, etaSec = -1L, note = "Paused (app restarted)")
+                    } else item
+                    restored.add(adjusted)
+                }
+            } catch (_: Throwable) {}
+        }
+        synchronized(lock) {
+            _items.value = restored
         }
     }
 
-    private val interrupted = ArrayList<String>()
+    private fun prefs(context: Context): SharedPreferences =
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    /** Downloads that were running when the app process ended (returned once). */
-    @Synchronized
-    fun takeInterrupted(): List<String> {
-        val list = interrupted.toList()
-        interrupted.clear()
-        return list
+    private fun persist(context: Context) {
+        val list = _items.value
+        try {
+            val array = JSONArray()
+            for (item in list) {
+                array.put(item.toJson())
+            }
+            prefs(context).edit().putString(KEY_ITEMS, array.toString()).apply()
+        } catch (_: Throwable) {}
     }
+
+    /** Returns tasks that were interrupted and should resume. */
+    fun takeInterrupted(): List<String> =
+        _items.value.filter { it.status == DownloadStatus.PAUSED && it.downloadedBytes < it.totalBytes && it.totalBytes > 0L }.map { it.id }
 
     fun get(id: String): DownloadItem? = _items.value.firstOrNull { it.id == id }
 
-    @Synchronized
     fun add(context: Context, item: DownloadItem) {
-        _items.value = listOf(item) + _items.value
-        save(context)
-    }
-
-    @Synchronized
-    fun update(context: Context, id: String, persist: Boolean = false, block: (DownloadItem) -> DownloadItem) {
-        var changed = false
-        _items.value = _items.value.map {
-            if (it.id == id) {
-                changed = true
-                block(it)
-            } else it
+        synchronized(lock) {
+            _items.value = listOf(item) + _items.value.filterNot { it.id == item.id }
         }
-        if (changed && persist) save(context)
+        persist(context)
     }
 
-    @Synchronized
+    fun update(context: Context, id: String, persistNow: Boolean = true, block: (DownloadItem) -> DownloadItem) {
+        synchronized(lock) {
+            _items.value = _items.value.map { item -> if (item.id == id) block(item) else item }
+        }
+        if (persistNow) {
+            persist(context)
+        }
+    }
+
     fun remove(context: Context, id: String) {
-        _items.value = _items.value.filter { it.id != id }
-        save(context)
+        synchronized(lock) {
+            _items.value = _items.value.filterNot { it.id == id }
+        }
+        persist(context)
     }
 
-    private fun read(context: Context): List<DownloadItem> {
-        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null) ?: return emptyList()
-        return try {
-            val arr = JSONArray(raw)
-            (0 until arr.length()).mapNotNull { i ->
-                val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                val id = o.optString("id")
-                val source = o.optString("src")
-                if (id.isBlank() || source.isBlank()) return@mapNotNull null
-                DownloadItem(
-                    id = id,
-                    source = source,
-                    title = o.optString("t").ifBlank { source },
-                    subtitle = o.optString("s").ifBlank { null },
-                    isAudio = o.optBoolean("au", false),
-                    status = try { DownloadStatus.valueOf(o.optString("st")) } catch (_: Throwable) { DownloadStatus.PAUSED },
-                    downloadedBytes = o.optLong("d", 0L),
-                    totalBytes = o.optLong("tot", 0L),
-                    note = o.optString("n").ifBlank { null },
-                    filePath = o.optString("fp").ifBlank { null },
-                    fileUri = o.optString("fu").ifBlank { null },
-                    createdAt = o.optLong("c", 0L),
-                    formatSpec = o.optString("fmt").ifBlank { null },
-                    container = o.optString("cont").ifBlank { null },
-                    thumbnailUrl = o.optString("th").ifBlank { null },
-                    headers = o.optJSONObject("hd")?.let { h ->
-                        val m = LinkedHashMap<String, String>()
-                        val keys = h.keys()
-                        while (keys.hasNext()) { val k = keys.next(); m[k] = h.optString(k) }
-                        m
-                    } ?: emptyMap(),
-                    sourceType = try { DownloadSourceType.valueOf(o.optString("stype", "LINK")) } catch (_: Throwable) { DownloadSourceType.LINK },
-                    torrentFileIndex = o.optInt("tfi", -1)
-                )
-            }
-        } catch (_: Throwable) {
-            emptyList()
+    fun removeMultiple(context: Context, ids: Set<String>) {
+        if (ids.isEmpty()) return
+        synchronized(lock) {
+            _items.value = _items.value.filterNot { it.id in ids }
         }
-    }
-
-    private fun save(context: Context) {
-        val arr = JSONArray()
-        for (e in _items.value) {
-            arr.put(
-                JSONObject()
-                    .put("id", e.id)
-                    .put("src", e.source)
-                    .put("t", e.title)
-                    .put("s", e.subtitle ?: "")
-                    .put("au", e.isAudio)
-                    .put("st", e.status.name)
-                    .put("d", e.downloadedBytes)
-                    .put("tot", e.totalBytes)
-                    .put("n", e.note ?: "")
-                    .put("fp", e.filePath ?: "")
-                    .put("fu", e.fileUri ?: "")
-                    .put("c", e.createdAt)
-                    .put("fmt", e.formatSpec ?: "")
-                    .put("cont", e.container ?: "")
-                    .put("th", e.thumbnailUrl ?: "")
-                    .apply {
-                        if (e.sourceType != DownloadSourceType.LINK) {
-                            put("stype", e.sourceType.name)
-                            put("tfi", e.torrentFileIndex)
-                        }
-                        if (e.headers.isNotEmpty()) {
-                            val h = JSONObject()
-                            for ((k, v) in e.headers) h.put(k, v)
-                            put("hd", h)
-                        }
-                    }
-            )
-        }
-        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY, arr.toString()).apply()
+        persist(context)
     }
 }

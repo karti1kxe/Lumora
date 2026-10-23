@@ -1,41 +1,45 @@
 package com.example.ui.screens
 
-import android.content.ContentUris
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.runtime.produceState
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,20 +50,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import com.example.R
 import com.example.player.AudioPlaybackManager
-import com.example.ui.components.LinkThumbnail
 import com.example.ui.components.LayoutMode
+import com.example.ui.components.LinkThumbnail
 import com.example.ui.components.SortDirection
-import com.example.ui.components.VisibleFields
-import com.example.ui.components.VideoItemCard
-import com.example.ui.components.VideoItemGridCard
-import com.example.ui.state.ThumbnailQuality
-import com.example.ui.state.ThumbnailStrategy
 import com.example.ui.components.SortField
 import com.example.ui.components.StyledIcon
+import com.example.ui.components.VisibleFields
+import com.example.ui.state.ThumbnailQuality
+import com.example.ui.state.ThumbnailStrategy
 import com.example.ui.theme.AccentGradient
+import com.example.ui.theme.AccentPink
 import com.example.ui.theme.AccentSkyBlue
 import com.example.ui.theme.DarkGlassBorder
 import com.example.ui.theme.DarkGlassSurface
@@ -69,17 +71,22 @@ import com.example.ui.theme.LightGlassBorder
 import com.example.ui.theme.LightGlassSurface
 import com.example.ui.theme.LightTextPrimary
 import com.example.ui.theme.LightTextSecondary
-import com.example.util.DownloadFileSaver
 import com.example.util.DownloadFormat
 import com.example.util.DownloadItem
 import com.example.util.DownloadManager
+import com.example.util.DownloadSourceType
 import com.example.util.DownloadStatus
 import com.example.util.DownloadStore
 import java.io.File
 
 /**
- * Download page (opened from the download button of the Network tab): every download with its progress bar, the
- * size (done / total), the speed and the time left; finished videos play in the normal player.
+ * Universal Downloads Management Screen:
+ * Supports Online Videos, Online Audio, Network Downloads, Media Plugins, and Torrents.
+ * Features:
+ * - Live speed (MB/s), exact sizes, and remaining ETA
+ * - Multi-select mode with batch actions (Delete Selected, Pause All, Resume All)
+ * - Individual controls: Play, Pause, Resume, Stop, and Delete
+ * - Category filter tabs
  */
 @Composable
 fun DownloadsTabContent(
@@ -97,398 +104,425 @@ fun DownloadsTabContent(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    LaunchedEffect(Unit) { DownloadStore.init(context) }
+    LaunchedEffect(Unit) {
+        DownloadStore.init(context)
+        DownloadManager.init(context)
+    }
+
     val all by DownloadStore.items.collectAsState()
-
-    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
-    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
-    val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
-    val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
-
     val query = searchQuery.trim()
-    val filtered = remember(all, query) {
-        if (query.isEmpty()) all
-        else all.filter { it.title.contains(query, ignoreCase = true) || (it.subtitle?.contains(query, ignoreCase = true) == true) }
-    }
-    val running = remember(filtered) { filtered.filter { it.status != DownloadStatus.COMPLETED }.sortedByDescending { it.createdAt } }
-    val finished = remember(filtered, sortField, sortDirection) {
-        val base = filtered.filter { it.status == DownloadStatus.COMPLETED }
-        val sorted = when (sortField) {
-            SortField.TITLE -> base.sortedBy { it.title.lowercase() }
-            SortField.SIZE -> base.sortedBy { it.totalBytes }
-            else -> base.sortedBy { it.createdAt }
-        }
-        if (sortDirection == SortDirection.DESCENDING) sorted.reversed() else sorted
+
+    var selectedFilter by remember { mutableStateOf("All") }
+    val categories = listOf("All", "Videos", "Music", "Media", "Torrents")
+
+    var isSelectionMode by remember { mutableStateOf(false) }
+    val selectedIds = remember { mutableStateListOf<String>() }
+    var confirmBatchDelete by remember { mutableStateOf(false) }
+
+    BackHandler(enabled = isSelectionMode) {
+        isSelectionMode = false
+        selectedIds.clear()
     }
 
-    if (all.isEmpty()) {
-        Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 56.dp, start = 32.dp, end = 32.dp)) {
-                StyledIcon(
-                    drawableRes = R.drawable.lumora_download_minimalistic,
-                    contentDescription = null,
-                    tint = secondaryText.copy(alpha = 0.7f),
-                    modifier = Modifier.size(44.dp)
-                )
-                Spacer(modifier = Modifier.height(14.dp))
-                Text(text = "No downloads yet", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = primaryText)
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Tap the download icon next to a link in Recent Streams (Network tab) to save the video.",
-                    fontSize = 12.5.sp,
-                    color = secondaryText
-                )
+    val entries = remember(all, query, selectedFilter) {
+        all.filter { item ->
+            when (selectedFilter) {
+                "Videos" -> item.sourceType == DownloadSourceType.VIDEO || (!item.isAudio && item.sourceType == DownloadSourceType.NETWORK)
+                "Music" -> item.isAudio || item.sourceType == DownloadSourceType.AUDIO
+                "Media" -> item.sourceType == DownloadSourceType.MEDIA_PLUGIN
+                "Torrents" -> item.sourceType == DownloadSourceType.TORRENT
+                else -> true
             }
-        }
-        return
+        }.filter {
+            query.isEmpty() || it.title.contains(query, true) || it.subtitle.orEmpty().contains(query, true)
+        }.sortedByDescending { it.createdAt }
     }
 
-    val isGrid = layoutMode == LayoutMode.GRID
-    val finishedAudioQueue = remember(finished) { finished.filter { it.isAudio }.map { downloadAudioTrack(it) } }
-    // Same list / grid, same gaps and same cards as the folders of the app.
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(if (isGrid) 2 else 1),
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(top = 4.dp, bottom = 84.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        if (running.isNotEmpty()) {
-            item(key = "hdr_running", span = { GridItemSpan(maxLineSpan) }) { SectionTitle("In progress", primaryText) }
-            items(running, key = { it.id }, span = { GridItemSpan(maxLineSpan) }) { d ->
-                DownloadCard(d, primaryText, secondaryText, surfaceColor, borderColor) { playDownload(context, d, onPlayVideo) }
+    val primary = if (isDark) DarkTextPrimary else LightTextPrimary
+    val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
+    val surface = if (isDark) DarkGlassSurface else LightGlassSurface
+    val border = if (isDark) DarkGlassBorder else LightGlassBorder
+
+    Box(modifier = modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Header filter bar and Selection Toggle
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Category Filter Pills
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    categories.forEach { cat ->
+                        val isSelected = cat == selectedFilter
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .then(
+                                    if (isSelected) Modifier.background(AccentGradient)
+                                    else Modifier.background(if (isDark) Color.White.copy(alpha = 0.05f) else Color.Black.copy(alpha = 0.04f))
+                                )
+                                .clickable { selectedFilter = cat }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = cat,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) Color.White else primary
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                // Select / Done Action Pill
+                if (entries.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (isSelectionMode) AccentSkyBlue.copy(alpha = 0.2f) else if (isDark) Color.White.copy(alpha = 0.06f) else Color.Black.copy(alpha = 0.05f))
+                            .clickable {
+                                isSelectionMode = !isSelectionMode
+                                if (!isSelectionMode) selectedIds.clear()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = if (isSelectionMode) "Done" else "Select",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isSelectionMode) AccentSkyBlue else primary
+                        )
+                    }
+                }
             }
-        }
-        if (finished.isNotEmpty()) {
-            item(key = "hdr_done", span = { GridItemSpan(maxLineSpan) }) { SectionTitle("Downloaded", primaryText) }
-            items(finished, key = { it.id }) { d ->
-                FinishedDownloadItem(
-                    d = d,
-                    isDark = isDark,
-                    isGrid = isGrid,
-                    visibleFields = visibleFields,
-                    thumbnailStrategy = thumbnailStrategy,
-                    thumbnailQuality = thumbnailQuality,
-                    thumbnailFallbackSecond = thumbnailFallbackSecond,
-                    showNetworkThumbnails = showNetworkThumbnails,
-                    audioQueue = finishedAudioQueue,
-                    onPlayVideo = onPlayVideo
-                )
-            }
-        }
-    }
-}
 
-/** A finished download: the same video / audio card the folders of the app use (list or grid). */
-@Composable
-private fun FinishedDownloadItem(
-    d: DownloadItem,
-    isDark: Boolean,
-    isGrid: Boolean,
-    visibleFields: VisibleFields,
-    thumbnailStrategy: ThumbnailStrategy,
-    thumbnailQuality: ThumbnailQuality,
-    thumbnailFallbackSecond: Int,
-    showNetworkThumbnails: Boolean,
-    audioQueue: List<AudioTrackItem>,
-    onPlayVideo: (VideoItem, List<VideoItem>) -> Unit
-) {
-    val context = LocalContext.current
-    var showDeleteSheet by remember { mutableStateOf(false) }
-    val durationMs by produceState(0L, d.id, d.fileUri, d.filePath) {
-        value = withContext(Dispatchers.IO) { probeDurationMs(context, d) }
-    }
+            Spacer(modifier = Modifier.height(4.dp))
 
-    if (d.isAudio) {
-        val base = remember(d) { downloadAudioTrack(d) }
-        val track = base.copy(durationMs = durationMs)
-        val current by AudioPlaybackManager.currentTrack.collectAsState()
-        val playing by AudioPlaybackManager.isPlaying.collectAsState()
-        val isCurrent = current?.uri?.toString() == track.uri.toString()
-        val onClick: () -> Unit = {
-            if (!DownloadFileSaver.exists(context, d)) {
-                Toast.makeText(context, "This file was deleted from the phone", Toast.LENGTH_SHORT).show()
+            if (entries.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize().weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(32.dp)
+                    ) {
+                        StyledIcon(
+                            drawableRes = R.drawable.lumora_download_minimalistic,
+                            contentDescription = null,
+                            tint = secondary.copy(alpha = 0.6f),
+                            modifier = Modifier.size(52.dp)
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            "No downloads in $selectedFilter",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = primary
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Downloaded videos, audio, streams, and files will appear here.",
+                            fontSize = 13.sp,
+                            color = secondary
+                        )
+                    }
+                }
             } else {
-                try {
-                    AudioPlaybackManager.openFullScreen()
-                    AudioPlaybackManager.playTrack(context = context, track = track, newQueue = audioQueue.ifEmpty { listOf(track) })
-                } catch (_: Throwable) {
-                    Toast.makeText(context, "Could not start the audio player", Toast.LENGTH_SHORT).show()
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(entries, key = { it.id }) { item ->
+                        val isSelected = item.id in selectedIds
+                        UniversalDownloadCard(
+                            item = item,
+                            isDark = isDark,
+                            primary = primary,
+                            secondary = secondary,
+                            surface = surface,
+                            border = border,
+                            isSelectionMode = isSelectionMode,
+                            isSelected = isSelected,
+                            onToggleSelect = {
+                                if (isSelected) selectedIds.remove(item.id)
+                                else selectedIds.add(item.id)
+                            },
+                            onPlay = {
+                                playDownloadedItem(context, item, onPlayVideo)
+                            }
+                        )
+                    }
+                    item { Spacer(modifier = Modifier.height(80.dp)) }
                 }
             }
         }
-        if (isGrid) {
-            AudioTrackGridCard(
-                track = track, isCurrent = isCurrent, isPlaying = isCurrent && playing, isDark = isDark,
-                visibleFields = visibleFields, onClick = onClick, onLongClick = { showDeleteSheet = true }
-            )
-        } else {
-            AudioTrackListCard(
-                track = track, isCurrent = isCurrent, isPlaying = isCurrent && playing, isDark = isDark,
-                visibleFields = visibleFields, onClick = onClick, onLongClick = { showDeleteSheet = true }
-            )
-        }
-    } else {
-        val video = remember(d, durationMs) { downloadVideoItem(d, durationMs) }
-        val onClick: () -> Unit = { playDownload(context, d, onPlayVideo) }
-        if (isGrid) {
-            VideoItemGridCard(
-                video = video, isDark = isDark, visibleFields = visibleFields,
-                onClick = onClick, onLongClick = { showDeleteSheet = true },
-                thumbnailStrategy = thumbnailStrategy, thumbnailQuality = thumbnailQuality,
-                thumbnailFallbackSecond = thumbnailFallbackSecond, showNetworkThumbnails = showNetworkThumbnails
-            )
-        } else {
-            VideoItemCard(
-                video = video, isDark = isDark, visibleFields = visibleFields,
-                onClick = onClick, onLongClick = { showDeleteSheet = true },
-                thumbnailStrategy = thumbnailStrategy, thumbnailQuality = thumbnailQuality,
-                thumbnailFallbackSecond = thumbnailFallbackSecond, showNetworkThumbnails = showNetworkThumbnails
-            )
+
+        // Multi-Select Floating Action Bar
+        AnimatedVisibility(
+            visible = isSelectionMode,
+            enter = slideInVertically { it } + fadeIn(),
+            exit = slideOutVertically { it } + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(62.dp)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(if (isDark) Color(0xFF0F172A).copy(alpha = 0.95f) else Color.White.copy(alpha = 0.95f))
+                    .border(1.5.dp, AccentSkyBlue.copy(alpha = 0.5f), RoundedCornerShape(22.dp))
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "${selectedIds.size} selected",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = primary
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (selectedIds.size == entries.size) "Deselect" else "Select All",
+                        fontSize = 13.sp,
+                        color = AccentSkyBlue,
+                        modifier = Modifier
+                            .clickable {
+                                if (selectedIds.size == entries.size) selectedIds.clear()
+                                else {
+                                    selectedIds.clear()
+                                    selectedIds.addAll(entries.map { it.id })
+                                }
+                            }
+                            .padding(6.dp)
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selectedIds.isNotEmpty()) Color(0xFFEF4444) else Color.Gray.copy(alpha = 0.3f))
+                            .clickable(enabled = selectedIds.isNotEmpty()) { confirmBatchDelete = true }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = "Delete",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
         }
     }
 
-    if (showDeleteSheet) {
-        com.example.ui.components.DeleteConfirmSheet(
-            title = if (d.isAudio) "Delete 1 audio track?" else "Delete 1 video?",
-            message = "This action cannot be undone. The selected item will be permanently deleted.",
-            itemNames = listOf(d.filePath?.substringAfterLast('/') ?: d.title),
-            isDark = isDark,
-            onDismiss = { showDeleteSheet = false },
-            onConfirm = {
-                showDeleteSheet = false
-                DownloadManager.remove(context, d.id)
+    if (confirmBatchDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmBatchDelete = false },
+            title = { Text("Delete selected downloads?") },
+            text = { Text("This will permanently remove ${selectedIds.size} download tasks and files.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmBatchDelete = false
+                    DownloadManager.deleteMultiple(context, selectedIds.toSet())
+                    selectedIds.clear()
+                    isSelectionMode = false
+                    Toast.makeText(context, "Downloads removed", Toast.LENGTH_SHORT).show()
+                }) { Text("Delete All", color = Color(0xFFEF4444)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmBatchDelete = false }) { Text("Cancel") }
             }
         )
     }
 }
 
-private fun downloadUri(d: DownloadItem): Uri =
-    d.fileUri?.let { Uri.parse(it) } ?: d.filePath?.let { Uri.fromFile(File(it)) } ?: Uri.EMPTY
-
-private fun downloadMediaId(d: DownloadItem, uri: Uri): Long =
-    try { ContentUris.parseId(uri) } catch (_: Throwable) { -(kotlin.math.abs(("download:" + d.id).hashCode().toLong())) - 1L }
-
-private fun downloadVideoItem(d: DownloadItem, durationMs: Long): VideoItem {
-    val uri = downloadUri(d)
-    val path = d.filePath ?: uri.toString()
-    return VideoItem(
-        id = downloadMediaId(d, uri),
-        uri = uri,
-        displayName = d.filePath?.substringAfterLast('/') ?: d.title,
-        path = path,
-        sizeBytes = d.totalBytes,
-        durationMs = durationMs,
-        dateModified = d.createdAt / 1000L
-    )
-}
-
-private fun downloadAudioTrack(d: DownloadItem): AudioTrackItem {
-    val uri = downloadUri(d)
-    val path = d.filePath ?: uri.toString()
-    return AudioTrackItem(
-        id = downloadMediaId(d, uri),
-        uri = uri,
-        title = d.title,
-        artist = d.subtitle ?: "Download",
-        album = "Download",
-        durationMs = 0L,
-        path = path,
-        sizeBytes = d.totalBytes,
-        format = path.substringAfterLast('.', "AUDIO").uppercase(),
-        dateModified = d.createdAt / 1000L,
-        thumbnailUrl = null
-    )
-}
-
-private fun probeDurationMs(context: android.content.Context, d: DownloadItem): Long {
-    val retriever = android.media.MediaMetadataRetriever()
-    return try {
-        retriever.setDataSource(context, downloadUri(d))
-        retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-    } catch (_: Throwable) {
-        0L
-    } finally {
-        try { retriever.release() } catch (_: Throwable) {}
-    }
-}
-
 @Composable
-private fun SectionTitle(text: String, color: Color) {
-    Text(
-        text = text,
-        fontSize = 15.sp,
-        fontWeight = FontWeight.SemiBold,
-        color = color,
-        modifier = Modifier.padding(start = 18.dp, top = 10.dp, bottom = 2.dp)
-    )
-}
-
-@Composable
-private fun DownloadCard(
-    d: DownloadItem,
-    primaryText: Color,
-    secondaryText: Color,
-    surfaceColor: Color,
-    borderColor: Color,
+private fun UniversalDownloadCard(
+    item: DownloadItem,
+    isDark: Boolean,
+    primary: Color,
+    secondary: Color,
+    surface: Color,
+    border: Color,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
+    onToggleSelect: () -> Unit,
     onPlay: () -> Unit
 ) {
     val context = LocalContext.current
-    var showDeleteSheet by remember { mutableStateOf(false) }
-    val done = d.status == DownloadStatus.COMPLETED
-    val failed = d.status == DownloadStatus.FAILED
+    var confirmRemove by remember(item.id) { mutableStateOf(false) }
+
+    val completed = item.status == DownloadStatus.COMPLETED
+    val failed = item.status == DownloadStatus.FAILED
     val shape = RoundedCornerShape(20.dp)
-    Column(
+
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(surfaceColor)
-            .border(1.dp, borderColor, shape)
-            .then(
-                // an unfinished download can be played too: it plays as far as it has been downloaded
-                if (done || d.downloadedBytes > 0L) Modifier.clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onPlay
-                ) else Modifier
+            .background(surface)
+            .border(
+                width = if (isSelected) 1.5.dp else 1.dp,
+                color = if (isSelected) AccentSkyBlue else border,
+                shape = shape
             )
-            .padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 6.dp)
+            .clickable {
+                if (isSelectionMode) onToggleSelect()
+                else if (completed) onPlay()
+            }
+            .padding(14.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // thumbnail attached to the link; a finished video without one shows a frame of the file itself
-            val localUri = if (done && !d.isAudio) d.fileUri?.let { Uri.parse(it) } else null
-            LinkThumbnail(
-                thumbnail = d.thumbnailUrl,
-                localVideoUri = localUri,
-                localVideoPath = if (localUri != null) d.filePath else null,
-                modifier = Modifier.size(width = 64.dp, height = 40.dp).clip(RoundedCornerShape(10.dp)),
-                fallback = {
-                    StyledIcon(
-                        drawableRes = if (done) R.drawable.lumora_play_circle else R.drawable.lumora_download_minimalistic,
-                        contentDescription = null,
-                        tint = if (failed) Color(0xFFEF4444) else AccentSkyBlue,
-                        modifier = Modifier.size(26.dp)
-                    )
-                }
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = d.title,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = primaryText,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = statusText(d),
-                    fontSize = 12.sp,
-                    color = if (failed) Color(0xFFEF4444) else secondaryText,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            when (d.status) {
-                DownloadStatus.DOWNLOADING, DownloadStatus.QUEUED ->
-                    CardButton(R.drawable.lumora_pause_solid, "Pause", primaryText.copy(alpha = 0.85f)) { DownloadManager.pause(context, d.id) }
-                DownloadStatus.PAUSED ->
-                    CardButton(R.drawable.lumora_play_solid, "Resume", AccentSkyBlue) { DownloadManager.resume(context, d.id) }
-                DownloadStatus.FAILED ->
-                    CardButton(R.drawable.lumora_refresh, "Retry", AccentSkyBlue) { DownloadManager.resume(context, d.id) }
-                else -> {}
-            }
-            CardButton(R.drawable.lumora_trash_bin_2, if (done) "Delete" else "Cancel", secondaryText.copy(alpha = 0.9f)) {
-                showDeleteSheet = true
-            }
-        }
-
-        if (showDeleteSheet) {
-            com.example.ui.components.DeleteConfirmSheet(
-                title = "Delete 1 video?",
-                message = "This action cannot be undone. The selected item will be permanently deleted.",
-                itemNames = listOf(d.title),
-                isDark = primaryText == DarkTextPrimary,
-                onDismiss = { showDeleteSheet = false },
-                onConfirm = {
-                    showDeleteSheet = false
-                    DownloadManager.remove(context, d.id)
-                }
-            )
-        }
-
-        if (!done && !failed) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Box(modifier = Modifier.padding(end = 8.dp)) {
-                if (d.totalBytes > 0L && d.note == null && d.status != DownloadStatus.QUEUED) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isSelectionMode) {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(secondaryText.copy(alpha = 0.18f))
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(if (isSelected) AccentSkyBlue else Color.Transparent)
+                            .border(1.5.dp, if (isSelected) AccentSkyBlue else secondary.copy(alpha = 0.5f), CircleShape),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(d.fraction)
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(3.dp))
-                                .background(AccentGradient)
-                        )
+                        if (isSelected) {
+                            Text("✓", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
-                } else if (d.status == DownloadStatus.PAUSED) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(secondaryText.copy(alpha = 0.18f))
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(d.fraction)
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(3.dp))
-                                .background(secondaryText.copy(alpha = 0.55f))
-                        )
-                    }
-                } else {
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = AccentSkyBlue,
-                        trackColor = secondaryText.copy(alpha = 0.18f)
-                    )
+                    Spacer(Modifier.width(12.dp))
                 }
-            }
-            if (d.status == DownloadStatus.DOWNLOADING && d.note == null) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(modifier = Modifier.fillMaxWidth().padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+
+                LinkThumbnail(
+                    thumbnail = item.thumbnailUrl,
+                    modifier = Modifier.size(width = 56.dp, height = 44.dp).clip(RoundedCornerShape(8.dp)),
+                    fallback = {
+                        StyledIcon(
+                            drawableRes = if (item.isAudio) R.drawable.lumora_song else R.drawable.lumora_video,
+                            contentDescription = null,
+                            tint = secondary.copy(alpha = 0.8f),
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                )
+
+                Spacer(Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = DownloadFormat.sizeLine(d) + if (d.totalBytes > 0L) "  (${(d.fraction * 100).toInt()}%)" else "",
-                        fontSize = 11.5.sp,
-                        color = secondaryText,
-                        modifier = Modifier.weight(1f),
+                        text = item.title,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = primary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Text(
-                        text = DownloadFormat.speedLine(d),
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = AccentSkyBlue,
-                        maxLines = 1
-                    )
+                    item.subtitle?.takeIf { it.isNotBlank() }?.let {
+                        Text(
+                            text = it,
+                            fontSize = 12.sp,
+                            color = secondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.padding(top = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        item.selectedQuality?.takeIf { it.isNotBlank() }?.let { q ->
+                            Text(
+                                text = q,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = AccentSkyBlue,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(AccentSkyBlue.copy(alpha = 0.12f))
+                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                            )
+                        }
+                        Text(
+                            text = statusText(item),
+                            fontSize = 11.5.sp,
+                            color = if (failed) Color(0xFFEF4444) else if (completed) AccentSkyBlue else secondary,
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                if (!isSelectionMode) {
+                    when (item.status) {
+                        DownloadStatus.COMPLETED -> SmallAction(R.drawable.lumora_play_solid, "Play", AccentSkyBlue) { onPlay() }
+                        DownloadStatus.DOWNLOADING, DownloadStatus.QUEUED -> SmallAction(R.drawable.lumora_pause_solid, "Pause", primary) { DownloadManager.pause(context, item.id) }
+                        DownloadStatus.PAUSED, DownloadStatus.FAILED -> SmallAction(R.drawable.lumora_play_solid, "Resume", AccentSkyBlue) { DownloadManager.resume(context, item.id) }
+                        DownloadStatus.PROCESSING -> Unit
+                    }
+                    SmallAction(R.drawable.lumora_trash_bin_2, if (completed) "Delete" else "Cancel", secondary) { confirmRemove = true }
                 }
             }
+
+            // Progress bar and live speed metrics
+            if (!completed && !failed) {
+                Spacer(Modifier.height(10.dp))
+                LinearProgressIndicator(
+                    progress = { item.fraction },
+                    modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
+                    color = AccentSkyBlue,
+                    trackColor = secondary.copy(alpha = 0.18f)
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        DownloadFormat.sizeLine(item) + if (item.totalBytes > 0) " (${(item.fraction * 100).toInt()}%)" else "",
+                        modifier = Modifier.weight(1f),
+                        fontSize = 11.5.sp,
+                        color = secondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(DownloadFormat.speedLine(item), fontSize = 11.5.sp, color = AccentSkyBlue, maxLines = 1)
+                }
+            } else if (completed) {
+                Text(
+                    text = DownloadFormat.bytes(item.totalBytes) + (if (item.filePath != null) " • Saved" else ""),
+                    fontSize = 11.5.sp,
+                    color = secondary,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
         }
+    }
+
+    if (confirmRemove) {
+        AlertDialog(
+            onDismissRequest = { confirmRemove = false },
+            title = { Text(if (completed) "Delete download?" else "Cancel download?") },
+            text = { Text("This removes '${item.title}' from Lumora.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRemove = false
+                    DownloadManager.remove(context, item.id)
+                }) { Text(if (completed) "Delete" else "Cancel download", color = Color(0xFFEF4444)) }
+            },
+            dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text("Keep") } }
+        )
     }
 }
 
 @Composable
-private fun CardButton(drawableRes: Int, description: String, tint: Color, onClick: () -> Unit) {
+private fun SmallAction(drawable: Int, label: String, tint: Color, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .size(40.dp)
@@ -500,102 +534,58 @@ private fun CardButton(drawableRes: Int, description: String, tint: Color, onCli
             ),
         contentAlignment = Alignment.Center
     ) {
-        StyledIcon(drawableRes = drawableRes, contentDescription = description, tint = tint, modifier = Modifier.size(21.dp))
+        StyledIcon(drawableRes = drawable, contentDescription = label, tint = tint, modifier = Modifier.size(21.dp))
     }
 }
 
-private fun statusText(d: DownloadItem): String = when (d.status) {
-    DownloadStatus.QUEUED -> "Waiting in queue…"
-    DownloadStatus.DOWNLOADING -> d.note ?: (if (d.speedBps > 0L) "Downloading" else "Starting…")
-    DownloadStatus.PROCESSING -> d.note ?: "Saving to your library…"
-    DownloadStatus.PAUSED -> "Paused • " + DownloadFormat.sizeLine(d)
-    DownloadStatus.FAILED -> d.note ?: "Download failed"
-    DownloadStatus.COMPLETED -> "Downloaded • " + DownloadFormat.bytes(d.totalBytes) + (d.subtitle?.let { " • $it" } ?: "")
+private fun statusText(item: DownloadItem): String = when (item.status) {
+    DownloadStatus.QUEUED -> "Queued…"
+    DownloadStatus.DOWNLOADING -> item.note ?: if (item.speedBps > 0L) "Downloading" else "Connecting…"
+    DownloadStatus.PROCESSING -> item.note ?: "Processing container…"
+    DownloadStatus.PAUSED -> "Paused"
+    DownloadStatus.FAILED -> item.note ?: "Download failed"
+    DownloadStatus.COMPLETED -> "Ready to play"
 }
 
-private fun playDownload(context: android.content.Context, d: DownloadItem, onPlayVideo: (VideoItem, List<VideoItem>) -> Unit) {
-    if (d.status != DownloadStatus.COMPLETED) {
-        playPartialDownload(context, d, onPlayVideo)
-        return
-    }
-    if (!DownloadFileSaver.exists(context, d)) {
-        Toast.makeText(context, "This file was deleted from the phone", Toast.LENGTH_SHORT).show()
-        return
-    }
-    val uri: Uri = d.fileUri?.let { Uri.parse(it) } ?: Uri.fromFile(File(d.filePath ?: return))
-    val path = d.filePath ?: uri.toString()
-    val mediaId = try { ContentUris.parseId(uri) } catch (_: Throwable) { -(kotlin.math.abs(("download:" + d.id).hashCode().toLong())) - 1L }
-    if (d.isAudio) {
+private fun playDownloadedItem(
+    context: android.content.Context,
+    item: DownloadItem,
+    onPlayVideo: (VideoItem, List<VideoItem>) -> Unit
+) {
+    val fileUri = item.fileUri ?: item.filePath ?: return
+    val parsedUri = if (fileUri.startsWith("content://") || fileUri.startsWith("file://")) Uri.parse(fileUri) else Uri.fromFile(File(fileUri))
+
+    if (item.isAudio) {
         val track = AudioTrackItem(
-            id = mediaId,
-            uri = uri,
-            title = d.title,
-            artist = d.subtitle ?: "Download",
-            album = "Download",
+            id = -(kotlin.math.abs(item.id.hashCode().toLong())) - 1L,
+            uri = parsedUri,
+            title = item.title,
+            artist = item.subtitle ?: "Lumora Downloads",
+            album = "Downloads",
             durationMs = 0L,
-            path = path,
-            sizeBytes = d.totalBytes,
-            format = path.substringAfterLast('.', "AUDIO").uppercase(),
-            thumbnailUrl = null
+            path = item.filePath ?: fileUri,
+            sizeBytes = item.totalBytes,
+            format = item.formatContainer ?: "MP3",
+            thumbnailUrl = item.thumbnailUrl
         )
         try {
             AudioPlaybackManager.openFullScreen()
             AudioPlaybackManager.playTrack(context = context, track = track, newQueue = listOf(track))
         } catch (_: Throwable) {
-            Toast.makeText(context, "Could not start the audio player", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Could not open audio player", Toast.LENGTH_SHORT).show()
         }
-        return
-    }
-    val video = VideoItem(
-        id = mediaId,
-        uri = uri,
-        displayName = d.title,
-        path = path,
-        sizeBytes = d.totalBytes,
-        durationMs = 0L,
-        dateModified = d.createdAt / 1000L
-    )
-    onPlayVideo(video, listOf(video))
-}
-
-/** Plays the part of a still unfinished download that is already on the phone (as much as has been downloaded). */
-private fun playPartialDownload(context: android.content.Context, d: DownloadItem, onPlayVideo: (VideoItem, List<VideoItem>) -> Unit) {
-    val part = DownloadManager.partialFile(context, d)
-    if (part == null) {
-        Toast.makeText(context, "Nothing downloaded yet", Toast.LENGTH_SHORT).show()
-        return
-    }
-    val uri = Uri.fromFile(part)
-    val mediaId = -(kotlin.math.abs(("download-part:" + d.id).hashCode().toLong())) - 1L
-    if (d.isAudio) {
-        val track = AudioTrackItem(
-            id = mediaId,
-            uri = uri,
-            title = d.title,
-            artist = d.subtitle ?: "Download",
-            album = "Download",
+    } else {
+        val video = VideoItem(
+            id = -(kotlin.math.abs(item.id.hashCode().toLong())) - 1L,
+            uri = parsedUri,
+            displayName = item.title,
+            path = item.filePath ?: fileUri,
+            sizeBytes = item.totalBytes,
             durationMs = 0L,
-            path = part.absolutePath,
-            sizeBytes = part.length(),
-            format = "AUDIO",
-            thumbnailUrl = null
+            dateModified = System.currentTimeMillis() / 1000L,
+            thumbnailUrl = item.thumbnailUrl,
+            channelName = item.subtitle
         )
-        try {
-            AudioPlaybackManager.openFullScreen()
-            AudioPlaybackManager.playTrack(context = context, track = track, newQueue = listOf(track))
-        } catch (_: Throwable) {
-            Toast.makeText(context, "Could not start the audio player", Toast.LENGTH_SHORT).show()
-        }
-        return
+        onPlayVideo(video, listOf(video))
     }
-    val video = VideoItem(
-        id = mediaId,
-        uri = uri,
-        displayName = d.title + " (" + DownloadFormat.bytes(d.downloadedBytes) + ")",
-        path = part.absolutePath,
-        sizeBytes = part.length(),
-        durationMs = 0L,
-        dateModified = d.createdAt / 1000L
-    )
-    onPlayVideo(video, listOf(video))
 }

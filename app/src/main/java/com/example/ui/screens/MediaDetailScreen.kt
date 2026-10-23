@@ -57,6 +57,7 @@ import com.example.ui.components.DownloadGlassSheet
 import com.example.ui.components.HighResImage
 import com.example.ui.components.LumoraExpressiveLoadingIndicator
 import com.example.ui.components.OnlineQuickActionBar
+import com.example.util.DownloadManager
 import com.example.ui.components.StyledIcon
 import com.example.ui.components.VideoItemCard
 import com.example.ui.components.VisibleFields
@@ -288,9 +289,6 @@ fun MediaDetailScreen(
     val option = optionList.getOrNull(qualityIdx.coerceIn(0, (optionList.size - 1).coerceAtLeast(0)))
     // which picker sheet is open: 0 none, 1 season, 2 audio, 3 quality
     var pickerSheet by remember { mutableIntStateOf(0) }
-    var downloadTarget by remember { mutableStateOf<DetailVideo?>(null) }
-    // the files / qualities the website offers for the movie / episode being downloaded (second step of a download)
-    var downloadLinks by remember { mutableStateOf<DownloadLinksState?>(null) }
 
     // ---- episodes of the selected quality (a series may need getEpisodes first) ----
     val optionKey = (option?.link?.episodesLink ?: option?.link?.directLinks?.firstOrNull()?.link).orEmpty() + "|" + audio?.label + "|" + option?.label
@@ -371,8 +369,6 @@ fun MediaDetailScreen(
         when {
             busyLabel != null -> { busyJob?.cancel(); busyJob = null; busyLabel = null }
             pickerSheet != 0 -> pickerSheet = 0
-            downloadLinks != null -> downloadLinks = null
-            downloadTarget != null -> downloadTarget = null
             actionTarget != null -> actionTarget = null
             else -> onBack()
         }
@@ -397,13 +393,12 @@ fun MediaDetailScreen(
         Toast.makeText(context, "Could not get this video: " + (error?.message ?: "unknown error"), Toast.LENGTH_LONG).show()
     }
 
-    fun runResolve(label: String, forDownload: Boolean, v: DetailVideo, onOk: (com.example.util.media.MediaStream) -> Unit) {
+    fun runResolve(label: String, v: DetailVideo, onOk: (com.example.util.media.MediaStream) -> Unit) {
         runBusy(label) {
             val result = MediaPlayback.resolve(
-                context, plugin, v.link, v.type, forDownload,
+                context, plugin, v.link, v.type,
                 v.title, if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1,
-                // a tapped video is only opened in the player when one of its servers really delivers video
-                requireWorking = !forDownload
+                requireWorking = true
             )
             val stream = result.getOrNull()
             if (stream == null) showResolveError(result.exceptionOrNull()) else onOk(stream)
@@ -412,7 +407,7 @@ fun MediaDetailScreen(
 
     fun play(v: DetailVideo) {
         actionTarget = null
-        runResolve("Getting video link…", false, v) { stream ->
+        runResolve("Getting video link…", v) { stream ->
             // the player's quality menu lists exactly the qualities this plugin offers for this audio
             val session = PluginPlaybackSession(
                 plugin = plugin,
@@ -452,75 +447,6 @@ fun MediaDetailScreen(
                 }
             } else listOf(item)
             onPlayVideo(item, queue)
-        }
-    }
-
-    suspend fun beginDownload(v: DetailVideo, suffix: String, opt: MediaPlayback.DownloadOption) {
-        val tag = opt.quality?.takeIf { it.isNotBlank() && !suffix.contains(it, ignoreCase = true) }?.let { " [$it]" }.orEmpty()
-        val name = playerTitle(v) + suffix + tag
-        val message = MediaPlayback.startDownload(context, plugin, name, v.poster, opt.stream)
-        Toast.makeText(context, "$message (see Network › Download)", Toast.LENGTH_SHORT).show()
-    }
-
-    fun startDownload(v: DetailVideo, chosenAudio: AudioGroup, chosen: QualityOption) {
-        val suffix = chosen.label.takeIf { it != "Default" }?.let { " [$it]" }.orEmpty()
-        runBusy("Searching available files…") {
-            // like the reference app: ask the website for everything it offers (servers, qualities, files), then let the user pick
-            val result = if (chosen === option) {
-                MediaPlayback.resolveAll(context, plugin, v.link, v.type, true)
-            } else {
-                val choice = PluginQualityChoice(chosen.label, chosen.link.episodesLink, chosen.link.directLinks)
-                MediaPlayback.resolveChoiceAll(
-                    context, plugin, choice,
-                    allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0), v.title, isSeries, true
-                )
-            }
-            val streams = result.getOrNull()
-            if (streams == null) {
-                showResolveError(result.exceptionOrNull())
-            } else {
-                // always show what is available first (even one file); the download starts only after a tap.
-                // The list opens at once and every row fills in its real size as soon as it is measured,
-                // so the sheet never waits for the slowest server.
-                var opened = false
-                val sizeJob = scope.launch {
-                    MediaPlayback.downloadOptionsProgressive(context, streams) { list ->
-                        if (!opened) {
-                            opened = true
-                            downloadLinks = DownloadLinksState(v, suffix, list)
-                        } else if (downloadLinks?.video === v) {
-                            downloadLinks = DownloadLinksState(v, suffix, list)
-                        }
-                    }
-                }
-                try {
-                    var waited = 0L
-                    while (!opened && waited < 3000L && sizeJob.isActive) {
-                        kotlinx.coroutines.delay(30L)
-                        waited += 30L
-                    }
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    sizeJob.cancel()
-                    throw e
-                }
-                if (!opened) {
-                    sizeJob.cancel()
-                    showResolveError(PluginException("no downloadable file was found"))
-                }
-            }
-        }
-    }
-
-    // The first episodes get their picture (a frame of the video) and their working server prepared in the background,
-    // so by the time one is tapped it already knows which server really plays.
-    LaunchedEffect(videos) {
-        for (pv in videos.take(10)) {
-            launch {
-                com.example.util.media.EpisodeFrames.obtain(
-                    context, plugin, pv.link, pv.type, pv.title,
-                    if (isSeries) allVideos.indexOfFirst { it.link == pv.link }.coerceAtLeast(0) else -1
-                )
-            }
         }
     }
 
@@ -725,17 +651,9 @@ fun MediaDetailScreen(
                         }
                     }
                     else -> items(videos, key = { "v|" + it.link + "|" + it.title }) { v ->
-                        // the card's picture is a frame of the episode's own video (made when the card is shown, then kept)
-                        var framePath by remember(v.link) { mutableStateOf(com.example.util.media.EpisodeFrames.cached(context, plugin, v.link)) }
-                        LaunchedEffect(v.link) {
-                            if (framePath == null) {
-                                framePath = com.example.util.media.EpisodeFrames.obtain(
-                                    context, plugin, v.link, v.type, v.title,
-                                    if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1
-                                )
-                            }
-                        }
-                        val card = remember(v, framePath) {
+                        // the picture is the one the provider gives (default thumbnail): nothing is read out of the video itself,
+                        // so no internet data is spent on the cards
+                        val card = remember(v) {
                             VideoItem(
                                 id = -(kotlin.math.abs(v.link.hashCode().toLong())) - 1L,
                                 uri = Uri.parse(v.link),
@@ -745,8 +663,7 @@ fun MediaDetailScreen(
                                 durationMs = 0L,
                                 dateModified = 0L,
                                 isOnline = true,
-                                // the website's own picture shows at once; it is replaced by a frame of the real video as soon as that is ready
-                                thumbnailUrl = framePath ?: v.poster.takeIf { it.isNotBlank() },
+                                thumbnailUrl = v.poster.takeIf { it.isNotBlank() },
                                 channelName = listOf(v.qualityLabel, plugin.name).filter { it.isNotBlank() }.joinToString(" · ")
                             )
                         }
@@ -761,6 +678,7 @@ fun MediaDetailScreen(
                                     showResolution = false,
                                     showProgressBar = false
                                 ),
+                                largeThumbnail = true,
                                 onClick = { play(v) }
                             )
                         }
@@ -783,9 +701,27 @@ fun MediaDetailScreen(
                     isDark = isDark,
                     alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
                     isSavedForLater = saved,
+                    onDownload = {
+                        actionTarget = null
+                        runResolve("Checking download servers…", t) { stream ->
+                            val finalTitle = playerTitle(t)
+                            DownloadManager.enqueueMediaPlugin(
+                                context = context,
+                                title = title,
+                                episodeTitle = t.title,
+                                posterUrl = t.poster ?: poster,
+                                streamUrl = stream.link,
+                                headers = stream.headers,
+                                subtitles = stream.subtitles.map { it.uri },
+                                fileSize = 0L,
+                                format = if (stream.type.isNotBlank()) stream.type else "mp4"
+                            )
+                            Toast.makeText(context, "Download started for $finalTitle", Toast.LENGTH_SHORT).show()
+                        }
+                    },
                     onSaveToPlaylist = {
                         actionTarget = null
-                        runResolve("Adding to playlist…", false, t) { stream ->
+                        runResolve("Adding to playlist…", t) { stream ->
                             val item = MediaPlayback.toVideoItem(context, plugin, playerTitle(t), t.poster, stream)
                             MediaPlayback.addToPluginPlaylist(context, plugin, item)
                             Toast.makeText(context, "Added to the \"${plugin.name}\" playlist", Toast.LENGTH_SHORT).show()
@@ -806,18 +742,6 @@ fun MediaDetailScreen(
                         Toast.makeText(context, if (nowSaved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
-                    onDownload = {
-                        // the qualities the website offers open from the bottom, then the download starts
-                        actionTarget = null
-                        val onlyAudio = audioList.getOrNull(audioIdx.coerceIn(0, (audioList.size - 1).coerceAtLeast(0)))
-                        val onlyQuality = optionList.getOrNull(qualityIdx.coerceIn(0, (optionList.size - 1).coerceAtLeast(0)))
-                        if (audioList.size <= 1 && optionList.size <= 1 && onlyAudio != null && onlyQuality != null) {
-                            // nothing to choose between: go straight to searching the files
-                            startDownload(t, onlyAudio, onlyQuality)
-                        } else {
-                            downloadTarget = t
-                        }
-                    },
                     onShare = {
                         actionTarget = null
                         val page = loaded?.webUrl?.takeIf { it.isNotBlank() }
@@ -825,7 +749,7 @@ fun MediaDetailScreen(
                         if (page != null) {
                             shareOnlineLink(context, playerTitle(t), page)
                         } else {
-                            runResolve("Getting link…", false, t) { stream ->
+                            runResolve("Getting link…", t) { stream ->
                                 shareOnlineLink(context, playerTitle(t), stream.link)
                             }
                         }
@@ -889,42 +813,6 @@ fun MediaDetailScreen(
                     qualityIdx = it
                     saveSelection()
                     pickerSheet = 0
-                }
-            )
-        }
-
-        // ---- download sheet: audio + quality of this movie / episode ----
-        val dl = downloadTarget
-        if (dl != null) {
-            DownloadChoiceSheet(
-                title = playerTitle(dl),
-                audios = audioList,
-                initialAudio = audioIdx.coerceIn(0, (audioList.size - 1).coerceAtLeast(0)),
-                initialQuality = qualityIdx.coerceIn(0, (optionList.size - 1).coerceAtLeast(0)),
-                isDark = isDark,
-                glassBlurTransparency = glassBlurTransparency,
-                onDismiss = { downloadTarget = null },
-                onConfirm = { ai, qi ->
-                    downloadTarget = null
-                    val chosenAudio = audioList.getOrNull(ai)
-                    val chosen = chosenAudio?.options?.getOrNull(qi)
-                    if (chosenAudio != null && chosen != null) startDownload(dl, chosenAudio, chosen)
-                }
-            )
-        }
-
-        // ---- download list: every server / quality / file the website offers ----
-        val links = downloadLinks
-        if (links != null) {
-            DownloadLinksSheet(
-                title = playerTitle(links.video),
-                options = links.options,
-                isDark = isDark,
-                glassBlurTransparency = glassBlurTransparency,
-                onDismiss = { downloadLinks = null },
-                onPick = { opt ->
-                    downloadLinks = null
-                    runBusy("Preparing download…") { beginDownload(links.video, links.suffix, opt) }
                 }
             )
         }
@@ -1015,51 +903,8 @@ private fun PickerPill(
     }
 }
 
-private class DownloadLinksState(val video: DetailVideo, val suffix: String, val options: List<MediaPlayback.DownloadOption>)
-
-/** The files the website offers for a download (server, quality, format, size): tapping one starts the download. */
-@Composable
-private fun DownloadLinksSheet(
-    title: String,
-    options: List<MediaPlayback.DownloadOption>,
-    isDark: Boolean,
-    glassBlurTransparency: Float,
-    onDismiss: () -> Unit,
-    onPick: (MediaPlayback.DownloadOption) -> Unit
-) {
-    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
-    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
-    val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
-    DownloadGlassSheet(isDark = isDark, glassBlurTransparency = glassBlurTransparency, onDismiss = onDismiss) {
-        Text(text = "Download", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = primaryText)
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(text = title, fontSize = 13.sp, color = secondaryText, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(text = "${options.size} files available", fontSize = 12.sp, color = secondaryText)
-        Spacer(modifier = Modifier.height(12.dp))
-        options.forEach { opt ->
-            val shape = RoundedCornerShape(16.dp)
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp)
-                    .clip(shape)
-                    .background(primaryText.copy(alpha = 0.06f))
-                    .border(1.dp, borderColor, shape)
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onPick(opt) }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Text(text = opt.title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = primaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (opt.detail.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(text = opt.detail, fontSize = 13.sp, color = AccentSkyBlue)
-                }
-            }
-        }
-    }
-}
-
 /** Bottom sheet list (season / audio / quality) in the same transparent glass as the download sheet. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun OptionSheet(
     title: String,
@@ -1096,85 +941,6 @@ private fun OptionSheet(
                     Text(text = "✓", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = AccentSkyBlue)
                 }
             }
-        }
-    }
-}
-
-/** Download button of an episode: pick the audio and the quality the website offers, then start the download. */
-@Composable
-private fun DownloadChoiceSheet(
-    title: String,
-    audios: List<AudioGroup>,
-    initialAudio: Int,
-    initialQuality: Int,
-    isDark: Boolean,
-    glassBlurTransparency: Float,
-    onDismiss: () -> Unit,
-    onConfirm: (Int, Int) -> Unit
-) {
-    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
-    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
-    val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
-    var a by remember { mutableIntStateOf(initialAudio) }
-    var q by remember { mutableIntStateOf(initialQuality) }
-    val options = audios.getOrNull(a)?.options.orEmpty()
-
-    @Composable
-    fun ChipRow(labels: List<String>, selected: Int, onPick: (Int) -> Unit) {
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            labels.forEachIndexed { index, label ->
-                val isSelected = index == selected
-                val shape = RoundedCornerShape(16.dp)
-                Box(
-                    modifier = Modifier
-                        .clip(shape)
-                        .then(
-                            if (isSelected) Modifier.background(AccentGradient)
-                            else Modifier.background(primaryText.copy(alpha = 0.06f)).border(1.dp, borderColor, shape)
-                        )
-                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onPick(index) }
-                        .padding(horizontal = 16.dp, vertical = 11.dp)
-                ) {
-                    Text(
-                        text = label,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (isSelected) Color.White else primaryText,
-                        maxLines = 1
-                    )
-                }
-            }
-        }
-    }
-
-    DownloadGlassSheet(isDark = isDark, glassBlurTransparency = glassBlurTransparency, onDismiss = onDismiss) {
-        Text(text = "Download", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = primaryText)
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(text = title, fontSize = 13.sp, color = secondaryText, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(text = "Audio", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = secondaryText)
-        Spacer(modifier = Modifier.height(8.dp))
-        ChipRow(audios.map { it.label }, a) { a = it; q = 0 }
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(text = "Quality", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = secondaryText)
-        Spacer(modifier = Modifier.height(8.dp))
-        ChipRow(options.map { it.label }, q.coerceIn(0, (options.size - 1).coerceAtLeast(0))) { q = it }
-        Spacer(modifier = Modifier.height(22.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(50.dp)
-                .clip(RoundedCornerShape(50))
-                .background(AccentGradient)
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                    onConfirm(a, q.coerceIn(0, (options.size - 1).coerceAtLeast(0)))
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Text(text = "Download", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White)
         }
     }
 }

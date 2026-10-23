@@ -74,6 +74,11 @@ Lumora/ (repo root)
                                    # about Lumora. Add real instrumented UI tests here if you write any.
 ```
 
+**Size rule:** big open-source files are NOT kept in the repo; `.github/workflows/build-apk.yml` downloads them on
+every build (and `.gitignore` keeps them out): `GoNotoCurrent-Regular.ttf`, `python313.zip` + `cacert.pem` (yt-dlp), and the
+QuickJS-NG v0.16.2 C sources into `app/src/main/cpp/third_party/quickjs/` (CMake skips `libqjs.so` with a warning when
+they are missing, e.g. a build outside CI).
+
 **Important:** `GoNotoCurrent-Regular.ttf` (the multi-script subtitle fallback
 font referenced by `player/SubtitleFontManager.kt`) is **intentionally not in
 this zip/repo**. It's a large third-party font, so the CI workflow downloads
@@ -89,7 +94,7 @@ bundled subtitle font" step in `build-apk.yml`). Its absence here is not a bug
 app/src/main/
 ├── AndroidManifest.xml     # permissions, MainActivity + all intent-filters, AudioNotificationReceiver,
 │                           # AudioPlaybackService (foreground media playback), FileProvider (share feature)
-├── assets/fonts/LTWave-Bold.otf     # the app's UI display font (see ui/theme/Type.kt) — ships in the APK
+├── assets/fonts/Lumora.ttf          # the app's UI display font (see ui/theme/Type.kt) — ships in the APK
 ├── java/com/example/
 │   ├── MainActivity.kt              # entry point: permissions, PiP, intent handling, HOME↔PLAYER nav
 │   ├── ai/                          # (5 files) optional AI features: subtitle translation via a
@@ -106,7 +111,7 @@ app/src/main/
 │   │   ├── state/                   # (3 files) AppConfig (settings/strings by language), PlayerSettings,
 │   │   │                            #   PlayerLayoutModels (customizable on-screen control layout)
 │   │   └── theme/                   # (3 files) Color.kt, Theme.kt, Type.kt — Compose Material theme,
-│   │                                #   built from the project's OWN palette + LTWave-Bold custom font.
+│   │                                #   built from the project's OWN palette + Lumora.ttf custom font.
 │   │                                #   Never swap in Material's default colors/typography — see Section 7.
 │   └── util/                        # (28 files) file IO, caching, playback/watch history, metadata
 │                                     #   extraction, private vault, playlists, block-lists, MKV muxing
@@ -118,7 +123,7 @@ app/src/main/
 │   │                        # RULE: before adding a new icon here, grep the codebase for its filename
 │   │                        # stem — if you're about to add one that duplicates an existing lumora_*
 │   │                        # icon's shape, reuse the existing one instead of creating a near-duplicate.
-│   ├── font/ltwave_bold.otf # Compose `Font(R.font.ltwave_bold)` reference to assets/fonts/LTWave-Bold.otf
+│   ├── font/lumora.ttf      # Compose `Font(R.font.lumora)` reference (same file as assets/fonts/Lumora.ttf)
 │   ├── mipmap-anydpi-v26/   # adaptive launcher icon XML (references the 3 ic_launcher_* drawable layers)
 │   ├── values/
 │   │   ├── strings.xml      # ONLY app_name lives here — all other UI text is hardcoded per-language
@@ -146,7 +151,7 @@ adding a second implementation.
 | `AudioMetadataExtractor.kt` | Reads ID3/Vorbis/MP4 tags incl. embedded lyrics (SYLT/USLT/TXXX frames). |
 | `AudioPlaybackManager.kt` (1.7k lines) | Full audio-player state machine: queue, audio FX, online-track prefetch/caching, media session integration. |
 | `AudioPlaybackService.kt` / `AudioNotificationManager.kt` / `AudioNotificationReceiver.kt` | Foreground service + notification for background audio playback. |
-| `OnlineAudioCache.kt` | Disk cache for streamed online audio. |
+| `OnlineAudioCache.kt` | Disabled compatibility shim; full-track online audio caching/download has been removed. |
 | `ChapterSkipMarker.kt` | Intro/outro/recap chapter detection by title keyword, for the "skip" button. |
 | `AudioSettingsModels.kt` / `VideoFilterModels.kt` | Data models for audio EQ/presets and video filter presets. |
 
@@ -204,7 +209,7 @@ transcode. Equally load-bearing — do not remove.
 This app has its own design language: **liquid-glass panels
 (`ui/components/LiquidGlassComponents.kt`), its own color palette
 (`ui/theme/Color.kt`/`Theme.kt`), and its own custom display font
-(LTWave-Bold via `ui/theme/Type.kt`)**. All in-app text for every supported
+(Lumora.ttf via `ui/theme/Type.kt`)**. All in-app text for every supported
 language lives in `ui/state/AppConfig.kt` (not `strings.xml` — that file only
 holds the Android app label).
 
@@ -274,8 +279,7 @@ NewPipeExtractor has no "Posts" tab, so Posts shows an empty-state message.
 
 ## 11. Network > Media providers (provider page)
 - `NetworkTabContent` has only two sections: **Local Network** and **Media**. A downloaded plugin has no tab any more.
-- Media list (`MediaPluginManager`, `MediaTabContent.kt`): downloaded plugins are sorted first (last download on top) and
-  the list scrolls to the top when a download finishes. Tapping a downloaded plugin sets `MediaDetailState.provider`.
+- Media list (`MediaPluginManager`, `MediaTabContent.kt`): already-installed plugins are listed and can be opened. Repository loading and plugin install/update buttons are disabled; tapping an installed plugin sets `MediaDetailState.provider`.
 - Provider page (`MediaPluginPage`): sliding banner (`MediaHeroSlider`, max 6 titles of the trending/popular/latest
   category, auto-advances every 4.5 s) → "Continue watching" (`MediaHistoryStore`, written when playback starts from the
   title page) → Watch later → the plugin's categories (`MediaFocusRow`: raised alternate cards, centre card bigger, edge
@@ -290,8 +294,7 @@ NewPipeExtractor has no "Posts" tab, so Posts shows an empty-state message.
 - The repository field of the Media list accepts a **Vega** link (manifest.json) *or* a **CloudStream** link: repo.json / plugins.json URL,
   GitHub project URL, `cloudstreamrepo://...` / `https://cs.repo/?...` link, or a cutt.ly / py.md shortcode. `MediaPluginStore.refreshManifest`
   detects the kind; a CloudStream repo (repo.json -> pluginLists -> plugins.json) is stored as a normalised manifest with `engine = cloudstream`.
-- Downloading a CloudStream provider saves `media_plugins/<internalName>/plugin.cs3` (sha256 checked against the repository) and loads it.
-  `MediaPluginInfo.engine/url/fileHash` tell the two kinds apart; the provider page, title page, search and player are the existing ones.
+- Previously installed CloudStream providers remain usable from `media_plugins/<internalName>/plugin.cs3`. New repository fetching and provider installation/update transfer paths have been removed. `MediaPluginInfo.engine/url/fileHash` remain as metadata for installed providers.
 - New Gradle module `cloudstream-lib/`: the CloudStream `library` sources (GPL-3.0, github.com/recloudstream/cloudstream) merged into plain
   Android code (expect/actual resolved), plus app-side classes extensions need (`Plugin`, `CloudStreamApp`, `CommonActivity`, `DataStore`,
   `VideoClickAction`, `CloudflareKiller`). `com.lagradost.lumora.CloudStreamEngine` loads a .cs3 (PathClassLoader + manifest.json) and answers
@@ -299,3 +302,20 @@ NewPipeExtractor has no "Posts" tab, so Posts shows an empty-state message.
 - A title's episodes come from `load()` (one season = one quality option, anime Dubbed/Subbed = audio); `loadLinks()` gives servers + subtitles.
   Not supported yet: separate audio tracks, `getVideoInterceptor`, extension settings screens.
 - R8 keep rules for the library and its dependencies are at the end of `app/proguard-rules.pro`.
+
+## 13. Torrents are DOWNLOAD ONLY (no playback)
+
+- A magnet link / info hash / .torrent (Network tab, or opened from another app) opens the file picker
+  (`ui/components/TorrentPickerSheet.kt`); the chosen file goes to `DownloadManager.enqueueTorrent` and is fetched by
+  `torrent/TorrentDownloadEngine.kt` (libtorrent4j). Nothing is ever played or streamed from a torrent.
+- `torrent/TorrentCatalogEngine.kt` only reads the file list (metadata). `TorrentPicker.kt` = picker state + intent parsing,
+  `TorrentModels.kt` = source parsing, `TorrentMetadata.kt` = tracker / web-seed reader.
+- Removed on purpose (do not re-add): streaming engine, loopback proxy (NanoHTTPD dependency), mpv torrent profile,
+  player buffering text / session hooks.
+
+
+## Torrent / direct-link notes (latest)
+- Torrents are DOWNLOAD ONLY: Downloads cards of torrent items have no tap / play action; the engine no longer downloads sequentially (faster); the picker lists every file of a torrent.
+- Network > Local Network: `util/NetworkStreamResolver.kt` accepts only direct media file/stream URLs (for example MP4, MKV, M3U8 or MPD). Social-app links, share pages and yt-dlp resolution are disabled; there is no direct-media Download action.
+- Build time (GitHub Actions): release lint check is off (`lint { checkReleaseBuilds = false }`), R8 uses `proguard-android-optimize.txt` with `-dontoptimize` in `proguard-rules.pro` (no optimisation passes), Gradle heap 8g + ParallelGC in the workflow. Log of the 16 min build: R8 ~7.5 min, lintVital ~3 min, Kotlin ~2.7 min.
+- Cleanup: `ChunkedHttpDownloader`, `DirectLinkResolver`, `DownloadProbe`, `YtdlpDownloader`, `YtdlpProbe`, `YoutubeFastProbe`, and download-specific mux/tag processing have been removed. `DownloadManager`, `DownloadStore`, and `DownloadsTabContent` now serve torrent transfers only. Legacy download history preferences are cleared; `DownloadOptionsSheet` remains as an inert UI shell.

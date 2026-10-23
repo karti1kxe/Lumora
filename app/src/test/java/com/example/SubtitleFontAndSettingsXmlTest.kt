@@ -68,6 +68,7 @@ class SubtitleFontAndSettingsXmlTest {
       Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello Missing Font
     """.trimIndent()
     
+    SubtitleFontManager.setSelectedFont(null)
     val sanitized = SubtitleFontManager.sanitizeAssForFallback(context, assScript)
     
     // Missing font should be sanitized to bundled fallback

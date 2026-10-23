@@ -69,6 +69,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
@@ -579,8 +580,8 @@ fun MediaInformationScreen(
                     onChapterFormatChange = { chapterFormat = it },
                     expandedAttachments = expandedAttachments,
                     onExpandedAttachmentsChange = { expandedAttachments = it },
-                    onExtractAllFonts = { showFontDirectoryPicker = true },
-                    onExtract = ::queueExtract,
+                    onExtractAllFonts = {},
+                    onExtract = { _, _ -> },
                     onCopy = ::copyText,
                     onShare = ::shareText,
                     onProgress = { f, msg, name ->
@@ -884,7 +885,7 @@ private fun MediaInfoContent(
                                 color = AccentSkyBlue,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
-                                modifier = Modifier.clickable {
+                                modifier = Modifier.alpha(0.45f).clickable(enabled = false) {
                                     onExtractAllFonts()
                                 }
                             )
@@ -1308,7 +1309,8 @@ private fun ExtractButton(
             .height(42.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(AccentGradient)
-            .bounceClick(onClick = onClick),
+            .alpha(0.45f)
+            .clickable(enabled = false) { onClick() },
         contentAlignment = Alignment.Center
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

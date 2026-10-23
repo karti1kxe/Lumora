@@ -45,7 +45,6 @@ enum class AudioRepeatMode(val label: String) {
 object AudioPlaybackManager {
     private const val TAG = "AudioPlaybackManager"
     /** How many upcoming online tracks are cached in the background while the current one plays. */
-    private const val PREFETCH_AHEAD = 2
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private var mediaPlayer: MediaPlayer? = null
@@ -80,10 +79,8 @@ object AudioPlaybackManager {
 
     private var streamResolutionJob: Job? = null
     private var streamPreloadJob: Job? = null
-    private var cacheJob: Job? = null
-    private var prefetchJob: Job? = null
 
-    // Pre-buffered player for the NEXT online track (cached on disk + already prepared).
+    // Standby player for the NEXT online track, prepared for stream playback.
     private var standbyPlayer: MediaPlayer? = null
     private var standbyTrackId: Long? = null
     private var standbyPrepared: Boolean = false
@@ -250,7 +247,7 @@ object AudioPlaybackManager {
         // If online track, re-resolve stream URL because CDN tokens expire
         if (track.path.startsWith(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX) || !resume.videoUrl.isNullOrBlank()) {
             val videoUrl = resume.videoUrl ?: track.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
-            // Already cached on disk: play instantly, no stream resolution / network round trip.
+            // Legacy disk-cache lookup is disabled; online tracks stay stream-based.
             if (track.path.startsWith(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX) &&
                 OnlineAudioCache.cachedFile(
                     context.applicationContext,
@@ -563,18 +560,6 @@ object AudioPlaybackManager {
             return
         }
 
-        // Online track: download the WHOLE track (and the next ones) to disk in the background.
-        if (isOnlineTrack && uriStr.startsWith("http")) {
-            startCachePipeline(context, track, generation)
-        } else if (isOnlineTrack && uriStr.startsWith("file:") && !seamless) {
-            // Playing from disk already: nothing to download for this track. The upcoming tracks
-            // are pre-buffered as soon as playback starts (see beginPlayback below).
-            cacheJob?.cancel()
-            cacheJob = null
-            prefetchJob?.cancel()
-            prefetchJob = null
-        }
-
         // Pre-buffered (already prepared) player for this exact track, if one is waiting.
         val standby: MediaPlayer? =
             if (isOnlineTrack && uriStr.startsWith("file:") && !seamless) takeStandbyPlayer(track.id) else null
@@ -618,10 +603,8 @@ object AudioPlaybackManager {
             updateNotification(context, track, true, isBuffering = false)
             preloadUpcomingOnlineStreams()
             if (isOnlineTrack) {
-                // While this track plays, get the next one ready: cached on disk + a prepared
-                // player waiting, so the switch at the end of the song is instant.
+                // Online tracks remain stream-based; there is no full-track cache or download queue.
                 prepareStandbyForUpcoming(context)
-                if (cacheJob?.isActive != true && prefetchJob?.isActive != true) requestPrefetch(context)
             }
         }
 
@@ -836,54 +819,6 @@ object AudioPlaybackManager {
         return maxOf(playerDur, track.durationMs)
     }
 
-    /**
-     * Background caching: download the current online track completely and, once done, hand
-     * playback over to the local file WITHOUT interrupting the audio (see the `seamless` mode of
-     * [startMediaPlayer]). Afterwards the upcoming tracks are pre-buffered by [requestPrefetch].
-     */
-    private fun startCachePipeline(context: Context, current: AudioTrackItem?, generation: Long) {
-        cacheJob?.cancel()
-        prefetchJob?.cancel()
-        if (current == null) return
-        val appContext = context.applicationContext
-        cacheJob = scope.launch(Dispatchers.IO) {
-            try {
-                val videoUrl = current.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
-                val file = OnlineAudioCache.download(appContext, videoUrl, current.uri.toString())
-                if (file != null) {
-                    withContext(Dispatchers.Main) { swapToCachedFile(appContext, current, file, generation) }
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                Log.w(TAG, "Cache pipeline error: ${t.message}")
-            }
-            // The current track is done (or could not be cached): now pre-buffer what comes next.
-            withContext(Dispatchers.Main) {
-                if (generation == playbackGeneration) requestPrefetch(appContext, fromPipeline = true)
-            }
-        }
-    }
-
-    private fun swapToCachedFile(context: Context, track: AudioTrackItem, file: File, generation: Long) {
-        if (generation != playbackGeneration) return
-        if (_currentTrack.value?.id != track.id) return
-        val mp = mediaPlayer ?: return
-        if (!mediaPlayerPrepared || !_isPlaying.value) return
-        val pos = runCatching { mp.currentPosition.toLong() }.getOrDefault(_currentPositionMs.value)
-        val dur = _durationMs.value
-        // Nearly finished or not really playing: leave it, the next start uses the cached file anyway.
-        if (dur > 0L && dur - pos < 8000L) return
-        startMediaPlayer(context, track.copy(uri = Uri.fromFile(file)), pos, seamless = true)
-    }
-
-    /** A direct media URL (not a YouTube/Spotify web page that still has to be resolved). */
-    private fun isDirectStreamUrl(url: String): Boolean {
-        if (!(url.startsWith("http://") || url.startsWith("https://"))) return false
-        val host = runCatching { Uri.parse(url).host }.getOrNull()?.lowercase() ?: return false
-        return !(host.endsWith("youtube.com") || host == "youtu.be" || host.endsWith("spotify.com"))
-    }
-
     /** The online track [offset] places after the current one, exactly as skipNext() will pick it. */
     private fun upcomingOnlineTrack(offset: Int): AudioTrackItem? {
         if (_repeatMode.value == AudioRepeatMode.ONE) return null
@@ -899,62 +834,8 @@ object AudioPlaybackManager {
         }
     }
 
-    /**
-     * Pre-buffers the next tracks in the background WHILE the current one plays. The queue is
-     * re-read for every track, so recommendations / playlist items that arrive late are still
-     * picked up. Safe to call repeatedly: a running prefetch is replaced (partial downloads resume).
-     */
-    private fun requestPrefetch(context: Context, fromPipeline: Boolean = false) {
-        val cur = _currentTrack.value ?: return
-        if (!cur.path.startsWith(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)) return
-        // Don't compete with the current track's own download for bandwidth.
-        if (!fromPipeline && cacheJob?.isActive == true) return
-        val appContext = context.applicationContext
-        prefetchJob?.cancel()
-        prefetchJob = scope.launch(Dispatchers.IO) {
-            try {
-                prefetchUpcomingOnline(appContext)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                Log.w(TAG, "Prefetch error: ${t.message}")
-            }
-        }
-    }
-
-    private suspend fun prefetchUpcomingOnline(context: Context) {
-        for (offset in 1..PREFETCH_AHEAD) {
-            val next = upcomingOnlineTrack(offset) ?: continue
-            val videoUrl = next.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
-            if (videoUrl.isBlank()) continue
-            if (OnlineAudioCache.cachedFile(context, videoUrl) == null) {
-                // Never download a web-page URI (e.g. youtube.com/watch?v=...) as if it were audio.
-                var stream = preloadedOnlineStreams[videoUrl]
-                    ?: next.uri.toString().takeIf { isDirectStreamUrl(it) }
-                if (stream == null) {
-                    stream = com.example.util.OnlineMusicService.resolveStreamUrl(videoUrl, next.title, next.artist)
-                    if (stream != null) preloadedOnlineStreams[videoUrl] = stream
-                }
-                if (stream == null) continue
-                var file = OnlineAudioCache.download(context, videoUrl, stream)
-                if (file == null) {
-                    // The resolved URL may have expired: resolve a fresh one and try once more.
-                    val fresh = com.example.util.OnlineMusicService.resolveStreamUrl(videoUrl, next.title, next.artist)
-                    if (fresh != null) {
-                        preloadedOnlineStreams[videoUrl] = fresh
-                        file = OnlineAudioCache.download(context, videoUrl, fresh)
-                    }
-                }
-                if (file == null) continue
-            }
-            if (offset == 1) {
-                withContext(Dispatchers.Main) { prepareStandbyForUpcoming(context) }
-            }
-        }
-    }
-
     // ---------------------------------------------------------------------------------------
-    // Standby player: the NEXT online track, already cached on disk and already prepared, so the
+    // Standby player: the NEXT online track, pre-prepared for streaming, so the
     // switch at the end of the current song only has to call start().
     // ---------------------------------------------------------------------------------------
     private fun standbyMatches(trackId: Long): Boolean =
@@ -1037,7 +918,6 @@ object AudioPlaybackManager {
         val ctx = applicationContext ?: return
         if (_currentTrack.value == null) return
         prepareStandbyForUpcoming(ctx)
-        requestPrefetch(ctx)
     }
 
     /**
@@ -1406,10 +1286,6 @@ object AudioPlaybackManager {
         streamResolutionJob = null
         streamPreloadJob?.cancel()
         streamPreloadJob = null
-        cacheJob?.cancel()
-        cacheJob = null
-        prefetchJob?.cancel()
-        prefetchJob = null
         releaseStandby()
         preloadedOnlineStreams.clear()
         targetContext?.let { ctx -> AudioPlaybackHistoryManager.savePosition(ctx, _currentTrack.value, _currentPositionMs.value, _durationMs.value, force = true) }

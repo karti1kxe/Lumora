@@ -797,29 +797,16 @@ fun OnlineMusicPanel(
                         Toast.makeText(context, "Okay, you will see fewer songs like this", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
+                    onDownload = {
+                        downloadTarget = t
+                        actionTarget = null
+                    },
                     onShare = {
                         shareOnlineLink(context, t.title, t.videoUrl)
                         actionTarget = null
                     },
-                    onDownload = {
-                        downloadTarget = t
-                        actionTarget = null
-                    }
                 )
             }
-        }
-
-        downloadTarget?.let { t ->
-            OnlineDownloadSheet(
-                isDark = isDark,
-                glassBlurTransparency = glassBlurTransparency,
-                url = t.videoUrl,
-                title = t.title,
-                author = t.artist,
-                thumbnailUrl = t.thumbnailUrl,
-                audioOnly = true,
-                onDismiss = { downloadTarget = null }
-            )
         }
 
         playlistTarget?.let { t ->
@@ -829,6 +816,20 @@ fun OnlineMusicPanel(
                 glassBlurTransparency = glassBlurTransparency,
                 onDismiss = { playlistTarget = null },
                 onPlaylistUpdated = { playlistTarget = null }
+            )
+        }
+
+        downloadTarget?.let { t ->
+            DownloadOptionsSheet(
+                isDark = isDark,
+                glassBlurTransparency = glassBlurTransparency,
+                url = t.videoUrl,
+                initialTitle = t.title,
+                initialAuthor = t.artist,
+                initialThumbnail = t.thumbnailUrl,
+                startWithAudio = true,
+                audioOnly = true,
+                onDismiss = { downloadTarget = null }
             )
         }
     }

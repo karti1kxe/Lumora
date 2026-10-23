@@ -83,7 +83,6 @@ fun SharedPlaylistScreen(
     var lastSwipeActionTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
     if (swipeActionTrack != null) lastSwipeActionTrack = swipeActionTrack
     var playlistSaveTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
-    var downloadTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
     var swipeHiddenVersion by remember { mutableStateOf(0) }
     val swipeHiddenUrls = remember(swipeHiddenVersion) {
         com.example.util.OnlineMediaLibrary.notInterestedSet(context, com.example.util.OnlineMediaLibrary.KIND_AUDIO)
@@ -567,10 +566,6 @@ fun SharedPlaylistScreen(
                         shareOnlineLink(context, t.title, trackUrl)
                         swipeActionTrack = null
                     },
-                    onDownload = {
-                        downloadTrack = t
-                        swipeActionTrack = null
-                    }
                 )
             }
         }
@@ -672,19 +667,6 @@ fun SharedPlaylistScreen(
     }
 
     // Save a single swiped track into one of the user's audio playlists
-    downloadTrack?.let { t ->
-        com.example.ui.components.OnlineDownloadSheet(
-            isDark = isDark,
-            glassBlurTransparency = uiState.glassBlurTransparency,
-            url = t.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX),
-            title = t.title,
-            author = t.artist,
-            thumbnailUrl = t.thumbnailUrl,
-            audioOnly = true,
-            onDismiss = { downloadTrack = null }
-        )
-    }
-
     playlistSaveTrack?.let { t ->
         AddToPlaylistDialog(
             selectedAudioTracks = listOf(t),

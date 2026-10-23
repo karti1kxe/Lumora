@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Ported from mpvRx (https://github.com/Riteshp2001/mpvRx) utils/media/HttpUtils.kt, AGPL-3.0-or-later.
+ * Ported from mpvRx (https://github.com/gyrolet/mpvRx) utils/media/HttpUtils.kt, AGPL-3.0-or-later.
  */
 
 package com.example.ytdlp
@@ -20,6 +20,22 @@ internal object YtdlpUrlRules {
     if (uri == null) return false
     val host = uri.host?.lowercase().orEmpty()
     return host.contains("youtube.com") || host == "youtu.be"
+  }
+
+  fun extractYouTubeId(url: String?): String? {
+    if (url.isNullOrBlank()) return null
+    val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return null
+    if (!isYouTubeUrl(uri)) return null
+    val v = uri.getQueryParameter("v")
+    if (!v.isNullOrBlank()) return v
+    if (uri.host?.lowercase() == "youtu.be") {
+      return uri.pathSegments.firstOrNull()?.takeIf { it.isNotBlank() }
+    }
+    val first = uri.pathSegments.firstOrNull()?.lowercase()
+    if (first in setOf("shorts", "live", "embed")) {
+      return uri.pathSegments.getOrNull(1)?.takeIf { it.isNotBlank() }
+    }
+    return null
   }
 
   fun isDirectMediaUrl(uri: Uri?): Boolean {

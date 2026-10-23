@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan to comprehensively rebuild and upgrade the Network Tab online playback with pre-flight stream validation, rebuild the high-speed multi-threaded download engine with resume and multi-track audio/subtitle MKV muxing, restore Media Section server probing with persistent download recovery, and introduce unified multi-select download controls.",
+  "updatedAt":  "2026-10-23T23:12:40.851909519Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

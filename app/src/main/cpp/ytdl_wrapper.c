@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later
- * Ported from mpvRx (https://github.com/Riteshp2001/mpvRx), adapted for Lumora. */
+ * Ported from mpvRx (https://github.com/gyrolet/mpvRx), adapted for Lumora. */
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>

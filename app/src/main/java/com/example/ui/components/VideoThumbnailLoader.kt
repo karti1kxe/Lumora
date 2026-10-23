@@ -37,6 +37,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -566,11 +568,14 @@ fun VideoThumbnailCard(
     thumbnailFallbackSecond: Int = 1,
     showNetworkThumbnails: Boolean = false,
     remoteThumbnailUrl: String? = null,
-    onThumbnailClick: (() -> Unit)? = null
+    onThumbnailClick: (() -> Unit)? = null,
+    /** The provider's picture is shown whole (never cropped) and sharper; the card's empty sides are filled with a soft copy of it. */
+    showWholeImage: Boolean = false
 ) {
     val context = LocalContext.current.applicationContext
-    val cacheKey = remember(videoId, videoPath, remoteThumbnailUrl, thumbnailStrategy, thumbnailQuality, thumbnailFallbackSecond) {
-        if (!remoteThumbnailUrl.isNullOrBlank()) "remote_audio_${remoteThumbnailUrl}_400"
+    val remoteTargetPx = if (showWholeImage) 640 else 400
+    val cacheKey = remember(videoId, videoPath, remoteThumbnailUrl, thumbnailStrategy, thumbnailQuality, thumbnailFallbackSecond, remoteTargetPx) {
+        if (!remoteThumbnailUrl.isNullOrBlank()) "remote_audio_${remoteThumbnailUrl}_$remoteTargetPx"
         else "${videoId}_${videoPath}_${thumbnailStrategy.name}_${thumbnailQuality.name}_t${thumbnailFallbackSecond.coerceIn(1, 10)}"
     }
     val initialCached = remember(cacheKey, videoId, videoPath) {
@@ -593,7 +598,7 @@ fun VideoThumbnailCard(
                     thumbnailBitmap = bmp
                 }
             } else if (!remoteThumbnailUrl.isNullOrBlank()) {
-                val bmp = loadRemoteAudioThumbnail(remoteThumbnailUrl, targetSizePx = 400, context = context)
+                val bmp = loadRemoteAudioThumbnail(remoteThumbnailUrl, targetSizePx = remoteTargetPx, context = context)
                 if (bmp != null) {
                     thumbnailBitmap = bmp
                 }
@@ -651,7 +656,21 @@ fun VideoThumbnailCard(
             // cropped; real 16:9 frames and YouTube thumbnails still fill the card.
             val aspect = bmp.width.toFloat() / bmp.height.coerceAtLeast(1).toFloat()
             val isLogoLike = !remoteThumbnailUrl.isNullOrBlank() && (aspect < 1.5f || aspect > 2.05f)
-            Image(
+            if (showWholeImage && !remoteThumbnailUrl.isNullOrBlank()) {
+                // soft, enlarged copy behind (no empty bars), the whole picture in front (nothing cropped)
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().blur(18.dp).alpha(0.55f)
+                )
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else Image(
                 bitmap = bmp.asImageBitmap(),
                 contentDescription = null,
                 contentScale = if (isLogoLike) ContentScale.Fit else ContentScale.Crop,

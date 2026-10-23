@@ -1,13 +1,12 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Behaviour ported from mpvRx (ui/torrent/TorrentSelectionViewModel + TorrentSelectionActivity): metadata first, the
- * file list is shown, the user picks a file, then it plays (or downloads). The screen itself is Lumora's own sheet.
+ * Torrent file picker (download only, torrents are never played): metadata first, the file list is shown, the user picks
+ * a file and it is added to the downloads. The screen itself is Lumora's own sheet.
  */
 
 package com.example.ui.components
 
-import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -45,14 +44,10 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.torrent.TorrentCatalog
 import com.example.torrent.TorrentFileItem
-import com.example.torrent.TorrentPickerMode
 import com.example.torrent.TorrentPickerRequest
 import com.example.torrent.TorrentPickerState
-import com.example.torrent.TorrentStreaming
-import com.example.torrent.TorrentStreamingState
+import com.example.torrent.TorrentCatalogs
 import com.example.torrent.formatTorrentBytes
-import com.example.torrent.formatTorrentSpeed
-import com.example.ui.screens.VideoItem
 import com.example.ui.theme.AccentGradient
 import com.example.ui.theme.AccentSkyBlue
 import com.example.ui.theme.DarkTextPrimary
@@ -60,11 +55,7 @@ import com.example.ui.theme.DarkTextSecondary
 import com.example.ui.theme.LightTextPrimary
 import com.example.ui.theme.LightTextSecondary
 import com.example.util.DownloadManager
-import com.example.util.RecentStreamStore
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 private sealed interface PickerState {
     data object Loading : PickerState
@@ -72,85 +63,45 @@ private sealed interface PickerState {
     data class Failed(val message: String) : PickerState
 }
 
-/** The VideoItem of one torrent file. [VideoItem.path] is the durable magnet / .torrent source, never the loopback URL. */
-private fun torrentVideoItem(catalog: TorrentCatalog, file: TorrentFileItem): VideoItem =
-    VideoItem(
-        id = -(kotlin.math.abs(("torrent:${catalog.infoHash}:${file.index}").hashCode().toLong())) - 1L,
-        uri = Uri.parse(catalog.source),
-        displayName = file.name,
-        path = catalog.source,
-        sizeBytes = file.size,
-        durationMs = 0L,
-        dateModified = System.currentTimeMillis() / 1000L,
-        isOnline = true,
-        channelName = catalog.torrentName,
-        isNetworkStream = true,
-        torrentFileIndex = file.index
-    )
-
 /**
  * Global torrent picker, hosted once in MainActivity. Opened through [TorrentPickerState] (Network tab, magnet / .torrent
- * intent, a torrent item that was opened without a chosen file). A torrent with ONE playable file starts at once, like in mpvRx.
+ * intent). A torrent with ONE file is added to the downloads at once.
  */
 @Composable
 fun TorrentPickerHost(
     isDark: Boolean,
-    glassBlurTransparency: Float,
-    onPlay: (VideoItem, List<VideoItem>) -> Unit
+    glassBlurTransparency: Float
 ) {
     val request = TorrentPickerState.request ?: return
-    TorrentPickerSheet(request, isDark, glassBlurTransparency, onPlay)
+    TorrentPickerSheet(request, isDark, glassBlurTransparency)
 }
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun TorrentPickerSheet(
     request: TorrentPickerRequest,
     isDark: Boolean,
-    glassBlurTransparency: Float,
-    onPlay: (VideoItem, List<VideoItem>) -> Unit
+    glassBlurTransparency: Float
 ) {
     val context = LocalContext.current
-    val engine = remember { TorrentStreaming.engine(context) }
-    val engineState by engine.state.collectAsState()
+    val engine = remember { TorrentCatalogs.engine(context) }
+    val enginePhase by engine.phase.collectAsState()
     var state by remember(request) { mutableStateOf<PickerState>(PickerState.Loading) }
     var attempt by remember(request) { mutableStateOf(0) }
-    // true once a file was handed to the player / downloader: the prepared session is then NOT discarded on dismiss
-    var handedOver by remember(request) { mutableStateOf(false) }
     var preparationId by remember(request) { mutableStateOf<String?>(null) }
 
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
     val fieldBg = if (isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9)
 
-    fun launchPlay(catalog: TorrentCatalog, file: TorrentFileItem) {
-        handedOver = true
-        TorrentStreaming.handOffPreparation(catalog.source, file.index, catalog.preparationId)
-        // a multi-file torrent is a series: every episode is a queue entry, the chosen one starts first
-        val items = catalog.playableFiles.map { torrentVideoItem(catalog, it) }
-        val chosen = items.first { it.torrentFileIndex == file.index }
-        RecentStreamStore.record(context, catalog.source, catalog.torrentName, "Torrent", null)
-        TorrentPickerState.close()
-        onPlay(chosen, items)
-    }
-
     fun launchDownload(catalog: TorrentCatalog, file: TorrentFileItem) {
-        handedOver = false
-        RecentStreamStore.record(context, catalog.source, catalog.torrentName, "Torrent", null)
-        val app = context.applicationContext
-        val preparation = catalog.preparationId
-        // The picker's own libtorrent session is closed COMPLETELY before the download opens its session; the
-        // composable is gone by then, so the work runs in the app scope.
-        TorrentStreaming.appScope.launch {
-            val message = try {
-                TorrentStreaming.engine(app).discardPreparationNow(preparation)
-                DownloadManager.enqueueTorrent(app, catalog.source, file.index, file.name, file.size, catalog.torrentName)
-            } catch (t: Throwable) {
-                "Could not start the download"
-            }
-            withContext(Dispatchers.Main) {
-                android.widget.Toast.makeText(app, message, android.widget.Toast.LENGTH_SHORT).show()
-            }
+        engine.discardPreparation(catalog.preparationId)
+        val message = try {
+            DownloadManager.enqueueTorrent(context, catalog.source, file.index, file.name, file.size, catalog.torrentName)
+        } catch (t: Throwable) {
+            "Could not start the download"
         }
+        android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
         TorrentPickerState.close()
     }
 
@@ -159,9 +110,9 @@ private fun TorrentPickerSheet(
         try {
             val catalog = engine.prepareTorrent(request.source)
             preparationId = catalog.preparationId
-            val single = catalog.playableFiles.singleOrNull()
+            val single = catalog.files.singleOrNull()
             if (single != null) {
-                if (request.mode == TorrentPickerMode.PLAY) launchPlay(catalog, single) else launchDownload(catalog, single)
+                launchDownload(catalog, single)
             } else {
                 state = PickerState.Ready(catalog)
             }
@@ -174,7 +125,7 @@ private fun TorrentPickerSheet(
 
     DisposableEffect(request) {
         onDispose {
-            if (!handedOver) preparationId?.let(engine::discardPreparation)
+            preparationId?.let(engine::discardPreparation)
         }
     }
 
@@ -188,13 +139,7 @@ private fun TorrentPickerSheet(
         )
         when (val s = state) {
             PickerState.Loading -> {
-                val phase = when (val e = engineState) {
-                    is TorrentStreamingState.Connecting -> {
-                        val extras = if (e.peers > 0) " (${e.peers} peers, ${formatTorrentSpeed(e.downloadSpeed)})" else ""
-                        e.phase + extras
-                    }
-                    else -> "Starting Torrent Engine..."
-                }
+                val phase = enginePhase
                 Row(
                     modifier = Modifier.padding(top = 18.dp, bottom = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -234,19 +179,14 @@ private fun TorrentPickerSheet(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "${s.catalog.playableFiles.size} files · choose one to " +
-                        (if (request.mode == TorrentPickerMode.PLAY) "play" else "download"),
+                    text = "${s.catalog.files.size} files · choose one to download",
                     fontSize = 12.sp,
                     color = secondaryText,
                     modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
                 )
                 Box(modifier = Modifier.heightIn(max = 420.dp)) {
                     LazyColumn {
-                        items(s.catalog.playableFiles, key = { it.index }) { file ->
-                            val primaryAction = {
-                                if (request.mode == TorrentPickerMode.PLAY) launchPlay(s.catalog, file)
-                                else launchDownload(s.catalog, file)
-                            }
+                        items(s.catalog.files, key = { it.index }) { file ->
                             Row(
                                 modifier = Modifier
                                     .padding(bottom = 8.dp)
@@ -256,7 +196,7 @@ private fun TorrentPickerSheet(
                                     .clickable(
                                         interactionSource = remember { MutableInteractionSource() },
                                         indication = null,
-                                        onClick = primaryAction
+                                        onClick = { launchDownload(s.catalog, file) }
                                     )
                                     .padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -272,11 +212,8 @@ private fun TorrentPickerSheet(
                                     )
                                     Text(text = formatTorrentBytes(file.size), fontSize = 12.sp, color = secondaryText)
                                 }
-                                TorrentRowButton(R.drawable.lumora_download_minimalistic, "Download", primaryText.copy(alpha = 0.85f)) {
+                                TorrentRowButton(R.drawable.lumora_download_minimalistic, "Download", AccentSkyBlue) {
                                     launchDownload(s.catalog, file)
-                                }
-                                TorrentRowButton(R.drawable.lumora_play_solid, "Play", AccentSkyBlue) {
-                                    launchPlay(s.catalog, file)
                                 }
                             }
                         }

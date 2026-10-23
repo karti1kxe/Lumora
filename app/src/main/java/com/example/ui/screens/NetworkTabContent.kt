@@ -58,7 +58,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.player.AudioPlaybackManager
-import com.example.ui.components.toAudioTrackItem
 import com.example.ui.components.DownloadOptionsSheet
 import com.example.ui.components.LinkThumbnail
 import com.example.ui.components.PlaylistFilterTabs
@@ -73,9 +72,7 @@ import com.example.ui.theme.LightGlassBorder
 import com.example.ui.theme.LightGlassSurface
 import com.example.ui.theme.LightTextPrimary
 import com.example.ui.theme.LightTextSecondary
-import com.example.torrent.TorrentPickerMode
 import com.example.torrent.TorrentPickerState
-import com.example.util.DownloadManager
 import com.example.util.NetworkStreamResolver
 import com.example.util.RecentStreamEntry
 import com.example.util.RecentStreamStore
@@ -85,7 +82,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * "Network" bottom tab. Sections: Local Network (paste a link and play it), Media (plugin repositories + downloads) and one
+ * "Network" bottom tab. Sections: Local Network (paste a direct media URL and play it), Media (plugin repositories) and one
  * extra section per downloaded media plugin (category rows with thumbnails).
  * Playback itself is NOT done here: the link is resolved and handed to [onPlayVideo], so it opens in the
  * app's normal video player with its normal controls.
@@ -110,21 +107,11 @@ fun NetworkTabContent(
     val mediaPlugins = remember(mediaTick) { MediaPluginStore.getInstalled(context) }
     // only two sections now (Local Network, Media); a downloaded provider opens as a page from the Media list
     val safeSection = section.coerceIn(0, 1)
-    var optionsEntry by remember { mutableStateOf<RecentStreamEntry?>(null) }
     var url by rememberSaveable { mutableStateOf("") }
     var isResolving by remember { mutableStateOf(false) }
-    // A pasted link is resolved in the background right away, so Play (a moment later) starts almost instantly.
-    var previousUrlLength by remember { mutableStateOf(0) }
-    LaunchedEffect(url) {
-        val grewBy = url.length - previousUrlLength
-        previousUrlLength = url.length
-        if (grewBy >= 8) {
-            kotlinx.coroutines.delay(250)
-            NetworkStreamResolver.prefetch(context, url)
-        }
-    }
     var pasteFlash by remember { mutableStateOf(false) }
-    var resolvingLabel by remember { mutableStateOf("Loading link…") }
+    var resolvingLabel by remember { mutableStateOf("Checking stream & link…") }
+    var showDownloadSheetForUrl by remember { mutableStateOf<String?>(null) }
     val recentTick by RecentStreamStore.changes.collectAsState()
     val recents = remember(recentTick) { RecentStreamStore.getAll(context) }
 
@@ -151,12 +138,13 @@ fun NetworkTabContent(
             return
         }
         focusManager.clearFocus()
-        // magnet / info hash / .torrent link: the torrent file picker (metadata first, then the chosen file plays)
+        // magnet / info hash / .torrent link: torrents are never played, the picker only downloads the chosen file
         if (com.example.torrent.isTorrentSource(normalized)) {
-            TorrentPickerState.open(normalized, TorrentPickerMode.PLAY)
+            Toast.makeText(context, "Torrents can only be downloaded, not played", Toast.LENGTH_SHORT).show()
+            TorrentPickerState.open(normalized)
             return
         }
-        resolvingLabel = "Loading link…"
+        resolvingLabel = "Verifying stream & checking reachability…"
         isResolving = true
         scope.launch {
             val stream = try {
@@ -166,28 +154,12 @@ fun NetworkTabContent(
             }
             isResolving = false
             if (stream == null) {
-                val reason = NetworkStreamResolver.lastError
-                Toast.makeText(
-                    context,
-                    if (reason.isNullOrBlank()) "Could not play this link." else "Could not play this link: $reason",
-                    Toast.LENGTH_LONG
-                ).show()
+                val reason = NetworkStreamResolver.lastError ?: "This video can't play right now."
+                Toast.makeText(context, reason, Toast.LENGTH_LONG).show()
                 return@launch
             }
             if (stream.isAudio) {
                 // Music / audio-only link: play it in the app's audio player (same player as the Music tab).
-                if (stream.tracks.isNotEmpty()) {
-                    // Spotify & playlist links: queue the tracks, each is matched to its audio when it starts.
-                    val queue = stream.tracks.map { it.toAudioTrackItem() }
-                    RecentStreamStore.record(context, normalized, stream.title, stream.uploader, stream.thumbnailUrl)
-                    try {
-                        AudioPlaybackManager.openFullScreen()
-                        AudioPlaybackManager.playTrack(context = context, track = queue.first(), newQueue = queue)
-                    } catch (_: Throwable) {
-                        Toast.makeText(context, "Could not start the audio player", Toast.LENGTH_SHORT).show()
-                    }
-                    return@launch
-                }
                 val track = AudioTrackItem(
                     id = -(kotlin.math.abs(("netaudio:" + normalized).hashCode().toLong())) - 1L,
                     uri = android.net.Uri.parse(stream.videoUrl),
@@ -232,20 +204,6 @@ fun NetworkTabContent(
     }
 
     fun play() = playLink(url)
-
-    /**
-     * Download button of a recent link: the options sheet opens first (name, container, video / audio quality).
-     */
-    fun downloadEntry(entry: RecentStreamEntry) {
-        focusManager.clearFocus()
-        // a torrent has no quality list: the picker chooses the file, which is then downloaded
-        if (com.example.torrent.isTorrentSource(entry.url)) {
-            TorrentPickerState.open(entry.url, TorrentPickerMode.DOWNLOAD)
-            onOpenDownloads()
-            return
-        }
-        optionsEntry = entry
-    }
 
     // A media title is open: its detail page replaces the whole Network tab until Back.
     val detailPlugin = MediaDetailState.plugin
@@ -424,6 +382,35 @@ fun NetworkTabContent(
                                 )
                             }
                         }
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // Quick Download button for entered link
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(if (isDark) Color(0xFF1E293B) else Color(0xFFD5D9DD))
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null
+                                ) {
+                                    val normalized = NetworkStreamResolver.normalizeUrl(url)
+                                    if (normalized != null) {
+                                        showDownloadSheetForUrl = normalized
+                                    } else {
+                                        Toast.makeText(context, "Enter a valid link to download", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            StyledIcon(
+                                drawableRes = R.drawable.lumora_download_minimalistic,
+                                contentDescription = "Download link",
+                                tint = if (url.isNotBlank()) AccentSkyBlue else secondaryText.copy(alpha = 0.75f),
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
                     }
                     if (isResolving) {
                         Text(
@@ -474,7 +461,7 @@ fun NetworkTabContent(
                                     surfaceColor = surfaceColor,
                                     borderColor = borderColor,
                                     onClick = { playLink(entry.url) },
-                                    onDownload = { downloadEntry(entry) },
+                                    onDownload = { showDownloadSheetForUrl = entry.url },
                                     onRemove = { RecentStreamStore.remove(context, entry.url) }
                                 )
                             }
@@ -491,27 +478,13 @@ fun NetworkTabContent(
         }
     }
 
-    optionsEntry?.let { entry ->
-        val isMusic = entry.url.contains("music.youtube.com", ignoreCase = true)
+    if (showDownloadSheetForUrl != null) {
         DownloadOptionsSheet(
             isDark = isDark,
             glassBlurTransparency = glassBlurTransparency,
-            url = entry.url,
-            initialTitle = entry.title,
-            initialAuthor = entry.subtitle,
-            initialThumbnail = entry.thumbnail?.takeIf { it.startsWith("http") },
-            startWithAudio = isMusic,
-            onDismiss = { optionsEntry = null },
-            onDownload = { request ->
-                optionsEntry = null
-                val message = try {
-                    DownloadManager.enqueueCustom(context, request)
-                } catch (t: Throwable) {
-                    "Could not start the download"
-                }
-                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                onOpenDownloads()
-            }
+            url = showDownloadSheetForUrl!!,
+            initialTitle = "Network Media",
+            onDismiss = { showDownloadSheetForUrl = null }
         )
     }
 }
@@ -573,7 +546,7 @@ private fun RecentStreamRow(
                 overflow = TextOverflow.Ellipsis
             )
         }
-        RecentActionButton(R.drawable.lumora_download_minimalistic, "Download", primaryText.copy(alpha = 0.85f), onDownload)
+        RecentActionButton(R.drawable.lumora_download_minimalistic, "Download stream", AccentSkyBlue, onDownload)
         RecentActionButton(R.drawable.lumora_trash_bin_2, "Remove from recent", secondaryText.copy(alpha = 0.9f), onRemove)
         RecentActionButton(R.drawable.lumora_play_solid, "Play", AccentSkyBlue, onClick)
     }

@@ -36,10 +36,10 @@ object RecentStreamStore {
             ?: return emptyList()
         return try {
             val arr = JSONArray(raw)
-            (0 until arr.length()).mapNotNull { i ->
+            val all = (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val url = o.optString("u")
-                if (url.isBlank()) null
+                if (url.isBlank() || !NetworkStreamResolver.isDirectMediaUrl(url)) null
                 else RecentStreamEntry(
                     url = url,
                     title = o.optString("t").ifBlank { url },
@@ -48,6 +48,9 @@ object RecentStreamStore {
                     thumbnail = o.optString("th").ifBlank { null }
                 )
             }
+            // Purge legacy website/share links so the Local Network history contains direct media URLs only.
+            if (all.size != arr.length()) save(context, all)
+            all
         } catch (_: Throwable) {
             emptyList()
         }

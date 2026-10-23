@@ -3,8 +3,6 @@ package com.example.util.media
 import android.content.Context
 import android.net.Uri
 import com.example.ui.screens.VideoItem
-import com.example.util.DownloadManager
-import com.example.util.DownloadRequest
 import com.example.util.PlaylistManager
 import com.example.util.StreamEntryMeta
 import com.example.util.StreamEntryStore
@@ -49,28 +47,26 @@ object MediaPlayback {
     /** Prefer adaptive streaming when a provider offers it; fall back to direct media files. */
     fun pickBest(streams: List<MediaStream>): MediaStream? = streams.minByOrNull { rank(it) }
 
-    /** Asks the plugin for the playable link of [link]. [forDownload] lets the plugin return a downloadable server. */
+    /** Asks the plugin for a playable stream for [link]. */
     suspend fun resolve(
         context: Context,
         plugin: MediaPluginInfo,
         link: String,
         type: String,
-        forDownload: Boolean = false,
         episodeTitle: String = "",
         episodeIndex: Int = -1,
-        /** When playing: the servers are checked for a few seconds and the first one that really delivers video is played. */
-        verify: Boolean = !forDownload,
-        /** When true (a movie / episode was tapped): if no server delivers video the result is a failure, so the player is not opened. */
+        /** Servers are checked so a page is not opened for a dead stream. */
+        verify: Boolean = true,
         requireWorking: Boolean = false
     ): Result<MediaStream> {
         return try {
-            val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, forDownload)
+            val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type)
             // like Vega: the provider's own order is kept (it lists its best server first); only the check below
             // moves a server that does not deliver video behind the ones that do
             var ranked = streams.distinctBy { it.link }
             // the server that really delivered this episode's video while its thumbnail was made is tried first, but it is
             // checked like every other one: a frame proves the website's file opens, not that the player can stream it
-            val proven = if (!forDownload) EpisodeFrames.preferred(context, plugin, link) else null
+            val proven = EpisodeFrames.preferred(context, plugin, link)
             if (proven != null) {
                 val i = ranked.indexOfFirst { it.server == proven.server && it.quality == proven.quality }
                     .takeIf { it >= 0 } ?: ranked.indexOfFirst { it.server == proven.server }
@@ -93,15 +89,12 @@ object MediaPlayback {
             } else {
                 // every subtitle the plugin listed (on any server) is offered in the player, without duplicates
                 val allSubs = streams.flatMap { it.subtitles }.distinctBy { it.uri }
-                // the other servers stay available: the player's Server list, and the fallback when this one cannot be played
+                // the other servers stay available: the player's Server list
                 val others = ranked.filter { it !== chosen && it.link != chosen.link }.distinctBy { it.link }
-                    .map { it.copy(sourceLink = link, sourceType = type) }
                 Result.success(
                     chosen.copy(
                         subtitles = if (allSubs.size > chosen.subtitles.size) allSubs else chosen.subtitles,
-                        alternatives = others,
-                        sourceLink = link,
-                        sourceType = type
+                        alternatives = others
                     )
                 )
             }
@@ -135,10 +128,6 @@ object MediaPlayback {
             }
             // another server of the same episode may list no subtitles of its own: the ones already known stay
             if (stream.subtitles.isNotEmpty() || known < 0) session.subtitles = stream.subtitles
-            if (stream.sourceLink != null) {
-                session.sourceLink = stream.sourceLink
-                session.sourceType = stream.sourceType
-            }
             PluginPlaybackSessions.put(stream.link, session)
         }
         val ua = stream.headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value?.takeIf { it.isNotBlank() } ?: STREAM_UA
@@ -188,318 +177,18 @@ object MediaPlayback {
         choice: PluginQualityChoice,
         episodeIndex: Int,
         episodeTitle: String,
-        isSeries: Boolean,
-        forDownload: Boolean
+        isSeries: Boolean
     ): Result<MediaStream> {
         return try {
             val list = choice.episodesLink?.let { MediaProviderRepository.loadEpisodes(context, plugin.value, it) } ?: choice.directLinks
             fun norm(t: String) = t.lowercase().filter { it.isLetterOrDigit() }
             val target = list.firstOrNull { norm(it.title) == norm(episodeTitle) } ?: list.getOrNull(episodeIndex)
                 ?: return Result.failure(PluginException("this quality does not have the same episode"))
-            resolve(context, plugin, target.link, target.type ?: if (isSeries) "series" else "movie", forDownload, episodeTitle, if (isSeries) episodeIndex else -1)
+            resolve(context, plugin, target.link, target.type ?: if (isSeries) "series" else "movie", episodeTitle, if (isSeries) episodeIndex else -1)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             Result.failure(t)
-        }
-    }
-
-    /** Every playable source the plugin lists for [link] (all servers, not only the best), for the download list. */
-    suspend fun resolveAll(context: Context, plugin: MediaPluginInfo, link: String, type: String, forDownload: Boolean): Result<List<MediaStream>> {
-        return try {
-            val streams = MediaProviderRepository.loadStreams(context, plugin.value, link, type, forDownload)
-                .distinctBy { it.link }
-                .sortedBy { rank(it) }
-            if (streams.isEmpty()) Result.failure(PluginException("no playable link was found")) else Result.success(streams)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            Result.failure(t)
-        }
-    }
-
-    /** [resolveAll] for the same movie / episode in another quality option of the title. */
-    suspend fun resolveChoiceAll(
-        context: Context,
-        plugin: MediaPluginInfo,
-        choice: PluginQualityChoice,
-        episodeIndex: Int,
-        episodeTitle: String,
-        isSeries: Boolean,
-        forDownload: Boolean
-    ): Result<List<MediaStream>> {
-        return try {
-            val list = choice.episodesLink?.let { MediaProviderRepository.loadEpisodes(context, plugin.value, it) } ?: choice.directLinks
-            fun norm(t: String) = t.lowercase().filter { it.isLetterOrDigit() }
-            val target = list.firstOrNull { norm(it.title) == norm(episodeTitle) } ?: list.getOrNull(episodeIndex)
-                ?: return Result.failure(PluginException("this quality does not have the same episode"))
-            resolveAll(context, plugin, target.link, target.type ?: if (isSeries) "series" else "movie", forDownload)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            Result.failure(t)
-        }
-    }
-
-    /** One row of the download list: a file the website offers (server, quality, format, size). */
-    data class DownloadOption(val stream: MediaStream, val title: String, val detail: String, val quality: String?)
-
-    private val QUALITY_RE = Regex("(?i)(?<![0-9a-zA-Z])(2160|1440|1080|720|576|480|360|240)p(?![a-zA-Z])")
-
-    private fun qualityOf(s: MediaStream): String? {
-        s.quality?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
-        val path = s.link.substringBefore('#')
-        QUALITY_RE.find(path)?.let { return it.groupValues[1] + "p" }
-        if (Regex("(?i)(?<![0-9a-zA-Z])4k(?![a-zA-Z])").containsMatchIn(path)) return "4K"
-        return null
-    }
-
-    private fun heightOf(q: String?): Int {
-        if (q == null) return 0
-        if (q.equals("4K", true)) return 2160
-        return Regex("(\\d{3,4})").find(q)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-    }
-
-    private fun formatOf(s: MediaStream): String {
-        val path = s.link.substringBefore('?').substringBefore('#').lowercase()
-        val type = s.type.lowercase()
-        return when {
-            HlsVariants.looksLikeHls(s.link, s.type) -> "HLS"
-            type == "mpd" || type == "dash" || path.endsWith(".mpd") -> "DASH"
-            type == "mp4" || path.endsWith(".mp4") -> "MP4"
-            type == "mkv" || path.endsWith(".mkv") -> "MKV"
-            type == "webm" || path.endsWith(".webm") -> "WEBM"
-            type.isNotBlank() -> type.uppercase()
-            else -> "File"
-        }
-    }
-
-    private fun formatSize(bytes: Long): String = when {
-        bytes >= (1L shl 30) -> String.format(java.util.Locale.US, "%.2f GB", bytes / 1073741824.0)
-        bytes >= (1L shl 20) -> String.format(java.util.Locale.US, "%.0f MB", bytes / 1048576.0)
-        else -> String.format(java.util.Locale.US, "%d KB", bytes / 1024L)
-    }
-
-    /**
-     * Total bytes of the file behind [link]: a HEAD request first, then a 1-byte ranged GET (many CDNs refuse HEAD).
-     * -1 when the server does not tell. [proxy] = the app's bypass route for sites that only open through it.
-     */
-    internal fun probeSize(link: String, headers: Map<String, String>, proxy: java.net.Proxy? = null, timeoutMs: Int = 6000): Long {
-        fun open(method: String, range: Boolean): HttpURLConnection =
-            (URL(link).openConnection(proxy ?: java.net.Proxy.NO_PROXY) as HttpURLConnection).apply {
-                requestMethod = method
-                connectTimeout = timeoutMs
-                readTimeout = timeoutMs
-                instanceFollowRedirects = true
-                for ((k, v) in headers) {
-                    if (k.isNotBlank() && v.isNotBlank() && k.lowercase() !in PLAYER_OWN_HEADERS) { try { setRequestProperty(k, v) } catch (_: Throwable) {} }
-                }
-                if (headers.keys.none { it.equals("User-Agent", true) }) setRequestProperty("User-Agent", STREAM_UA)
-                // Ask for the representation's actual byte length, not a compressed transfer size.
-                setRequestProperty("Accept-Encoding", "identity")
-                if (range) setRequestProperty("Range", "bytes=0-0")
-            }
-        try {
-            val head = open("HEAD", false)
-            try {
-                val len = if (head.responseCode in 200..399) {
-                    head.getHeaderFieldLong("Content-Length", -1L).takeIf { it > 0L }
-                        ?: head.getHeaderField("Content-Range")?.substringAfterLast('/', "")?.toLongOrNull()?.takeIf { it > 0L }
-                        ?: -1L
-                } else -1L
-                if (len > 0L) return len
-            } catch (_: Throwable) {
-                // HEAD refused / reset: the ranged GET below is asked next
-            } finally { head.disconnect() }
-            val get = open("GET", true)
-            try {
-                if (get.responseCode !in 200..299) return -1L
-                val total = get.getHeaderField("Content-Range")?.substringAfter('/', "")?.trim()?.toLongOrNull()
-                if (total != null && total > 0L) return total
-                return if (get.responseCode == 200) get.getHeaderFieldLong("Content-Length", -1L) else -1L
-            } finally { get.disconnect() }
-        } catch (_: Throwable) {
-            return -1L
-        }
-    }
-
-    private fun bypassProxyOf(context: Context?): java.net.Proxy? =
-        if (context == null) null else try { NetworkBypass.okHttpProxy(context) } catch (_: Throwable) { null }
-
-    /** [probeSize] on a direct connection, then (when it told nothing) through the app's bypass route. */
-    private fun probeSizeAnyRoute(context: Context?, link: String, headers: Map<String, String>, timeoutMs: Int = 6000): Long {
-        val direct = probeSize(link, headers, null, timeoutMs)
-        if (direct > 0L) return direct
-        val bypass = bypassProxyOf(context) ?: return -1L
-        return probeSize(link, headers, bypass, timeoutMs + 2000)
-    }
-
-    /**
-     * Size of an HLS rendition. A playlist has no byte length, so the real size of a few of its segments is measured
-     * and scaled to the full running time (the bitrate of the playlist is only the fallback). Always an estimate.
-     */
-    private fun estimateHlsSize(context: Context?, url: String, headers: Map<String, String>, bandwidth: Long): Long {
-        val text = HlsVariants.fetchText(url, headers, null, 4000)
-            ?: bypassProxyOf(context)?.let { HlsVariants.fetchText(url, headers, it, 6000) }
-            ?: return -1L
-        val playlist = HlsVariants.parseMediaPlaylist(text, url) ?: return -1L
-        if (!playlist.isVod) return -1L
-        val total = playlist.totalSeconds
-        if (total <= 0.0) return -1L
-        val n = playlist.segments.size
-        // the first, a middle and a late segment (the very last one is usually shorter than the others)
-        val picks = linkedSetOf(0, n / 2, (n - 2).coerceAtLeast(0)).filter { it in 0 until n }
-        var bytes = 0L
-        var seconds = 0.0
-        for (i in picks) {
-            val b = probeSizeAnyRoute(context, playlist.segments[i], headers, 3500)
-            if (b > 0L && playlist.durations[i] > 0.0) {
-                bytes += b
-                seconds += playlist.durations[i]
-            }
-        }
-        if (seconds > 0.0 && bytes > 0L) return (total * bytes.toDouble() / seconds).toLong()
-        return if (bandwidth > 0L) (total * bandwidth.toDouble() / 8.0).toLong() else -1L
-    }
-
-    private fun sizeText(bytes: Long, estimated: Boolean): String? =
-        if (bytes > 0L) (if (estimated) "≈ " else "") + formatSize(bytes) else null
-
-    private suspend fun optionsOf(context: Context?, s: MediaStream): List<DownloadOption> {
-        val format = formatOf(s)
-        val headers = s.headers
-        if (format == "HLS") {
-            // a master playlist is opened to list its qualities (each one downloads its own rendition)
-            val variants = HlsVariants.fetchResult(s.link, headers, null, 4000)
-                ?: bypassProxyOf(context)?.let { HlsVariants.fetchResult(s.link, headers, it, 6000) }
-                ?: emptyList()
-            if (variants.isNotEmpty()) {
-                return coroutineScope {
-                    variants.map { v ->
-                        async(Dispatchers.IO) {
-                            val size = estimateHlsSize(context, v.uri, headers, v.bandwidth)
-                            DownloadOption(
-                                stream = s.copy(link = v.uri, type = "m3u8", quality = v.label, subtitles = emptyList(), alternatives = emptyList()),
-                                title = s.server,
-                                detail = listOf(v.label, "HLS", v.bitrateText(), sizeText(size, true) ?: "size unavailable")
-                                    .filter { it.isNotBlank() }.joinToString(" · "),
-                                quality = v.label
-                            )
-                        }
-                    }.awaitAll()
-                }
-            }
-        }
-        val quality = qualityOf(s)
-        val size: Long
-        val estimated: Boolean
-        when (format) {
-            "HLS" -> { size = estimateHlsSize(context, s.link, headers, 0L); estimated = true }
-            "DASH" -> { size = -1L; estimated = false }
-            else -> { size = probeSizeAnyRoute(context, s.link, headers); estimated = false }
-        }
-        val detail = listOf(quality, format, sizeText(size, estimated) ?: "size unavailable")
-            .filter { !it.isNullOrBlank() }.joinToString(" · ")
-        return listOf(DownloadOption(s.copy(subtitles = emptyList(), alternatives = emptyList()), s.server, detail, quality))
-    }
-
-    /** The download list of a movie / episode: every file / quality the website offers, best quality first, with sizes when known. */
-    suspend fun downloadOptions(streams: List<MediaStream>): List<DownloadOption> = coroutineScope {
-        val all = streams.map { s -> async(Dispatchers.IO) { try { optionsOf(null, s) } catch (_: Throwable) { emptyList() } } }
-            .awaitAll()
-            .flatten()
-            .distinctBy { it.stream.link }
-        all.sortedByDescending { heightOf(it.quality) }
-    }
-
-    /**
-     * Like [downloadOptions], but the list is shown at once (server / quality / format) and every row fills in its real size as
-     * soon as it is measured: the sheet no longer waits for the slowest server. [onUpdate] is always called on the main thread.
-     */
-    suspend fun downloadOptionsProgressive(context: Context, streams: List<MediaStream>, onUpdate: (List<DownloadOption>) -> Unit) {
-        val app = context.applicationContext
-        val ordered = streams.distinctBy { it.link }.sortedByDescending { heightOf(qualityOf(it)) }
-        if (ordered.isEmpty()) return
-        fun row(s: MediaStream, note: String): List<DownloadOption> {
-            val quality = qualityOf(s)
-            return listOf(
-                DownloadOption(
-                    s.copy(subtitles = emptyList(), alternatives = emptyList()),
-                    s.server,
-                    listOf(quality, formatOf(s), note).filter { !it.isNullOrBlank() }.joinToString(" · "),
-                    quality
-                )
-            )
-        }
-        val slots = arrayOfNulls<List<DownloadOption>>(ordered.size)
-        for ((i, s) in ordered.withIndex()) slots[i] = row(s, "checking size…")
-        suspend fun emit() {
-            val flat = synchronized(slots) { slots.flatMap { it ?: emptyList() }.distinctBy { it.stream.link } }
-            withContext(Dispatchers.Main) { onUpdate(flat) }
-        }
-        emit()
-        coroutineScope {
-            ordered.forEachIndexed { i, s ->
-                launch(Dispatchers.IO) {
-                    val rows = try {
-                        optionsOf(app, s)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Throwable) {
-                        row(s, "size unavailable")
-                    }
-                    synchronized(slots) { slots[i] = rows.ifEmpty { row(s, "size unavailable") } }
-                    emit()
-                }
-            }
-        }
-    }
-
-    /** Name prefix of a server row that is a plain download file the player moved to because streaming did not work. */
-    const val DIRECT_PREFIX = "Direct · "
-
-    /**
-     * The plugin's own download link (a plain mp4 / mkv file) of the same movie / episode, for when the streaming link keeps
-     * buffering or does not play. Downloads from the same site work through the downloader, so the same link plays too.
-     * The file of the same server is preferred, at [targetHeight] or the closest quality; every candidate is checked first.
-     */
-    suspend fun resolveDownloadFallback(
-        context: Context,
-        plugin: MediaPluginInfo,
-        sourceLink: String,
-        sourceType: String,
-        preferServer: String?,
-        targetHeight: Int
-    ): MediaStream? {
-        return try {
-            val all = MediaProviderRepository.loadStreams(context, plugin.value, sourceLink, sourceType, true)
-            val files = all.distinctBy { it.link }.filter { s ->
-                !HlsVariants.looksLikeHls(s.link, s.type) && rank(s) in 1..3
-            }
-            if (files.isEmpty()) return null
-            val clean = preferServer?.removePrefix(DIRECT_PREFIX)
-            val sameServer = if (clean.isNullOrBlank()) emptyList() else files.filter { it.server.equals(clean, ignoreCase = true) }
-            val pool = if (sameServer.isNotEmpty()) sameServer else files
-            val known = pool.filter { heightOf(qualityOf(it)) > 0 }
-            // the best file that fits the wanted height, else the smallest one above it; files of unknown quality last
-            val ordered = known.filter { heightOf(qualityOf(it)) <= targetHeight }.sortedByDescending { heightOf(qualityOf(it)) } +
-                known.filter { heightOf(qualityOf(it)) > targetHeight }.sortedBy { heightOf(qualityOf(it)) } +
-                pool.filter { heightOf(qualityOf(it)) <= 0 }
-            val candidates = (ordered + files.filter { f -> ordered.none { it.link == f.link } }).distinctBy { it.link }
-            val outcome = StreamProbe.verify(context, candidates)
-            if (!outcome.anyWorks) return null
-            val pick = outcome.ordered.firstOrNull() ?: return null
-            pick.copy(
-                server = DIRECT_PREFIX + pick.server,
-                subtitles = all.flatMap { it.subtitles }.distinctBy { it.uri },
-                alternatives = emptyList(),
-                sourceLink = sourceLink,
-                sourceType = sourceType
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            null
         }
     }
 
@@ -512,25 +201,7 @@ object MediaPlayback {
         return existing == null
     }
 
-    /** Starts the download right away (no sheet); the plugin's headers are sent with it. Returns the status message. */
-    fun startDownload(context: Context, plugin: MediaPluginInfo, title: String, poster: String, stream: MediaStream): String {
-        val request = DownloadRequest(
-            source = stream.link,
-            title = title,
-            author = plugin.name,
-            isAudio = false,
-            formatSpec = null,
-            container = null,
-            estimatedBytes = 0L,
-            thumbnailUrl = poster.ifBlank { null },
-            headers = stream.headers
-        )
-        return try {
-            DownloadManager.enqueueCustom(context, request)
-        } catch (_: Throwable) {
-            "Could not start the download"
-        }
-    }
+
 }
 
 /** One quality of the audio (language) a title was opened with: the movie / episodes of it, or the link to open them. */
@@ -560,11 +231,6 @@ class PluginPlaybackSession(
     /** The video has really started once: after that the player never moves to another server on its own. */
     @Volatile var hasPlayed: Boolean = false
 ) {
-    /** The plugin link this movie / episode was resolved from: used to ask the plugin for a download link when streaming fails. */
-    @Volatile var sourceLink: String? = null
-    @Volatile var sourceType: String? = null
-    /** The download-link fallback was already used for the current server: it is not tried again and again. */
-    @Volatile var fallbackTried: Boolean = false
 }
 
 /** Stream URL -> session, so the player (which only gets a VideoItem) can find it. Small, in memory only. */
@@ -634,7 +300,7 @@ object PluginQueuedEpisodes {
     /** Gets the real stream of a queued episode and returns the item the player can open. */
     suspend fun resolve(context: Context, path: String): Result<VideoItem> {
         val ep = map[path] ?: return Result.failure(PluginException("this episode is no longer queued"))
-        val result = MediaPlayback.resolve(context, ep.plugin, ep.link, ep.type, false, ep.episodeTitle, if (ep.isSeries) ep.episodeIndex else -1)
+        val result = MediaPlayback.resolve(context, ep.plugin, ep.link, ep.type, ep.episodeTitle, if (ep.isSeries) ep.episodeIndex else -1)
         val stream = result.getOrNull() ?: return Result.failure(result.exceptionOrNull() ?: PluginException("no playable link was found"))
         val session = PluginPlaybackSession(
             plugin = ep.plugin,

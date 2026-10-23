@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Ported from mpvRx (https://github.com/Riteshp2001/mpvRx), AGPL-3.0-or-later.
+ * Ported from mpvRx (https://github.com/gyrolet/mpvRx), AGPL-3.0-or-later.
  * Adapted for Lumora (package com.example). This program is free software: you can
  * redistribute it and/or modify it under the terms of the GNU Affero General Public
  * License as published by the Free Software Foundation, either version 3 of the License, or
@@ -16,8 +16,10 @@ import android.system.Os
 import android.util.Log
 import com.example.BuildConfig
 import com.example.util.NetworkSettings
-import com.example.util.TlsCaBundle
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -58,6 +60,11 @@ object YtdlpManager {
   private const val MAX_PLAYLIST_OUTPUT_CHARS = 32L * 1024 * 1024
   private const val PLAYLIST_EXTRACTION_TIMEOUT_MS = 180_000L
   private val installMutex = Mutex()
+  private const val RELEASE_STABLE = "https://github.com/yt-dlp/yt-dlp/releases/latest"
+  private const val RELEASE_NIGHTLY = "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest"
+  private const val BUNDLED_ASSET = "ytdl/yt-dlp"
+  private const val AUTO_UPDATE_PREFS = "ytdlp_auto_update"
+  private const val AUTO_UPDATE_EVERY_MS = 12L * 60L * 60L * 1000L
 
   private val _installationInfo = MutableStateFlow<YtdlpInstallationInfo?>(null)
   val installationInfo: StateFlow<YtdlpInstallationInfo?> = _installationInfo.asStateFlow()
@@ -83,7 +90,7 @@ object YtdlpManager {
   // Lua patterns (ytdl_hook `exclude` syntax, `|`-separated) for direct media/manifest
   // paths. The prefix prevents an extension in a query parameter from bypassing yt-dlp;
   // the two suffixes cover plain and tokenized URLs. Loopback hosts are excluded outright:
-  // every SMB/FTP/SFTP/WebDAV/torrent stream is served by the app's own local proxy and
+  // every SMB/FTP/SFTP/WebDAV stream is served by the app's own local proxy and
   // must never be routed through yt-dlp, extension or not.
   private val DIRECT_MEDIA_EXCLUDE =
     (
@@ -266,24 +273,28 @@ object YtdlpManager {
       }
     }
 
-  /** `yt-dlp -J` of one link (quality list for the download options sheet). */
+  /**
+   * `yt-dlp -J` of one link (quality/metadata list for the Online Video playback quality menu). The warm [YtdlpWorker] answers first (no Python /
+   * yt-dlp start-up); only when the worker itself cannot, the one-shot yt-dlp command below is run like before.
+   */
   suspend fun dumpSingleJson(
     context: Context,
     source: String,
     preferences: YtdlPreferences,
+    headers: Map<String, String> = emptyMap(),
+    /** A yt-dlp `--format` selection (playback: the streams that are chosen come back as `requested_formats`). */
+    format: String? = null,
   ): Result<String> =
     withContext(Dispatchers.IO) {
       try {
-        if (!ensureRuntimeInstalled(context)) {
-          return@withContext Result.failure(IllegalStateException("yt-dlp is not installed"))
-        }
-        val output = StringBuilder()
-        val command =
+        val args =
           buildList {
-            add(getExecutablePath(context))
-            add(File(getYtdlDir(context), "yt-dlp").absolutePath)
             add("--ignore-config")
             add("--dump-single-json")
+            format?.takeIf { it.isNotBlank() }?.let {
+              add("--format")
+              add(it)
+            }
             add("--no-playlist")
             add("--skip-download")
             add("--no-warnings")
@@ -292,9 +303,22 @@ object YtdlpManager {
               add("--user-agent")
               add(it)
             }
-            preferences.referer.get().takeIf(String::isNotBlank)?.let {
+            if (preferences.customUserAgent.get().isBlank()) {
+              headers.entries.firstOrNull { it.key.equals("User-Agent", true) && it.value.isNotBlank() }?.let {
+                add("--user-agent")
+                add(it.value)
+              }
+            }
+            (preferences.referer.get().takeIf(String::isNotBlank)
+              ?: headers.entries.firstOrNull { it.key.equals("Referer", true) && it.value.isNotBlank() }?.value)?.let {
               add("--referer")
               add(it)
+            }
+            for ((k, v) in headers) {
+              if (k.isBlank() || v.isBlank() || k.equals("User-Agent", true) || k.equals("Referer", true) || k.equals("Referrer", true)) continue
+              if (k.lowercase() in setOf("host", "range", "accept-encoding", "content-length", "connection")) continue
+              add("--add-header")
+              add("$k:$v")
             }
             preferences.proxy.get().takeIf(String::isNotBlank)?.let {
               add("--proxy")
@@ -312,7 +336,29 @@ object YtdlpManager {
             File(context.applicationInfo.nativeLibraryDir, "libqjs.so").takeIf(File::isFile)?.let {
               add("--js-runtimes")
               add("quickjs:${it.absolutePath}")
+              // same as the playback stream resolver: without the solver script the quality list only holds the reduced set that
+              // the real download never sees (HLS renditions with a made-up size)
+              add("--remote-components")
+              add("ejs:github")
             }
+          }
+
+        // 1) the warm worker: no start-up cost after the first request
+        val warm = YtdlpWorker.request(context, args, source)
+        warm.getOrNull()?.let { return@withContext Result.success(it) }
+        val warmError = warm.exceptionOrNull()
+        if (warmError != null && warmError !is YtdlpWorkerUnavailable) return@withContext Result.failure(warmError)
+
+        // 2) the worker could not answer: one-shot yt-dlp (the old way)
+        if (!ensureRuntimeInstalled(context)) {
+          return@withContext Result.failure(IllegalStateException("yt-dlp is not installed"))
+        }
+        val output = StringBuilder()
+        val command =
+          buildList {
+            add(getExecutablePath(context))
+            add(File(getYtdlDir(context), "yt-dlp").absolutePath)
+            addAll(args)
             add("--")
             add(source)
           }
@@ -433,7 +479,7 @@ object YtdlpManager {
     }
   }
 
-  /** Ensures the yt-dlp runtime is installed regardless of URL shape (used by the downloader). */
+  /** Ensures the yt-dlp runtime is installed for yt-dlp-backed Online Video playback. */
   suspend fun ensureRuntimeInstalled(
     context: Context,
     onLog: (String) -> Unit = {},
@@ -463,18 +509,14 @@ object YtdlpManager {
     }
 
     // Files to copy from assets/ytdl/ to filesDir/ytdl/
-    val ytdlFiles = arrayOf("setup.py", "python313.zip")
+    val ytdlFiles = arrayOf("setup.py", "python313.zip", "ytdlp_worker.py")
     var copied = true
     for (name in ytdlFiles) {
       copied = copyAssetFile(context, "ytdl/$name", File(ytdlDir, name), onLog) && copied
     }
 
-    // cacert.pem (filesDir/): Lumora already builds it from the phone's own trust store (TlsCaBundle), which is
-    // what yt-dlp's TLS and mpv's tls-ca-file read.
-    if (TlsCaBundle.path(context) == null) {
-      onLog("cacert.pem: could not build the CA bundle\n")
-      copied = false
-    }
+    // cacert.pem goes to filesDir/
+    copied = copyAssetFile(context, "cacert.pem", File(context.filesDir, "cacert.pem"), onLog) && copied
 
     copyAssetFile(context, "ytdl/wrapper", File(ytdlDir, "wrapper"), onLog)
     // Set executable permission on wrapper (just in case it's used)
@@ -681,12 +723,35 @@ object YtdlpManager {
       options["exclude"] == DIRECT_MEDIA_EXCLUDE
   }
 
+  /**
+   * The native pieces yt-dlp runs on: libytdl.so (the bridge, built from src/main/cpp) loads libpython.so at run time. They
+   * are packaged per ABI by Gradle (src/ytdlp/jniLibs/<abi>/). When one is missing from the APK the process dies with
+   * "Could not load libpython.so: dlopen failed" — this check reports the real cause (and which file) BEFORE starting it.
+   */
+  private fun missingNativeRuntime(context: Context): List<String> {
+    val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
+    return listOf("libytdl.so", "libpython.so", "libqjs.so").filter { !File(nativeLibDir, it).isFile }
+  }
+
+  private fun nativeRuntimeReady(context: Context, onLog: (String) -> Unit): Boolean {
+    val missing = missingNativeRuntime(context)
+    if (missing.isEmpty()) return true
+    val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+    onLog(
+      "yt-dlp runtime is incomplete: ${missing.joinToString()} missing from this APK ($abi).\n" +
+        "Rebuild the app so that app/src/ytdlp/jniLibs/$abi/libpython.so is packaged (see the build-apk.yml step " +
+        "\"Fetch libpython.so\").\n",
+    )
+    return false
+  }
+
   suspend fun runInstall(
     context: Context,
     onLog: (String) -> Unit,
   ): Boolean =
     withContext(Dispatchers.IO) {
       installMutex.withLock {
+        if (!nativeRuntimeReady(context, onLog)) return@withLock false
         if (!prepareRuntimeAssets(context, onLog)) return@withLock false
         installYtdlp(context, onLog)
       }
@@ -698,6 +763,7 @@ object YtdlpManager {
   ): Boolean =
     withContext(Dispatchers.IO) {
       installMutex.withLock {
+        if (!nativeRuntimeReady(context, onLog)) return@withLock false
         if (!prepareRuntimeAssets(context, onLog) || !isInstalled(context)) {
           _installationInfo.value = readInstallationInfo(context)
           return@withLock false
@@ -707,8 +773,9 @@ object YtdlpManager {
         val pythonBinary = getExecutablePath(context)
         val ytDlp = File(ytdlDir, "yt-dlp").absolutePath
         if (!BuildConfig.ENABLE_YTDLP) return@withLock false
+        val direct = updateDirect(context, nightly = false, onLog = onLog)
         val command = mutableListOf(pythonBinary, ytDlp, "--update")
-        val updated = runPythonProcess("Updating yt-dlp...", command, context, onLog)
+        val updated = direct ?: runPythonProcess("Updating yt-dlp...", command, context, onLog)
         if (updated) {
           markPlaybackRuntimeReady(context)
         }
@@ -723,6 +790,7 @@ object YtdlpManager {
   ): Boolean =
     withContext(Dispatchers.IO) {
       installMutex.withLock {
+        if (!nativeRuntimeReady(context, onLog)) return@withLock false
         if (!prepareRuntimeAssets(context, onLog) || !isInstalled(context)) {
           _installationInfo.value = readInstallationInfo(context)
           return@withLock false
@@ -732,8 +800,9 @@ object YtdlpManager {
         val pythonBinary = getExecutablePath(context)
         val ytDlp = File(ytdlDir, "yt-dlp").absolutePath
         if (!BuildConfig.ENABLE_YTDLP) return@withLock false
+        val direct = updateDirect(context, nightly = true, onLog = onLog)
         val command = mutableListOf(pythonBinary, ytDlp, "--update-to", "nightly")
-        val updated = runPythonProcess("Updating to yt-dlp nightly...", command, context, onLog)
+        val updated = direct ?: runPythonProcess("Updating to yt-dlp nightly...", command, context, onLog)
         if (updated) {
           markPlaybackRuntimeReady(context)
         }
@@ -762,6 +831,17 @@ object YtdlpManager {
     if (!isInstalled(context)) return YtdlpInstallationInfo.NotInstalled
 
     val ytdlFile = File(getYtdlDir(context), "yt-dlp")
+    // read from the zip itself: instant (the Python way below needs two process starts)
+    zipInfo(ytdlFile)?.let { info ->
+      return YtdlpInstallationInfo(
+        isInstalled = true,
+        version = info["version"],
+        channel = YtdlpReleaseChannel.resolve(info["channel"], info["origin"], info["version"]),
+        commitHash = info["release_git_head"]?.takeIf { it.isNotBlank() },
+        origin = info["origin"]?.takeIf { it.isNotBlank() },
+        variant = info["variant"]?.takeIf { it.isNotBlank() },
+      )
+    }
     val metadataOutput = StringBuilder()
     val metadataRead =
       executePythonProcess(
@@ -845,15 +925,162 @@ object YtdlpManager {
     onLog: (String) -> Unit,
   ): Boolean {
     if (!BuildConfig.ENABLE_YTDLP) return false
-    val ytdlDir = getYtdlDir(context)
-    val nativeLibDir = context.applicationInfo.nativeLibraryDir
-    val pythonBinary = getExecutablePath(context)
-    val setupPy = File(ytdlDir, "setup.py").absolutePath
-    val command = mutableListOf(pythonBinary, setupPy, nativeLibDir)
-    val installed = runPythonProcess("Installing yt-dlp...", command, context, onLog) && isInstalled(context)
-    if (installed) markPlaybackRuntimeReady(context)
+    val target = File(getYtdlDir(context), "yt-dlp")
+    // 1) the yt-dlp that the build already put into the app: copying it takes a moment (no download, no Python start)
+    var installed = installBundled(context, target, onLog)
+    // 2) a direct download (no Python start, validated as a zip before it replaces anything)
+    if (!installed) {
+      onLog("Installing yt-dlp (this build has no bundled copy)...\n")
+      installed =
+        downloadYtdlp(RELEASE_STABLE, target, onLog) ||
+          downloadYtdlpFromPypi(target, onLog) ||
+          downloadYtdlp(RELEASE_NIGHTLY, target, onLog)
+    }
+    // 3) last resort: the old Python based installer
+    if (!installed) {
+      val ytdlDir = getYtdlDir(context)
+      val command = mutableListOf(getExecutablePath(context), File(ytdlDir, "setup.py").absolutePath, context.applicationInfo.nativeLibraryDir)
+      installed = runPythonProcess("Installing yt-dlp...", command, context, onLog) && isInstalled(context)
+    }
+    if (installed) {
+      markPlaybackRuntimeReady(context)
+      YtdlpWorker.stop()
+    }
     _installationInfo.value = readInstallationInfo(context)
+    if (installed) YtdlpWorker.prewarm(context)
     return installed
+  }
+
+  private fun installBundled(
+    context: Context,
+    target: File,
+    onLog: (String) -> Unit,
+  ): Boolean {
+    val tmp = File(target.parentFile, "yt-dlp.bundled")
+    return try {
+      context.assets.open(BUNDLED_ASSET).use { input ->
+        FileOutputStream(tmp).use { output -> input.copyTo(output, 64 * 1024) }
+      }
+      if (!isValidYtdlpZip(tmp)) {
+        tmp.delete()
+        false
+      } else {
+        tmp.setReadable(true, true)
+        tmp.setWritable(true, true)
+        if (!tmp.renameTo(target)) throw IOException("could not move yt-dlp into place")
+        onLog("yt-dlp ${zipInfo(target)?.get("version").orEmpty()} installed.\n")
+        true
+      }
+    } catch (e: Exception) {
+      // no bundled copy in this build (or a broken one): the download below is used
+      tmp.delete()
+      false
+    }
+  }
+
+  /** A yt-dlp zipapp: opens as a zip and holds yt_dlp/version.py (checking this takes milliseconds, running it takes seconds). */
+  private fun isValidYtdlpZip(file: File): Boolean =
+    file.isFile && file.length() > 500_000L &&
+      runCatching { java.util.zip.ZipFile(file).use { it.getEntry("yt_dlp/version.py") != null && it.getEntry("__main__.py") != null } }
+        .getOrDefault(false)
+
+  /** version / channel / commit / origin read straight out of the zip. */
+  private fun zipInfo(file: File): Map<String, String>? =
+    runCatching {
+      java.util.zip.ZipFile(file).use { zip ->
+        val entry = zip.getEntry("yt_dlp/version.py") ?: return@use null
+        val text = zip.getInputStream(entry).bufferedReader().use { it.readText() }
+        val out = HashMap<String, String>()
+        for (key in listOf("__version__", "RELEASE_GIT_HEAD", "CHANNEL", "ORIGIN", "VARIANT")) {
+          Regex("^" + key + """\s*=\s*['"]([^'"]*)['"]""", RegexOption.MULTILINE).find(text)?.let {
+            out[if (key == "__version__") "version" else key.lowercase()] = it.groupValues[1]
+          }
+        }
+        out.takeIf { it.containsKey("version") }
+      }
+    }.getOrNull()
+
+  private fun latestTag(releaseUrl: String): String? = YtdlpFetch.latestTag(releaseUrl)
+
+  /** Downloads the newest yt-dlp of [releaseUrl] next to [target] and swaps it in only when it is a valid yt-dlp. */
+  private fun downloadYtdlp(
+    releaseUrl: String,
+    target: File,
+    onLog: (String) -> Unit,
+  ): Boolean = fetchYtdlp(target, onLog, "GitHub") { tmp -> YtdlpFetch.download("$releaseUrl/download/yt-dlp", tmp) }
+
+  /** The same release from PyPI (another host: works when github.com does not). */
+  private fun downloadYtdlpFromPypi(
+    target: File,
+    onLog: (String) -> Unit,
+  ): Boolean = fetchYtdlp(target, onLog, "PyPI") { tmp -> YtdlpFetch.downloadFromPypi(tmp) }
+
+  private fun fetchYtdlp(
+    target: File,
+    onLog: (String) -> Unit,
+    sourceName: String,
+    fetch: (File) -> Unit,
+  ): Boolean {
+    val tmp = File(target.parentFile, "yt-dlp.download")
+    repeat(2) { attempt ->
+      try {
+        tmp.delete()
+        fetch(tmp)
+        if (!isValidYtdlpZip(tmp)) throw IOException("the downloaded file is not a yt-dlp release")
+        tmp.setReadable(true, true)
+        tmp.setWritable(true, true)
+        if (!tmp.renameTo(target)) throw IOException("could not move yt-dlp into place")
+        onLog("yt-dlp ${zipInfo(target)?.get("version").orEmpty()} downloaded ($sourceName).\n")
+        return true
+      } catch (e: Exception) {
+        tmp.delete()
+        Log.w(TAG, "yt-dlp download from $sourceName, attempt ${attempt + 1}: ${e.message}")
+        if (attempt == 0) Thread.sleep(500L) else onLog("$sourceName: ${e.message}\n")
+      }
+    }
+    return false
+  }
+
+  /** Update to the newest release of the channel: nothing is downloaded when the installed version is already it. */
+  private fun updateDirect(
+    context: Context,
+    nightly: Boolean,
+    onLog: (String) -> Unit,
+  ): Boolean? {
+    val target = File(getYtdlDir(context), "yt-dlp")
+    val releaseUrl = if (nightly) RELEASE_NIGHTLY else RELEASE_STABLE
+    val installed = zipInfo(target)
+    val installedVersion = installed?.get("version")
+    val installedNightly = installed?.get("origin")?.contains("nightly", true) == true
+    onLog(if (nightly) "Checking for yt-dlp nightly...\n" else "Checking for yt-dlp updates...\n")
+    val latest = latestTag(releaseUrl)
+    if (latest != null && latest == installedVersion && installedNightly == nightly) {
+      onLog("yt-dlp is already the latest version ($latest).\n")
+      return true
+    }
+    if (!downloadYtdlp(releaseUrl, target, onLog) && !(!nightly && downloadYtdlpFromPypi(target, onLog))) return null
+    markPlaybackRuntimeReady(context)
+    YtdlpWorker.stop()
+    return true
+  }
+
+  /** Quiet daily check (a few hundred bytes when nothing is new); the worker restarts on the new version by itself. */
+  fun autoUpdateIfStale(context: Context) {
+    if (!BuildConfig.ENABLE_YTDLP) return
+    val app = context.applicationContext
+    val prefs = app.getSharedPreferences(AUTO_UPDATE_PREFS, Context.MODE_PRIVATE)
+    val now = System.currentTimeMillis()
+    if (now - prefs.getLong("checked_at", 0L) < AUTO_UPDATE_EVERY_MS) return
+    prefs.edit().putLong("checked_at", now).apply()
+    CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+      installMutex.withLock {
+        if (!isInstalled(app)) return@withLock
+        val nightly = zipInfo(File(getYtdlDir(app), "yt-dlp"))?.get("origin")?.contains("nightly", true) == true
+        if (updateDirect(app, nightly) { } == true) {
+          _installationInfo.value = readInstallationInfo(app)
+        }
+      }
+    }
   }
 
   private fun runPythonProcess(
@@ -924,11 +1151,12 @@ object YtdlpManager {
   internal fun startPythonProcess(
     command: List<String>,
     context: Context,
+    mergeStderr: Boolean = true,
   ): Process {
     val processBuilder =
       ProcessBuilder(command)
         .directory(getYtdlDir(context))
-        .redirectErrorStream(true)
+        .redirectErrorStream(mergeStderr)
     val env = processBuilder.environment()
     val ytdlDir = getYtdlDir(context).absolutePath
     val nativeLibDir = context.applicationInfo.nativeLibraryDir

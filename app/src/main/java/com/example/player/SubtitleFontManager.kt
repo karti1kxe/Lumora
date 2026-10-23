@@ -572,7 +572,7 @@ object SubtitleFontManager {
                 if (inStyles && t.startsWith("Style:", ignoreCase = true)) {
                     val idx = original.indexOf("Style:", ignoreCase = true)
                     val head = original.substring(0, idx + 6)
-                    val parts = original.substring(idx + 6).split(",", limit = -1).toMutableList()
+                    val parts = original.substring(idx + 6).split(",").toMutableList()
                     val fontIndex = format.indexOf("fontname").takeIf { it >= 0 } ?: 1
                     if (fontIndex in parts.indices) {
                         val lead = if (parts[fontIndex].isNotEmpty() && parts[fontIndex].first() == ' ') " " else ""
@@ -821,7 +821,7 @@ object SubtitleFontManager {
                 if (inStylesSection && trimmed.startsWith("Style:", ignoreCase = true)) {
                     val prefixLength = original.indexOf("Style:", ignoreCase = true)
                     val prefix = if (prefixLength >= 0) original.substring(0, prefixLength) else ""
-                    val parts = trimmed.substringAfter(":").split(",", limit = -1).toMutableList()
+                    val parts = trimmed.substringAfter(":").split(",").toMutableList()
                     val fontIndex = styleFormatFields.indexOf("fontname").takeIf { it >= 0 } ?: 1
                     if (fontIndex in parts.indices) {
                         parts[fontIndex] = fallbackFont(parts[fontIndex])
@@ -905,7 +905,7 @@ object SubtitleFontManager {
             if (inStyles && t.startsWith("Style:", ignoreCase = true)) {
                 val idx = original.indexOf("Style:", ignoreCase = true)
                 val head = original.substring(0, idx + 6)
-                val parts = original.substring(idx + 6).split(",", limit = -1).toMutableList()
+                val parts = original.substring(idx + 6).split(",").toMutableList()
                 val fontIndex = format.indexOf("fontname").takeIf { it >= 0 } ?: 1
                 if (fontIndex in parts.indices) {
                     val before = parts[fontIndex]
@@ -1225,12 +1225,12 @@ object SubtitleFontManager {
         return deletedCount
     }
 
-    // The app's OWN UI/branding font (assets/fonts/LTWave-Bold.otf, used by ui/theme/Type.kt
+    // The app's OWN UI/branding font (assets/fonts/Lumora.ttf, used by ui/theme/Type.kt
     // for on-screen text) must never end up in the subtitle font picker. It used to be swept
     // in here along with everything else under assets/fonts/, so it silently appeared in
     // "Settings → Subtitles → Fonts" and in the in-player font list as if the user had
     // uploaded it themselves — with no way to tell it apart from a real custom subtitle font.
-    private val NON_SUBTITLE_ASSET_FONT_BASENAMES = setOf("ltwave-bold", "ltwave_bold", "ltwave")
+    private val NON_SUBTITLE_ASSET_FONT_BASENAMES = setOf("lumora")
 
     private fun copyAssetFonts(context: Context, destDir: File) {
         val assetManager = context.assets

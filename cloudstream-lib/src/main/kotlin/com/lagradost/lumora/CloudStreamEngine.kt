@@ -160,7 +160,7 @@ object CloudStreamEngine {
     }
 
     private fun entry(pluginId: String): Loaded =
-        loaded[pluginId] ?: throw IllegalStateException("This extension is not loaded. Open the Media list and download it again.")
+        loaded[pluginId] ?: throw IllegalStateException("This extension is not loaded. Re-import its local plugin file to use it again.")
 
     // ---- link encoding: a plugin may register several providers, so their name travels with every link ----
 
@@ -370,7 +370,7 @@ object CloudStreamEngine {
     }
 
     /** `[{server, link, type, quality, headers, subtitles}]` - what the extension's loadLinks found for [link]. */
-    suspend fun streamsJson(context: Context, pluginId: String, link: String, forDownload: Boolean = false): String {
+    suspend fun streamsJson(context: Context, pluginId: String, link: String): String {
         init(context)
         val l = entry(pluginId)
         if (link.startsWith(TORRENT_PREFIX)) {
@@ -383,14 +383,11 @@ object CloudStreamEngine {
         val (api, data) = decode(l, link)
         val links = java.util.Collections.synchronizedList(ArrayList<ExtractorLink>())
         val subs = java.util.Collections.synchronizedList(ArrayList<SubtitleFile>())
-        // A provider asks many servers one after the other / at once and only answers "done" when the slowest one has
-        // finished. The first links are usable long before that, so the call ends as soon as links have arrived and no
-        // new one came for a short moment (longer for the download list, which wants every server), instead of waiting
-        // for the slowest or hanging server.
+        // Providers may resolve several servers; playback only needs the first stable group of usable links.
         val firstAt = AtomicLong(0L)
         val lastAt = AtomicLong(0L)
-        val idleMs = if (forDownload) 1_500L else 500L
-        val afterFirstMs = if (forDownload) 6_000L else 1_800L
+        val idleMs = 500L
+        val afterFirstMs = 1_800L
         val loadError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
         val job = fetchScope.launch {
             try {

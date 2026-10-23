@@ -164,6 +164,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Erase legacy persistent download history; only the current session's torrent queue remains.
+        com.example.util.DownloadStore.init(applicationContext)
         enableEdgeToEdge()
         val initiallyGranted = hasVideoPermission(this)
         viewModel.setHasMediaPermission(initiallyGranted)
@@ -171,7 +173,6 @@ class MainActivity : ComponentActivity() {
         // full-library scan here every time the Activity is recreated.
         com.example.util.AppStorageManager.performBackgroundCleanup(applicationContext)
         // downloads that were running when the app was closed continue by themselves, from where they stopped
-        try { com.example.util.DownloadManager.resumeInterrupted(applicationContext) } catch (_: Throwable) {}
         PipModeState.requestPipUpdate = { isPlaying, autoPip ->
             updatePipParams(isPlaying, autoPip)
         }
@@ -423,15 +424,11 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                // Torrent file picker (magnet / .torrent from the Network tab or from another app)
+                // Torrent file picker (download only; magnet / .torrent from the Network tab or from another app)
                 com.example.ui.components.TorrentPickerHost(
                     isDark = uiState.themeMode == ThemeMode.DARK ||
                         (uiState.themeMode == ThemeMode.SYSTEM && androidx.compose.foundation.isSystemInDarkTheme()),
-                    glassBlurTransparency = uiState.glassBlurTransparency,
-                    onPlay = { video, playlist ->
-                        com.example.util.MediaSeenManager.markSeen(this@MainActivity, video.path, video.id)
-                        viewModel.startPlaying(video, playlist)
-                    }
+                    glassBlurTransparency = uiState.glassBlurTransparency
                 )
             }
         }
@@ -600,7 +597,7 @@ class MainActivity : ComponentActivity() {
         com.example.torrent.torrentSourceFromIntent(intent)?.let { torrentSource ->
             if (intent.getBooleanExtra("lumora_torrent_handled", false)) return
             intent.putExtra("lumora_torrent_handled", true)
-            com.example.torrent.TorrentPickerState.open(torrentSource, com.example.torrent.TorrentPickerMode.PLAY)
+            com.example.torrent.TorrentPickerState.open(torrentSource)
             return
         }
 
